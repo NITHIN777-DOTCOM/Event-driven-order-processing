@@ -16,7 +16,7 @@
 
 ## Highlights
 
-- **Saga with real compensation.** If payment or completion fails, the workflow undoes its own steps in reverse order: it **refunds** the wallet, **releases** the reserved stock, marks the order FAILED with a readable reason, and emails the customer.
+- **Saga with real compensation.** If payment or completion fails, the workflow undoes its own steps in reverse order: it **refunds** the wallet, **releases** the reserved stock, marks the order FAILED with a readable reason, and sends a notification via SNS.
 - **Idempotent at three layers.** An `Idempotency-Key` on `POST /orders` stops duplicate orders. The execution name equals the `orderId`, so a duplicate SQS delivery can't start a second saga. Payment and refund are conditional on `paymentId` / `refunded`, so a customer is **never charged or refunded twice**.
 - **Atomic money movement.** A payment is one DynamoDB `TransactWriteItems` across three tables (wallet balance, ledger entry, order), conditional on enough balance and no prior payment. A low balance is a **real** decline, not a simulated one.
 - **Retries where they help, not where they hurt.** Transient payment errors are retried with exponential backoff (2 s → 4 s → 8 s). A permanent decline goes straight to compensation.
@@ -173,6 +173,9 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
     <td><img src="docs/images/tracker-live-feed.webp" alt="Order tracker live feed"><br><sub><b>Tracker</b>: progress steps and what each AWS service did</sub></td>
     <td align="center"><img src="docs/images/mobile-tracker.webp" alt="Mobile order tracker" width="220"><br><sub><b>Mobile</b>: responsive down to 360 px</sub></td>
   </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/images/sfn-declined.webp" alt="Step Functions graph of a payment-declined execution" width="560"><br><sub>Saga compensation in the Step Functions console</sub></td>
+  </tr>
 </table>
 
 ---
@@ -246,6 +249,7 @@ docs/              progress log, evidence, images, resume bullets
 - [ ] Cognito sign-in for customers; wallets keyed by user ID
 - [ ] Publish order events to EventBridge (analytics, a shipping service)
 - [ ] Shipping step in the saga, with a cancellation window
+- [ ] Per-customer emails with Amazon SES (SNS topic currently notifies a single subscribed inbox)
 - [ ] Transactional outbox (DynamoDB Streams → Pipes) for create_order
 - [ ] AWS WAF on CloudFront, and a custom domain with ACM
 
