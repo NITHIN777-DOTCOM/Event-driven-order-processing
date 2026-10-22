@@ -144,7 +144,10 @@ export function Layout() {
 
       <footer className="border-t border-line">
         <div className="mx-auto flex max-w-content flex-wrap items-center justify-between gap-2 px-4 py-6 text-sm text-muted sm:px-8">
-          <span>API Gateway · SQS · Step Functions · Lambda · DynamoDB · SNS</span>
+          <span>
+            API Gateway · SQS · Step Functions · Lambda · DynamoDB · SNS
+            <span className="ml-3 rounded-full bg-cream px-2 py-0.5 text-xs font-semibold text-ink">v1.1 · deployed by GitHub Actions</span>
+          </span>
           <a href={GITHUB_URL} target="_blank" rel="noreferrer" className="font-medium text-muted-strong hover:text-ink">
             GitHub
           </a>
