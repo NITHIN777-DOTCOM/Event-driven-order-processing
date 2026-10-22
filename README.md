@@ -1,5 +1,7 @@
 # Event-Driven E-Commerce Order Processing on AWS
 
+[![CI](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/ci.yml/badge.svg)](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/ci.yml) [![Deploy](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/deploy.yml/badge.svg)](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/deploy.yml)
+
 > 🚧 **Work in progress.** It is being built phase by phase. See [docs/progress.md](docs/progress.md).
 
 A serverless, event-driven order-processing system on AWS that uses the **saga pattern**. An API Gateway
@@ -54,6 +56,18 @@ All product photos are from [Unsplash](https://unsplash.com) under the
 | Aluminium Laptop Stand | Rolf van Root | https://unsplash.com/photos/ISmVDb_20_g |
 | Felt and Leather Desk Mat | Muhammet Sain | https://unsplash.com/photos/8e9KCdOj29o |
 | 1080p Streaming Webcam | Bedirhan Gul | https://unsplash.com/photos/Gq8qdtRwwJs |
+
+## CI/CD (GitHub Actions + OIDC, no stored AWS keys)
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `ci.yml` | every push and PR | pytest (coverage ≥ 85%), `terraform fmt -check` + `validate` for both stacks, frontend typecheck + build. **On PRs:** a read-only `terraform plan` (role `order-saga-github-plan-role`) posted as a PR comment |
+| `deploy.yml` | CI green on `main`, or manual | `terraform apply` with `order-saga-github-deploy-role`, publish the storefront, smoke test (1 real order → COMPLETED, exactly 1 wallet DEBIT), job summary |
+
+The roles live in `infra/bootstrap/github_oidc.tf`. Their trust policies accept only GitHub's OIDC token for
+**this repository**: `ref:refs/heads/main` for deploy and `pull_request` for plan. Sessions last at most 1 h.
+The deploy role is scoped to `order-saga-*` resources and is explicitly denied from editing its own IAM role.
+Repo variables (not secrets): `AWS_DEPLOY_ROLE_ARN`, `AWS_PLAN_ROLE_ARN`, `ALERT_EMAIL`.
 
 ## DemoPay wallet
 

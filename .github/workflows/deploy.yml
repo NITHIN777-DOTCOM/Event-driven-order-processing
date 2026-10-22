@@ -1,0 +1,77 @@
+# Deploy: after CI passes on main (or on manual dispatch), apply the infrastructure, publish the
+# storefront and smoke-test the live system. AWS access is a short-lived OIDC session for
+# order-saga-github-deploy-role; there are no stored keys.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never two applies at once, and never cancel one half-way through.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.16.6"
+  AWS_REGION: ap-south-1
+
+jobs:
+  deploy:
+    name: Apply + publish + smoke test
+    # Only when CI on main succeeded (a push event, not a PR), or when started by hand.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write # OIDC token for AWS
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Deploy exactly the commit CI tested, not whatever main points to now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install boto3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: order-saga-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - name: terraform apply (infra/main)
+        working-directory: infra/main
+        env:
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+        run: |
+          terraform init -input=false
+          terraform plan -input=false -no-color -lock-timeout=300s -out=tfplan
+          terraform apply -input=false -no-color -lock-timeout=300s tfplan
+
+      - name: Publish storefront (S3 + CloudFront invalidation)
+        run: python scripts/deploy_frontend.py
+
+      - name: Smoke test (one real order, wallet debited exactly once)
+        env:
+          GITHUB_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: python scripts/smoke_test.py

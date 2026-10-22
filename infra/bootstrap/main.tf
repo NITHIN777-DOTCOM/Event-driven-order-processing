@@ -1,8 +1,9 @@
 data "aws_caller_identity" "current" {}
 
 locals {
+  account_id = data.aws_caller_identity.current.account_id
   # Account ID suffix keeps the bucket name globally unique.
-  state_bucket_name = "${var.project_prefix}-tfstate-${data.aws_caller_identity.current.account_id}"
+  state_bucket_name = "${var.project_prefix}-tfstate-${local.account_id}"
 }
 
 # ---------------------------------------------------------------------------

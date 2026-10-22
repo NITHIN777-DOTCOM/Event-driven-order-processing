@@ -20,3 +20,9 @@ variable "monthly_budget_usd" {
   type        = string
   default     = "5"
 }
+
+variable "github_repository" {
+  description = "owner/repo allowed to assume the CI/CD roles (case-sensitive, as GitHub reports it)."
+  type        = string
+  default     = "NITHIN777-DOTCOM/Event-driven-order-processing"
+}
