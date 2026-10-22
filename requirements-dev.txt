@@ -1,0 +1,5 @@
+# Local development / test dependencies (Lambda runtime provides boto3 itself).
+boto3
+pytest
+moto
+pytest-cov

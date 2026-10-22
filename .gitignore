@@ -1,0 +1,27 @@
+# Terraform: provider caches and state never go to git.
+# NOTE: .terraform.lock.hcl is intentionally COMMITTED (pins provider versions).
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+*.tfplan
+*.tfvars
+!*.tfvars.example
+
+# Secrets / local env
+.env
+
+# Build artifacts (Lambda zips are built by Terraform archive_file)
+build/
+dist/
+*.zip
+
+# Python
+__pycache__/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node (frontend / tooling)
+node_modules/
