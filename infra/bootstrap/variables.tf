@@ -26,3 +26,9 @@ variable "github_repository" {
   type        = string
   default     = "NITHIN777-DOTCOM/Event-driven-order-processing"
 }
+
+variable "github_oidc_subject_prefix" {
+  description = "Prefix of the GitHub OIDC 'sub' claim for this repo (immutable owner/repo IDs). See github_oidc.tf."
+  type        = string
+  default     = "repo:NITHIN777-DOTCOM@180836916/Event-driven-order-processing@1429553651"
+}

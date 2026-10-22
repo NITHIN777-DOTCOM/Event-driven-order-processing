@@ -3,13 +3,18 @@
 #
 # GitHub signs a JWT for each workflow run; AWS STS trusts it via this OIDC provider and lets the
 # run assume a role ONLY if the token's claims match the trust policy below:
-#   deploy role: this repository, branch main only        (sub = repo:<owner>/<repo>:ref:refs/heads/main)
-#   plan role:   pull requests in this repository only    (sub = repo:<owner>/<repo>:pull_request)
+#   deploy role: this repository, branch main only        (sub = <prefix>:ref:refs/heads/main)
+#   plan role:   pull requests in this repository only    (sub = <prefix>:pull_request)
 # Forks can't assume either role (their sub names a different repo).
+#
+# This repo uses GitHub's "immutable subject" format, which embeds the numeric owner and repo IDs:
+#   repo:NITHIN777-DOTCOM@180836916/Event-driven-order-processing@1429553651
+# (check with: gh api repos/<owner>/<repo>/actions/oidc/customization/sub). That's stronger than the
+# name-only form: a deleted-and-recreated repo with the same name gets a different ID and can't assume the roles.
 # =============================================================================
 
 locals {
-  github_sub_prefix = "repo:${var.github_repository}"
+  github_sub_prefix = var.github_oidc_subject_prefix
   # Every resource infra/main manages is named order-saga-*; the deploy role is scoped to that prefix.
   p = var.project_prefix
 }
