@@ -3,7 +3,7 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Phase 4.1 — Amazon-style catalog + DemoPay wallet: DONE (2026-10-22).** Next: **Phase 5 — CI/CD (GitHub Actions + OIDC).**
+**Phase 5 — CI/CD: DONE (2026-10-22).** Next: **Phase 6 — Load test (k6).**
 
 ## Done
 ### Phase 0
@@ -67,8 +67,19 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - Tests: 65 unit tests (95% coverage); e2e_test.py 8/8 (adds wallet checks + a real low-balance decline);
   capture_ui.py: 6/6 UI scenarios with ledger checks. Evidence: docs/evidence/e2e-failure-tests.md, docs/evidence/ui/.
 
-## Next (Phase 5)
-- GitHub Actions with OIDC: tests on PRs; terraform plan/apply + deploy_frontend on main.
+### Phase 5
+- infra/bootstrap/github_oidc.tf (applied locally): OIDC provider; `order-saga-github-deploy-role` (main only),
+  `order-saga-github-plan-role` (PRs). The trust uses the IMMUTABLE subject
+  `repo:NITHIN777-DOTCOM@180836916/Event-driven-order-processing@1429553651:...`.
+- .github/workflows/ci.yml (tests + coverage gate 85%, tf fmt/validate, frontend build, PR plan comment) and
+  deploy.yml (workflow_run after green CI on main: apply, deploy_frontend, smoke_test; concurrency deploy-main).
+- Repo variables set with gh: AWS_DEPLOY_ROLE_ARN, AWS_PLAN_ROLE_ARN, ALERT_EMAIL.
+- Proven: PR #1 (footer "v1.1 · deployed by GitHub Actions") -> plan comment -> merge -> Deploy -> live.
+  Evidence: docs/evidence/phase5-cicd.md.
+- From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
+
+## Next (Phase 6)
+- k6 load test against the API; watch the dashboard and alarms under load.
 
 ## Known limitations / ideas (good viva points)
 - DemoPay has no authentication: wallets are keyed by email, so anyone who knows an email can view or reset it (demo only).
