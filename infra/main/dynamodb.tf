@@ -25,6 +25,35 @@ resource "aws_dynamodb_table" "orders" {
   }
 }
 
+# Idempotency keys: one item per Idempotency-Key header -> the orderId it created.
+# Written in the SAME transaction as the order. DynamoDB TTL deletes records after 24 h, at no cost.
+resource "aws_dynamodb_table" "idempotency" {
+  name         = "${var.project_prefix}-idempotency"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "idempotencyKey"
+
+  deletion_protection_enabled = false
+
+  attribute {
+    name = "idempotencyKey"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expiresAt" # epoch seconds
+    enabled        = true
+  }
+
+  point_in_time_recovery {
+    enabled = false
+  }
+
+  tags = {
+    Name        = "${var.project_prefix}-idempotency"
+    Description = "Idempotency-Key to orderId map that prevents duplicate orders - expires after 24h via TTL"
+  }
+}
+
 # Inventory: one item per product. Fields: productId, name, price, stock, reserved.
 resource "aws_dynamodb_table" "inventory" {
   name         = "${var.project_prefix}-inventory"

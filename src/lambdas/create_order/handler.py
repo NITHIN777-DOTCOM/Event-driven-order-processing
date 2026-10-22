@@ -1,37 +1,47 @@
-"""POST /orders: validate and accept a new order.
+"""POST /orders: validate and accept a new order, exactly once per Idempotency-Key.
 
-Flow: validate the body -> price the items from the inventory table -> save the order as PENDING
--> enqueue {orderId} on SQS -> return 202 Accepted.
+Flow: read or generate the Idempotency-Key -> validate the body -> replay check -> price the items
+from the inventory table -> atomically save {idempotency record + PENDING order} -> enqueue
+{orderId} on SQS -> 202 Accepted.
 
 Reserving stock and taking payment happen later, asynchronously, in the Step Functions saga.
 That keeps this API fast, and the queue absorbs traffic spikes.
+
+Idempotency: when a client retries (a network timeout, a double-click, a load balancer retry)
+with the same Idempotency-Key, it gets the ORIGINAL order back (200, duplicate=true). A second
+order is never created and never enqueued, so it can never be charged twice.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
-from common.http import BadRequest, parse_json_body, response
-from common.logger import get_logger
-from common.orders import PENDING, history_entry
+from common.http import BadRequest, get_header, parse_json_body, response
+from common.logger import StructuredLogger, get_logger
+from common.orders import PENDING, cancellation_codes, history_entry
 from common.timeutil import utc_now_iso
 
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
 INVENTORY_TABLE = os.environ["INVENTORY_TABLE"]
+IDEMPOTENCY_TABLE = os.environ["IDEMPOTENCY_TABLE"]
 ORDERS_QUEUE_URL = os.environ["ORDERS_QUEUE_URL"]
 
 # Clients are created once per Lambda container and reused across invocations.
 dynamodb = boto3.resource("dynamodb")
 orders_table = dynamodb.Table(ORDERS_TABLE)
 inventory_table = dynamodb.Table(INVENTORY_TABLE)
+idempotency_table = dynamodb.Table(IDEMPOTENCY_TABLE)
 sqs = boto3.client("sqs")
 
 logger = get_logger("create_order")
@@ -40,28 +50,46 @@ CURRENCY = "INR"
 MAX_ITEMS = 20  # well under the DynamoDB transaction limit used by reserve_inventory
 MAX_QUANTITY = 50
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-# Demo control: lets the presenter force each failure path. Phase 2 implements the non-"none" modes.
+IDEMPOTENCY_HEADER = "Idempotency-Key"
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
+IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60  # DynamoDB TTL deletes the record after 24 h
+# Demo control: lets the presenter force each failure path of the saga.
 SIMULATE_MODES = ("none", "payment_declined", "payment_flaky", "out_of_stock", "poison")
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     log = logger.bind(requestId=event.get("requestContext", {}).get("requestId"))
     try:
+        key = idempotency_key_from(event)
         request = validate_request(parse_json_body(event))
-        order = build_order(request)
     except BadRequest as err:
         log.warning("Rejected order request", reason=str(err))
         return response(400, {"error": str(err)})
 
-    # Phase 2: the Idempotency-Key header is checked here, before anything is written.
+    log = log.bind(idempotencyKey=key)
+    fingerprint = request_fingerprint(request)
+
+    # Fast path: a replayed key returns the original order without touching inventory or SQS.
+    record = idempotency_table.get_item(Key={"idempotencyKey": key}, ConsistentRead=True).get("Item")
+    if record:
+        return replay(record, fingerprint, key, log)
+
+    try:
+        order = build_order(request, key)
+    except BadRequest as err:
+        log.warning("Rejected order request", reason=str(err))
+        return response(400, {"error": str(err)})
 
     log = log.bind(orderId=order["orderId"])
     try:
-        save_order(order)
+        if not save_order_once(order, key, fingerprint):
+            # Lost a race with a concurrent request that used the same key: replay the winner.
+            record = idempotency_table.get_item(Key={"idempotencyKey": key}, ConsistentRead=True)["Item"]
+            return replay(record, fingerprint, key, log)
         enqueue_order(order["orderId"])
     except Exception:
         log.exception("Failed to accept order")
-        return response(500, {"error": "Internal error, please retry"})
+        return response(500, {"error": "Internal error, please retry with the same Idempotency-Key"})
 
     log.info(
         "Order accepted",
@@ -69,7 +97,42 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         itemCount=len(order["items"]),
         simulate=order["simulate"],
     )
-    return response(202, {"orderId": order["orderId"], "status": PENDING})
+    return response(
+        202,
+        {"orderId": order["orderId"], "status": PENDING, "idempotencyKey": key, "duplicate": False},
+        headers={IDEMPOTENCY_HEADER: key},
+    )
+
+
+def idempotency_key_from(event: dict[str, Any]) -> str:
+    """Return the client's Idempotency-Key header, or generate one (the response returns it)."""
+    key = get_header(event, IDEMPOTENCY_HEADER)
+    if key is None:
+        return str(uuid.uuid4())
+    if not IDEMPOTENCY_KEY_PATTERN.match(key):
+        raise BadRequest("Idempotency-Key must be 1-128 characters: letters, digits, _ . : -")
+    return key
+
+
+def request_fingerprint(request: dict[str, Any]) -> str:
+    """Hash of the normalised request, so a reused key with a DIFFERENT body can be detected."""
+    return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+
+
+def replay(record: dict[str, Any], fingerprint: str, key: str, log: StructuredLogger) -> dict[str, Any]:
+    """Answer a repeated Idempotency-Key with the original order (never a new one)."""
+    log = log.bind(orderId=record["orderId"])
+    if record.get("requestHash") != fingerprint:
+        log.warning("Idempotency-Key reused with a different request body")
+        return response(409, {"error": "Idempotency-Key was already used with a different request"})
+
+    order = orders_table.get_item(Key={"orderId": record["orderId"]}, ConsistentRead=True)["Item"]
+    log.info("Duplicate request: returning the original order", status=order["status"])
+    return response(
+        200,
+        {"orderId": order["orderId"], "status": order["status"], "idempotencyKey": key, "duplicate": True},
+        headers={IDEMPOTENCY_HEADER: key, "Idempotent-Replayed": "true"},
+    )
 
 
 def validate_request(body: dict[str, Any]) -> dict[str, Any]:
@@ -146,12 +209,13 @@ def new_order_id() -> str:
     return f"ORD-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:8]}"
 
 
-def build_order(request: dict[str, Any]) -> dict[str, Any]:
+def build_order(request: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
     items = price_items(request["items"])
     total = sum((Decimal(i["quantity"]) * i["unitPrice"] for i in items), Decimal("0"))
     now = utc_now_iso()
     return {
         "orderId": new_order_id(),
+        "idempotencyKey": idempotency_key,
         "customerName": request["customerName"],
         "customerEmail": request["customerEmail"],
         "items": items,
@@ -165,9 +229,45 @@ def build_order(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def save_order(order: dict[str, Any]) -> None:
-    # The condition protects against a (very unlikely) orderId collision overwriting an order.
-    orders_table.put_item(Item=order, ConditionExpression="attribute_not_exists(orderId)")
+def save_order_once(order: dict[str, Any], key: str, fingerprint: str) -> bool:
+    """Atomically claim the idempotency key AND write the order. Returns False if the key is taken.
+
+    Because both writes are in one transaction, there can never be an order without its key
+    record, or a key record pointing at an order that doesn't exist.
+    """
+    try:
+        dynamodb.meta.client.transact_write_items(
+            TransactItems=[
+                {
+                    "Put": {
+                        "TableName": IDEMPOTENCY_TABLE,
+                        "Item": {
+                            "idempotencyKey": key,
+                            "orderId": order["orderId"],
+                            "requestHash": fingerprint,
+                            "createdAt": order["createdAt"],
+                            "expiresAt": int(time.time()) + IDEMPOTENCY_TTL_SECONDS,
+                        },
+                        "ConditionExpression": "attribute_not_exists(idempotencyKey)",
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName": ORDERS_TABLE,
+                        "Item": order,
+                        # Protects against a (very unlikely) orderId collision.
+                        "ConditionExpression": "attribute_not_exists(orderId)",
+                    }
+                },
+            ]
+        )
+    except ClientError as err:
+        if err.response["Error"]["Code"] == "TransactionCanceledException":
+            codes = cancellation_codes(err.response)
+            if codes and codes[0] == "ConditionalCheckFailed":
+                return False
+        raise
+    return True
 
 
 def enqueue_order(order_id: str) -> None:

@@ -27,6 +27,7 @@ os.environ.update(
     AWS_SESSION_TOKEN="testing",
     ORDERS_TABLE="test-orders",
     INVENTORY_TABLE="test-inventory",
+    IDEMPOTENCY_TABLE="test-idempotency",
     STATE_MACHINE_ARN=f"arn:aws:states:{REGION}:123456789012:stateMachine:test-workflow",
 )
 
@@ -38,7 +39,7 @@ PRODUCTS = [
 
 @pytest.fixture
 def aws():
-    """Mocked DynamoDB tables (inventory seeded) and an SQS queue."""
+    """Mocked DynamoDB tables (inventory seeded), an SQS queue and a Step Functions state machine."""
     with mock_aws():
         ddb = boto3.resource("dynamodb", region_name=REGION)
         orders = ddb.create_table(
@@ -53,6 +54,12 @@ def aws():
             AttributeDefinitions=[{"AttributeName": "productId", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
+        idempotency = ddb.create_table(
+            TableName="test-idempotency",
+            KeySchema=[{"AttributeName": "idempotencyKey", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "idempotencyKey", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
         for product in PRODUCTS:
             inventory.put_item(Item=product)
 
@@ -60,7 +67,22 @@ def aws():
         queue_url = sqs.create_queue(QueueName="test-orders-queue")["QueueUrl"]
         os.environ["ORDERS_QUEUE_URL"] = queue_url
 
-        yield SimpleNamespace(orders=orders, inventory=inventory, sqs=sqs, queue_url=queue_url)
+        sfn = boto3.client("stepfunctions", region_name=REGION)
+        state_machine_arn = sfn.create_state_machine(
+            name="test-workflow",
+            definition=json.dumps({"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}}),
+            roleArn="arn:aws:iam::123456789012:role/test-sfn-role",
+        )["stateMachineArn"]
+
+        yield SimpleNamespace(
+            orders=orders,
+            inventory=inventory,
+            idempotency=idempotency,
+            sqs=sqs,
+            queue_url=queue_url,
+            sfn=sfn,
+            state_machine_arn=state_machine_arn,
+        )
 
 
 @pytest.fixture
@@ -77,14 +99,21 @@ def load_handler(aws):
     return _load
 
 
-def api_event(body=None, path_parameters=None) -> dict:
+def api_event(body=None, path_parameters=None, headers=None) -> dict:
     """Return a minimal API Gateway HTTP API (payload v2.0) event."""
     return {
+        "headers": headers or {},
         "body": json.dumps(body) if isinstance(body, (dict, list)) else body,
         "isBase64Encoded": False,
         "pathParameters": path_parameters,
         "requestContext": {"requestId": "test-request"},
     }
+
+
+def stock_of(aws, product_id) -> tuple[int, int]:
+    """(stock, reserved) of a product."""
+    item = aws.inventory.get_item(Key={"productId": product_id})["Item"]
+    return int(item["stock"]), int(item["reserved"])
 
 
 def seed_order(orders_table, **overrides) -> dict:

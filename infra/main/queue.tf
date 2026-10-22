@@ -12,8 +12,10 @@ resource "aws_sqs_queue" "orders_dlq" {
 
 # Main queue between the API and the workflow. It buffers spikes and decouples the API from the saga.
 resource "aws_sqs_queue" "orders" {
-  name                       = "${var.project_prefix}-orders-queue"
-  visibility_timeout_seconds = 180 # 6x the 30s Lambda timeout (AWS guidance for Lambda consumers)
+  name = "${var.project_prefix}-orders-queue"
+  # 6x the start_workflow timeout (10 s), per AWS guidance for Lambda consumers. A failed message
+  # becomes visible again after 60 s, so a poison message reaches the DLQ after 3 receives (~3 min).
+  visibility_timeout_seconds = 60
   message_retention_seconds  = 4 * 24 * 60 * 60
   receive_wait_time_seconds  = 20 # long polling
   sqs_managed_sse_enabled    = true

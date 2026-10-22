@@ -32,14 +32,15 @@ data "aws_iam_policy_document" "create_order" {
   source_policy_documents = [data.aws_iam_policy_document.lambda_base["create_order"].json]
 
   statement {
-    sid       = "ReadProductPrices"
+    sid       = "ReadPricesKeysAndReplayedOrders"
     actions   = ["dynamodb:GetItem"]
-    resources = [aws_dynamodb_table.inventory.arn]
+    resources = [aws_dynamodb_table.inventory.arn, aws_dynamodb_table.idempotency.arn, aws_dynamodb_table.orders.arn]
   }
+  # TransactWriteItems is authorised per item: PutItem on the idempotency table and on the orders table.
   statement {
-    sid       = "WriteNewOrders"
+    sid       = "WriteOrderAndIdempotencyKey"
     actions   = ["dynamodb:PutItem"]
-    resources = [aws_dynamodb_table.orders.arn]
+    resources = [aws_dynamodb_table.orders.arn, aws_dynamodb_table.idempotency.arn]
   }
   statement {
     sid       = "EnqueueOrders"
@@ -67,14 +68,20 @@ data "aws_iam_policy_document" "start_workflow" {
     resources = [aws_sqs_queue.orders.arn]
   }
   statement {
-    sid       = "MarkOrderProcessing"
-    actions   = ["dynamodb:UpdateItem"]
+    sid       = "ReadAndMarkOrderProcessing"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
   }
   statement {
     sid       = "StartSagaExecution"
     actions   = ["states:StartExecution"]
     resources = [local.state_machine_arn]
+  }
+  # Used to tell a duplicate delivery apart from a retry after a failed StartExecution.
+  statement {
+    sid       = "CheckExistingExecution"
+    actions   = ["states:DescribeExecution"]
+    resources = ["${replace(local.state_machine_arn, ":stateMachine:", ":execution:")}:*"]
   }
 }
 
@@ -98,9 +105,24 @@ data "aws_iam_policy_document" "process_payment" {
   source_policy_documents = [data.aws_iam_policy_document.lambda_base["process_payment"].json]
 
   statement {
-    sid       = "MarkPaymentCaptured"
-    actions   = ["dynamodb:UpdateItem"]
+    sid       = "ReadOrderAndRecordPayment"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
+  }
+}
+
+data "aws_iam_policy_document" "release_inventory" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["release_inventory"].json]
+
+  statement {
+    sid       = "ReadOrder"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.orders.arn]
+  }
+  statement {
+    sid       = "ReturnStockAndMarkReleased"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.inventory.arn, aws_dynamodb_table.orders.arn]
   }
 }
 
@@ -111,6 +133,7 @@ locals {
     start_workflow    = data.aws_iam_policy_document.start_workflow.json
     reserve_inventory = data.aws_iam_policy_document.reserve_inventory.json
     process_payment   = data.aws_iam_policy_document.process_payment.json
+    release_inventory = data.aws_iam_policy_document.release_inventory.json
   }
 }
 
@@ -154,7 +177,7 @@ data "aws_iam_policy_document" "sfn" {
     sid     = "InvokeSagaLambdas"
     actions = ["lambda:InvokeFunction"]
     resources = flatten([
-      for key in ["reserve_inventory", "process_payment"] : [
+      for key in ["reserve_inventory", "process_payment", "release_inventory"] : [
         aws_lambda_function.fn[key].arn,
         "${aws_lambda_function.fn[key].arn}:*", # versions/aliases
       ]

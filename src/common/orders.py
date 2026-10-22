@@ -10,9 +10,11 @@ from common.timeutil import utc_now_iso
 PENDING = "PENDING"  # accepted by the API, waiting on the queue
 PROCESSING = "PROCESSING"  # Step Functions execution started
 RESERVED = "RESERVED"  # stock reserved for every item
+PAYMENT_RETRY = "PAYMENT_RETRY"  # a transient payment failure; Step Functions will retry
 PAYMENT_CAPTURED = "PAYMENT_CAPTURED"  # (simulated) payment succeeded
+INVENTORY_RELEASED = "INVENTORY_RELEASED"  # compensation: reserved stock given back
 COMPLETED = "COMPLETED"  # terminal: success (written by the state machine itself)
-FAILED = "FAILED"  # terminal: failure (Phase 2)
+FAILED = "FAILED"  # terminal: failure (written by the state machine itself)
 
 TERMINAL_STATUSES = frozenset({COMPLETED, FAILED})
 
@@ -22,13 +24,22 @@ def history_entry(status: str, detail: str, timestamp: str | None = None) -> dic
     return {"status": status, "timestamp": timestamp or utc_now_iso(), "detail": detail}
 
 
-def status_update(status: str, detail: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def status_update(
+    status: str,
+    detail: str,
+    extra: dict[str, Any] | None = None,
+    condition: str | None = None,
+    condition_values: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build UpdateItem arguments that change an order's status.
 
     In one atomic write it sets `status`, bumps `updatedAt`, appends a statusHistory entry and
     sets any `extra` attributes (e.g. executionArn, paymentId). The result can be passed to
     `Table.update_item(Key=..., **status_update(...))` or used as a TransactWriteItems "Update".
-    The condition stops a stray message from creating a half-empty "ghost" order.
+
+    The update only applies if the order exists, which stops a stray message from creating a
+    half-empty "ghost" order. Callers can AND in their own `condition` (it may use `#status`)
+    to make the write idempotent, e.g. "only if still PENDING".
     """
     now = utc_now_iso()
     names = {"#status": "status"}
@@ -47,9 +58,19 @@ def status_update(status: str, detail: str, extra: dict[str, Any] | None = None)
         values[f":x{index}"] = value
         assignments.append(f"#x{index} = :x{index}")
 
+    condition_expression = "attribute_exists(orderId)"
+    if condition:
+        condition_expression += f" AND ({condition})"
+        values.update(condition_values or {})
+
     return {
         "UpdateExpression": "SET " + ", ".join(assignments),
-        "ConditionExpression": "attribute_exists(orderId)",
+        "ConditionExpression": condition_expression,
         "ExpressionAttributeNames": names,
         "ExpressionAttributeValues": values,
     }
+
+
+def cancellation_codes(error_response: dict[str, Any]) -> list[str]:
+    """Per-item failure codes from a TransactionCanceledException, in TransactItems order."""
+    return [reason.get("Code", "None") for reason in error_response.get("CancellationReasons") or []]

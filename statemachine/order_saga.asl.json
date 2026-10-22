@@ -1,10 +1,10 @@
 {
-  "Comment": "Order saga (happy path): reserve inventory, capture payment, mark the order COMPLETED and email the customer. Retries and compensation are added in Phase 2.",
+  "Comment": "Order saga: reserve inventory, capture payment (with retries), then COMPLETE and notify. On failure it compensates: releases the reserved stock, marks the order FAILED with a reason, and notifies the customer.",
   "StartAt": "ReserveInventory",
   "States": {
     "ReserveInventory": {
       "Type": "Task",
-      "Comment": "Lambda order-saga-reserve-inventory: decrements stock for every item in ONE DynamoDB transaction (all or nothing) and marks the order RESERVED.",
+      "Comment": "Lambda order-saga-reserve-inventory: decrements stock for every item in ONE DynamoDB transaction (all or nothing) and marks the order RESERVED. Throws OutOfStock if any item is short.",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
         "FunctionName": "${reserve_inventory_function_arn}",
@@ -20,11 +20,40 @@
         "simulate.$": "$.Payload.simulate"
       },
       "ResultPath": "$.order",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "OutOfStock"
+          ],
+          "ResultPath": "$.error",
+          "Next": "DescribeFailure"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "DescribeFailure"
+        }
+      ],
       "Next": "ProcessPayment"
     },
     "ProcessPayment": {
       "Type": "Task",
-      "Comment": "Lambda order-saga-process-payment: simulated payment capture; the order's simulate field selects the behaviour.",
+      "Comment": "Lambda order-saga-process-payment: simulated payment capture. PaymentTransientError is retried (2s, 4s, 8s backoff); PaymentDeclined or retries running out triggers compensation.",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
         "FunctionName": "${process_payment_function_arn}",
@@ -40,6 +69,43 @@
         "status.$": "$.Payload.status"
       },
       "ResultPath": "$.payment",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "PaymentTransientError"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "PaymentDeclined"
+          ],
+          "ResultPath": "$.error",
+          "Next": "ReleaseInventory"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "ReleaseInventory"
+        }
+      ],
       "Next": "MarkOrderCompleted"
     },
     "MarkOrderCompleted": {
@@ -105,6 +171,128 @@
     "OrderCompleted": {
       "Type": "Succeed",
       "Comment": "Saga finished successfully: stock reserved, payment captured, order COMPLETED, customer notified."
+    },
+    "ReleaseInventory": {
+      "Type": "Task",
+      "Comment": "COMPENSATION - Lambda order-saga-release-inventory: gives back exactly the stock this order reserved. Idempotent, so retries can never double-release.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${release_inventory_function_arn}",
+        "Payload": {
+          "orderId.$": "$.orderId"
+        }
+      },
+      "ResultSelector": {
+        "released.$": "$.Payload.released"
+      },
+      "ResultPath": "$.release",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.releaseError",
+          "Next": "DescribeFailure"
+        }
+      ],
+      "Next": "DescribeFailure"
+    },
+    "DescribeFailure": {
+      "Type": "Pass",
+      "QueryLanguage": "JSONata",
+      "Comment": "Builds a readable failureReason such as 'PaymentDeclined: Card declined by issuer (simulated)' from the caught error. A Lambda error's Cause is a JSON string, so its errorMessage is extracted.",
+      "Output": "{% $merge([$states.input, {'failureReason': $states.input.error.Error & ': ' & ($contains($states.input.error.Cause, 'errorMessage') ? $parse($states.input.error.Cause).errorMessage : $states.input.error.Cause)}]) %}",
+      "Next": "MarkOrderFailed"
+    },
+    "MarkOrderFailed": {
+      "Type": "Task",
+      "Comment": "Direct DynamoDB UpdateItem integration (no Lambda): sets status FAILED and failureReason, and appends FAILED to statusHistory.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${orders_table_name}",
+        "Key": {
+          "orderId": {
+            "S.$": "$.orderId"
+          }
+        },
+        "UpdateExpression": "SET #status = :status, failureReason = :reason, updatedAt = :now, statusHistory = list_append(statusHistory, :entry)",
+        "ConditionExpression": "attribute_exists(orderId)",
+        "ExpressionAttributeNames": {
+          "#status": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {
+            "S": "FAILED"
+          },
+          ":reason": {
+            "S.$": "$.failureReason"
+          },
+          ":now": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":entry": {
+            "L": [
+              {
+                "M": {
+                  "status": {
+                    "S": "FAILED"
+                  },
+                  "timestamp": {
+                    "S.$": "$$.State.EnteredTime"
+                  },
+                  "detail": {
+                    "S.$": "$.failureReason"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "ResultPath": null,
+      "Next": "NotifyCustomerFailure"
+    },
+    "NotifyCustomerFailure": {
+      "Type": "Task",
+      "Comment": "Direct SNS Publish integration (no Lambda): tells the customer the order FAILED, why, and that any reserved stock was released and nothing was charged.",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${notifications_topic_arn}",
+        "Subject.$": "States.Format('Order {} FAILED: {}', $.orderId, $.error.Error)",
+        "Message.$": "States.Format('Hello,\n\nUnfortunately your order {} could not be completed.\n\nReason: {}\n\nYou have not been charged. Any stock reserved for this order has been released back to inventory.\n\nSorry for the inconvenience - Order Saga.', $.orderId, $.failureReason)"
+      },
+      "ResultSelector": {
+        "messageId.$": "$.MessageId"
+      },
+      "ResultPath": "$.notification",
+      "Next": "OrderFailed"
+    },
+    "OrderFailed": {
+      "Type": "Fail",
+      "Comment": "Saga ended in failure after compensation. The execution shows as FAILED in the console, with the reason as its Cause.",
+      "Error": "OrderFailed",
+      "CausePath": "$.failureReason"
     }
   }
 }

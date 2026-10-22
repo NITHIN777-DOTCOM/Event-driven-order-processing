@@ -15,6 +15,10 @@ output "inventory_table" {
   value = aws_dynamodb_table.inventory.name
 }
 
+output "idempotency_table" {
+  value = aws_dynamodb_table.idempotency.name
+}
+
 output "queue_url" {
   value = aws_sqs_queue.orders.url
 }
@@ -43,6 +47,7 @@ output "console_links" {
     orders_dlq      = "${local.console}/sqs/v3/home?region=${var.region}#/queues/${urlencode(aws_sqs_queue.orders_dlq.url)}"
     orders_table    = "${local.console}/dynamodbv2/home?region=${var.region}#table?name=${aws_dynamodb_table.orders.name}"
     inventory_table = "${local.console}/dynamodbv2/home?region=${var.region}#table?name=${aws_dynamodb_table.inventory.name}"
+    idempotency     = "${local.console}/dynamodbv2/home?region=${var.region}#table?name=${aws_dynamodb_table.idempotency.name}"
     api             = "${local.console}/apigateway/main/api-detail?api=${aws_apigatewayv2_api.orders.id}&region=${var.region}"
     lambdas         = "${local.console}/lambda/home?region=${var.region}#/functions?fo=and&o0=%3A&v0=${var.project_prefix}-"
     sns_topics      = "${local.console}/sns/v3/home?region=${var.region}#/topics"

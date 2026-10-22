@@ -23,13 +23,22 @@ def to_json(body: Any) -> str:
     return json.dumps(body, default=_json_default)
 
 
-def response(status_code: int, body: Any) -> dict[str, Any]:
+def response(status_code: int, body: Any, headers: dict[str, str] | None = None) -> dict[str, Any]:
     """Build an HTTP API proxy response. CORS headers are added by the API's CORS configuration."""
     return {
         "statusCode": status_code,
-        "headers": {"Content-Type": "application/json"},
+        "headers": {"Content-Type": "application/json", **(headers or {})},
         "body": to_json(body),
     }
+
+
+def get_header(event: dict[str, Any], name: str) -> str | None:
+    """Look up a request header by name, ignoring case (HTTP API sends lower-case names)."""
+    wanted = name.lower()
+    for key, value in (event.get("headers") or {}).items():
+        if key.lower() == wanted:
+            return value
+    return None
 
 
 def parse_json_body(event: dict[str, Any]) -> dict[str, Any]:

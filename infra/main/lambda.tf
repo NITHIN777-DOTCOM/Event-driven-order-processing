@@ -2,14 +2,18 @@ locals {
   src_dir   = "${path.module}/../../src"
   build_dir = "${path.module}/../../build"
 
+  default_lambda_timeout = 30
+
   # One entry per function. The key is the folder under src/lambdas/.
+  # `timeout` is optional (default 30 s).
   lambda_functions = {
     create_order = {
-      description = "POST /orders - validates the order, prices it from inventory, saves it as PENDING and enqueues it on SQS"
+      description = "POST /orders - idempotent (Idempotency-Key): validates and prices the order, saves it as PENDING and enqueues it on SQS"
       environment = {
-        ORDERS_TABLE     = aws_dynamodb_table.orders.name
-        INVENTORY_TABLE  = aws_dynamodb_table.inventory.name
-        ORDERS_QUEUE_URL = aws_sqs_queue.orders.url
+        ORDERS_TABLE      = aws_dynamodb_table.orders.name
+        INVENTORY_TABLE   = aws_dynamodb_table.inventory.name
+        IDEMPOTENCY_TABLE = aws_dynamodb_table.idempotency.name
+        ORDERS_QUEUE_URL  = aws_sqs_queue.orders.url
       }
     }
     get_order = {
@@ -19,7 +23,9 @@ locals {
       }
     }
     start_workflow = {
-      description = "SQS consumer - marks the order PROCESSING and starts one saga execution per order (execution name = orderId)"
+      description = "SQS consumer - starts exactly one saga execution per order (execution name = orderId); duplicates ignored and poison messages go to the DLQ"
+      # Short timeout so the queue visibility timeout (6x) can be 60 s: a poison message reaches the DLQ in about 3 min.
+      timeout = 10
       environment = {
         ORDERS_TABLE      = aws_dynamodb_table.orders.name
         STATE_MACHINE_ARN = local.state_machine_arn
@@ -33,9 +39,16 @@ locals {
       }
     }
     process_payment = {
-      description = "Saga step - simulated payment capture driven by the order's simulate field"
+      description = "Saga step - simulated payment (none / payment_declined / payment_flaky); never charges an order twice"
       environment = {
         ORDERS_TABLE = aws_dynamodb_table.orders.name
+      }
+    }
+    release_inventory = {
+      description = "Saga COMPENSATION - idempotently returns the stock an order reserved when a later step fails"
+      environment = {
+        ORDERS_TABLE    = aws_dynamodb_table.orders.name
+        INVENTORY_TABLE = aws_dynamodb_table.inventory.name
       }
     }
   }
@@ -85,7 +98,7 @@ resource "aws_lambda_function" "fn" {
   handler          = "handler.lambda_handler"
   filename         = data.archive_file.lambda[each.key].output_path
   source_code_hash = data.archive_file.lambda[each.key].output_base64sha256
-  timeout          = 30
+  timeout          = try(each.value.timeout, local.default_lambda_timeout)
   memory_size      = 256
 
   environment {

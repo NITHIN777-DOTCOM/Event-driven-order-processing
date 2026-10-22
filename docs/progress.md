@@ -3,7 +3,7 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Phase 1 — Core workflow: DONE (2026-10-22).** Next: **Phase 2 — Failure engineering + tests.**
+**Phase 2 — Failure engineering: DONE (2026-10-22).** Next: **Phase 3 — Monitoring.**
 
 ## Done
 ### Phase 0
@@ -15,20 +15,34 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - `infra/main` uses an S3 backend (`main/terraform.tfstate`, `use_lockfile = true`).
 
 ### Phase 1
-- 43 resources in `infra/main`: DynamoDB `order-saga-orders`/`-inventory`; SQS `order-saga-orders-queue`
-  (+ DLQ, maxReceiveCount 3); SNS `order-saga-notifications`/`-ops-alerts` (both email subscriptions
-  CONFIRMED); 5 Lambdas (arm64, py3.12, X-Ray, 7-day logs, one role each); STANDARD state machine
-  `order-saga-workflow` (ALL logging, tracing); HTTP API `order-saga-api` (CORS, JSON access logs, throttling).
+- DynamoDB `order-saga-orders`/`-inventory`; SQS `order-saga-orders-queue` + DLQ; SNS
+  `order-saga-notifications`/`-ops-alerts` (both email subscriptions CONFIRMED); Lambdas (arm64, py3.12,
+  X-Ray, 7-day logs, one role each); STANDARD state machine `order-saga-workflow`; HTTP API `order-saga-api`.
 - API: `https://8kyxed1rec.execute-api.ap-south-1.amazonaws.com`
-- Scripts: `seed_inventory.py`, `place_order.py`, `tf_outputs.py`. Unit tests: 16 passed, 95% coverage.
-- Verified 3 COMPLETED orders: see `docs/evidence/phase1-happy-path.md`.
+- Evidence: `docs/evidence/phase1-happy-path.md`.
 
-## Next (Phase 2)
-- Idempotency-Key in create_order (the hook comment is in the handler).
-- simulate modes: payment_declined, payment_flaky, out_of_stock, poison (hooks in process_payment / start_workflow).
-- ASL: Retry/Catch, compensation (ReleaseInventory -> MarkOrderFailed -> NotifyCustomer).
-- Make start_workflow's PROCESSING update conditional so a duplicate delivery doesn't append history twice.
-- Add unit tests for start_workflow.
+### Phase 2
+- New: Lambda `order-saga-release-inventory` (idempotent compensation); DynamoDB `order-saga-idempotency`
+  (TTL `expiresAt`, 24 h).
+- ASL: Retry (PaymentTransientError 2s/x3/backoff 2; Lambda service errors 1s/x2/backoff 2), Catch to
+  ReleaseInventory -> DescribeFailure (JSONata Pass) -> MarkOrderFailed -> NotifyCustomerFailure -> OrderFailed.
+- create_order: Idempotency-Key (generated if missing), transaction {key + order}, 200 duplicate replay,
+  409 if the key is reused with a different body.
+- start_workflow: reads the order, rejects poison messages, conditional PENDING->PROCESSING, DescribeExecution
+  to detect duplicates, ExecutionAlreadyExists = success. Timeout 10 s; queue visibility 60 s.
+- process_payment: simulate modes, paymentAttempts counter, PAYMENT_RETRY entries, no double charge.
+- Unit tests: 37 passed, 96% coverage. Live e2e: `scripts/e2e_test.py` 7/7 passed
+  (see `docs/evidence/phase2-failure-tests.md`).
+- The DLQ intentionally still holds the poison message for ORD-20261022-7b1a4028 (for screenshots). Do NOT purge it.
+
+## Next (Phase 3)
+- CloudWatch dashboard + alarms (DLQ depth > 0, Lambda errors, SFN ExecutionsFailed, API 5xx) -> ops-alerts topic.
+- X-Ray SDK instrumentation for boto3 calls (optional).
+
+## Known limitations / ideas (good viva points)
+- If create_order crashes after the DynamoDB transaction but before SQS SendMessage, the order stays PENDING,
+  and a client retry only replays it. Fix: a transactional outbox (DynamoDB Streams -> Pipes -> SQS).
+- HTTP APIs (API Gateway v2) don't support X-Ray tracing; only REST APIs do.
 
 ## Blockers / notes
 - None.

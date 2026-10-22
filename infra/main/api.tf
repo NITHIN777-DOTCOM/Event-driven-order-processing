@@ -7,7 +7,9 @@ resource "aws_apigatewayv2_api" "orders" {
     allow_origins = ["*"] # tightened to the CloudFront domain in Phase 4
     allow_methods = ["GET", "POST", "OPTIONS"]
     allow_headers = ["content-type", "idempotency-key"]
-    max_age       = 300
+    # Lets browser JavaScript read the idempotency response headers.
+    expose_headers = ["idempotency-key", "idempotent-replayed"]
+    max_age        = 300
   }
 }
 
