@@ -5,9 +5,34 @@ export type Simulate = "none" | "payment_declined" | "payment_flaky" | "out_of_s
 export interface Product {
   productId: string;
   name: string;
+  category: string;
   price: number;
+  mrp: number;
+  rating: number;
+  ratingCount: number;
   stock: number;
+  highlights: string[];
+  description: string;
   imageKey: string | null;
+}
+
+export type WalletTxnType = "DEBIT" | "CREDIT" | "ADJUST";
+
+export interface WalletTxn {
+  txnId: string;
+  type: WalletTxnType;
+  amount: number;
+  balanceAfter: number;
+  orderId: string | null;
+  ts: string;
+  note: string;
+}
+
+export interface Wallet {
+  walletId: string;
+  balance: number;
+  currency: string;
+  transactions: WalletTxn[];
 }
 
 export interface OrderItem {
@@ -57,6 +82,8 @@ export interface Order {
   failureReason?: string;
   deadLettered?: boolean;
   released?: boolean;
+  paidAmount?: number;
+  refunded?: boolean;
   feed: FeedRow[];
   consoleLinks: ConsoleLinks;
 }

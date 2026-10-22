@@ -2,7 +2,7 @@
  * Thin client for the order-saga HTTP API. The base URL comes from /config.json at runtime, so one
  * build works against any deployment (Terraform writes config.json next to the app in S3).
  */
-import type { CreateOrderResponse, Order, OrderSummary, Product, Simulate } from "./types";
+import type { CreateOrderResponse, Order, OrderSummary, Product, Simulate, Wallet } from "./types";
 
 export interface AppConfig {
   apiUrl: string;
@@ -71,6 +71,20 @@ export async function createOrder(order: NewOrder, idempotencyKey: string): Prom
     method: "POST",
     body: JSON.stringify(order),
     headers: { "Idempotency-Key": idempotencyKey },
+  });
+  return body;
+}
+
+/** DemoPay: balance + 20 most recent transactions. The wallet is created with ₹10,00,000 on first use. */
+export async function getWallet(email: string): Promise<Wallet> {
+  return (await request<Wallet>(`/wallet?email=${encodeURIComponent(email)}`)).body;
+}
+
+/** Demo helper: set the wallet balance (omit `balance` to reset to ₹10,00,000). */
+export async function setWalletBalance(email: string, balance?: number): Promise<Wallet> {
+  const { body } = await request<Wallet>("/wallet/reset", {
+    method: "POST",
+    body: JSON.stringify(balance === undefined ? { email } : { email, balance }),
   });
   return body;
 }

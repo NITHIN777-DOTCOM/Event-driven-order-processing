@@ -14,6 +14,7 @@ PAYMENT_RETRY = "PAYMENT_RETRY"  # a transient payment failure; Step Functions w
 PAYMENT_CAPTURED = "PAYMENT_CAPTURED"  # (simulated) payment succeeded
 PAYMENT_DECLINED = "PAYMENT_DECLINED"  # permanent payment failure; compensation follows
 OUT_OF_STOCK = "OUT_OF_STOCK"  # reservation impossible; nothing was reserved
+PAYMENT_REFUNDED = "PAYMENT_REFUNDED"  # compensation: wallet debit refunded
 INVENTORY_RELEASED = "INVENTORY_RELEASED"  # compensation: reserved stock given back
 COMPLETED = "COMPLETED"  # terminal: success (written by the state machine itself)
 FAILED = "FAILED"  # terminal: failure (written by the state machine itself)

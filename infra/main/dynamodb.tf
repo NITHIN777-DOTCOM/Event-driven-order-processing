@@ -95,3 +95,57 @@ resource "aws_dynamodb_table" "inventory" {
     Description = "Product catalogue with price - available stock - reserved quantity"
   }
 }
+
+# DemoPay wallets: one item per customer email (walletId = lower-cased email). Created lazily
+# with ₹10,00,000 on first use. Only the balance lives here; the history is in wallet_txns.
+resource "aws_dynamodb_table" "wallets" {
+  name         = "${var.project_prefix}-wallets"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "walletId"
+
+  deletion_protection_enabled = false
+
+  attribute {
+    name = "walletId"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = false
+  }
+
+  tags = {
+    Name        = "${var.project_prefix}-wallets"
+    Description = "DemoPay wallet balances - one per customer email - demo money only"
+  }
+}
+
+# DemoPay ledger: one item per balance change. A separate table rather than a list on the wallet item,
+# because history grows without limit (items cap at 400 KB) and "latest 20, newest first" is a single
+# Query on (walletId, txnId DESC). txnId = "<ISO timestamp>#<random>", so it sorts by time.
+resource "aws_dynamodb_table" "wallet_txns" {
+  name         = "${var.project_prefix}-wallet-txns"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "walletId"
+  range_key    = "txnId"
+
+  deletion_protection_enabled = false
+
+  attribute {
+    name = "walletId"
+    type = "S"
+  }
+  attribute {
+    name = "txnId"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = false
+  }
+
+  tags = {
+    Name        = "${var.project_prefix}-wallet-txns"
+    Description = "DemoPay ledger - DEBIT for payments - CREDIT for refunds - ADJUST for demo balance changes"
+  }
+}

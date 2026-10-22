@@ -11,6 +11,10 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
   e) same Idempotency-Key x3 -> exactly 1 order and 1 execution
   f) the same {orderId} sent to SQS twice more -> still exactly 1 execution
   g) poison            -> message lands in the DLQ (polled for up to 5 min), order stays PENDING
+  h) low wallet balance -> a REAL decline (no simulate flag): no debit, stock released, order FAILED
+
+DemoPay: the shared test wallet is reset to ₹10,00,000 first, and each scenario checks the ledger
+(exactly one DEBIT for each paid order, none for failed ones).
 
 The poison order is placed FIRST, so its ~3 minutes of SQS retries overlap the other scenarios.
 The DLQ is only peeked (VisibilityTimeout=0) and is never purged, so it stays for screenshots.
@@ -36,8 +40,10 @@ from tf_outputs import load_outputs
 OUT = load_outputs()
 REGION = OUT["region"]
 API = OUT["api_url"].rstrip("/")
-EVIDENCE_FILE = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "phase2-failure-tests.md"
+EVIDENCE_FILE = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "e2e-failure-tests.md"
 DLQ_TIMEOUT_SECONDS = 300
+WALLET_EMAIL = "e2e.tester@example.com"
+LOW_BALANCE_EMAIL = "e2e.lowbalance@example.com"
 
 ddb = boto3.resource("dynamodb", region_name=REGION)
 orders_table = ddb.Table(OUT["orders_table"])
@@ -95,14 +101,29 @@ def http_json(method: str, url: str, body: dict | None = None, headers: dict | N
         return err.code, json.loads(err.read() or b"{}")
 
 
-def place_order(product_id: str, quantity: int, simulate: str, key: str | None = None) -> tuple[int, dict]:
+def place_order(
+    product_id: str, quantity: int, simulate: str, key: str | None = None, email: str = WALLET_EMAIL
+) -> tuple[int, dict]:
     payload = {
         "customerName": "E2E Tester",
-        "customerEmail": "e2e.tester@example.com",
+        "customerEmail": email,
         "items": [{"productId": product_id, "quantity": quantity}],
         "simulate": simulate,
     }
     return http_json("POST", f"{API}/orders", payload, {"Idempotency-Key": key or str(uuid.uuid4())})
+
+
+def wallet(email: str = WALLET_EMAIL) -> dict:
+    return http_json("GET", f"{API}/wallet?email={email}")[1]
+
+
+def set_wallet(email: str, balance: float | None = None) -> dict:
+    body = {"email": email} if balance is None else {"email": email, "balance": balance}
+    return http_json("POST", f"{API}/wallet/reset", body)[1]
+
+
+def debits_for(order_id: str, email: str = WALLET_EMAIL) -> int:
+    return sum(1 for t in wallet(email)["transactions"] if t.get("orderId") == order_id and t["type"] == "DEBIT")
 
 
 def get_order(order_id: str) -> dict:
@@ -161,8 +182,9 @@ def count_log_lines(log_group: str, *terms: str, since_ms: int) -> int:
 # Scenarios
 # --------------------------------------------------------------------------------------------
 def scenario_none() -> Scenario:
-    s = Scenario("a", "simulate=none -> COMPLETED, stock decreased")
+    s = Scenario("a", "simulate=none -> COMPLETED, stock decreased, wallet debited once")
     before = stock_of("MECH-KEYBOARD")
+    balance_before = wallet()["balance"]
     code, body = place_order("MECH-KEYBOARD", 1, "none")
     s.check(code == 202, f"POST /orders returned {code} (expected 202)")
     s.order_id = body.get("orderId")
@@ -174,6 +196,12 @@ def scenario_none() -> Scenario:
     after = stock_of("MECH-KEYBOARD")
     s.check(after == (before[0] - 1, before[1] + 1), f"MECH-KEYBOARD stock {before[0]} -> {after[0]} (expected -1)")
     s.check(execution(s)["status"] == "SUCCEEDED", f"execution {execution(s)['status']} (expected SUCCEEDED)")
+    balance_after = wallet()["balance"]
+    s.check(
+        balance_before - balance_after == order.get("totalAmount"),
+        f"DemoPay balance {balance_before} -> {balance_after} (expected -{order.get('totalAmount')})",
+    )
+    s.check(debits_for(s.order_id) == 1, f"DEBIT ledger entries for this order: {debits_for(s.order_id)} (expected 1)")
     return s
 
 
@@ -198,6 +226,8 @@ def scenario_payment_declined() -> Scenario:
     s.check(info.get("error") == "OrderFailed", f"execution error '{info.get('error')}' (expected OrderFailed)")
     s.check("ReleaseInventory" in entered, "ReleaseInventory ran")
     s.check(entered[-1:] == ["OrderFailed"], f"last state {entered[-1:]} (expected OrderFailed)")
+    s.check("RefundPayment" in entered, "RefundPayment ran (a no-op: nothing was charged)")
+    s.check(debits_for(s.order_id) == 0, f"DEBIT ledger entries: {debits_for(s.order_id)} (expected 0, card declined before debit)")
     return s
 
 
@@ -216,6 +246,7 @@ def scenario_payment_flaky() -> Scenario:
     after = stock_of("ANC-HEADPHONES")
     s.check(after[0] == before[0] - 1, f"ANC-HEADPHONES stock {before[0]} -> {after[0]} (expected -1)")
     s.check(execution(s)["status"] == "SUCCEEDED", f"execution {execution(s)['status']} (expected SUCCEEDED)")
+    s.check(debits_for(s.order_id) == 1, f"DEBIT ledger entries after 3 attempts: {debits_for(s.order_id)} (expected 1)")
     return s
 
 
@@ -236,6 +267,7 @@ def scenario_out_of_stock() -> Scenario:
     info, entered = execution(s), states_entered(s)
     s.check(info["status"] == "FAILED", f"execution {info['status']} (expected FAILED)")
     s.check("ReleaseInventory" not in entered, f"ReleaseInventory NOT run (states: {' -> '.join(entered)})")
+    s.check(debits_for(s.order_id) == 0, f"DEBIT ledger entries: {debits_for(s.order_id)} (expected 0)")
     return s
 
 
@@ -267,6 +299,7 @@ def scenario_duplicate_idempotency_key() -> Scenario:
     s.check(executions_named(ids) == 1, f"executions: {executions_named(ids)} (expected 1)")
     after = stock_of("4K-MONITOR")
     s.check(after[0] == before[0] - 1, f"4K-MONITOR stock {before[0]} -> {after[0]} (expected -1, not -3)")
+    s.check(debits_for(s.order_id) == 1, f"DEBIT ledger entries: {debits_for(s.order_id)} (expected 1, not 3)")
     return s
 
 
@@ -300,6 +333,28 @@ def scenario_duplicate_sqs_message() -> Scenario:
             break
         time.sleep(5)
     s.check(ignored >= 1, f"'Duplicate message ignored' log lines for this order: {ignored} (expected >= 1)")
+    s.check(debits_for(s.order_id) == 1, f"DEBIT ledger entries: {debits_for(s.order_id)} (expected 1)")
+    return s
+
+
+def scenario_low_balance() -> Scenario:
+    s = Scenario("h", "wallet balance too low -> REAL decline, stock released, nothing debited")
+    set_wallet(LOW_BALANCE_EMAIL, 1000)
+    before = stock_of("USB-MIC")
+    code, body = place_order("USB-MIC", 1, "none", email=LOW_BALANCE_EMAIL)  # ₹5,999 > ₹1,000, no simulate flag
+    s.check(code == 202, f"POST /orders returned {code} (expected 202)")
+    s.order_id = body.get("orderId")
+    order = wait_for_terminal(s.order_id)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "FAILED", f"order status {order.get('status')} (expected FAILED)")
+    reason = str(order.get("failureReason", ""))
+    s.check(reason.startswith("PaymentDeclined: Insufficient wallet balance"), f"failureReason '{reason}'")
+    s.check(stock_of("USB-MIC") == before, f"USB-MIC (stock, reserved) {before} -> {stock_of('USB-MIC')} (expected unchanged)")
+    after = wallet(LOW_BALANCE_EMAIL)
+    s.check(after["balance"] == 1000, f"DemoPay balance {after['balance']} (expected 1000, untouched)")
+    s.check(debits_for(s.order_id, LOW_BALANCE_EMAIL) == 0, "no DEBIT ledger entry")
+    s.check("ReleaseInventory" in states_entered(s), "ReleaseInventory ran (compensation)")
+    set_wallet(LOW_BALANCE_EMAIL)  # leave the demo wallet back at ₹10,00,000
     return s
 
 
@@ -342,7 +397,7 @@ def finish_poison(s: Scenario, started: float) -> Scenario:
 def write_evidence(results: list[Scenario], duration: float) -> None:
     passed = sum(r.passed for r in results)
     lines = [
-        "# Phase 2 evidence: failure-path end-to-end tests",
+        "# End-to-end tests: every saga path, including DemoPay wallet checks",
         "",
         f"Run: {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC · Region: {REGION} · API: `{API}`",
         f"Command: `python scripts/e2e_test.py` (after `python scripts/seed_inventory.py`) · Duration: {duration:.0f}s",
@@ -370,6 +425,7 @@ def write_evidence(results: list[Scenario], duration: float) -> None:
 
 def main() -> int:
     started = time.monotonic()
+    set_wallet(WALLET_EMAIL)  # DemoPay: start every run from ₹10,00,000
     print("Placing poison order first (it needs ~3 min of SQS retries)...")
     poison, poison_started = start_poison()
     print(f"  poison order {poison.order_id}")
@@ -382,6 +438,7 @@ def main() -> int:
         scenario_out_of_stock,
         scenario_duplicate_idempotency_key,
         scenario_duplicate_sqs_message,
+        scenario_low_balance,
     ):
         result = run()
         print(f"[{'PASS' if result.passed else 'FAIL'}] {result.key}) {result.title}  {result.order_id}")
@@ -394,6 +451,7 @@ def main() -> int:
     results.append(finish_poison(poison, poison_started))
     print(f"[{'PASS' if results[-1].passed else 'FAIL'}] g) {poison.title}  {poison.order_id}")
 
+    results.sort(key=lambda r: r.key)
     duration = time.monotonic() - started
     print("\n" + "=" * 100)
     print(f"{'#':<3}{'Result':<8}{'orderId':<24}Scenario")

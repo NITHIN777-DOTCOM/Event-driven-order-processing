@@ -97,3 +97,25 @@ def test_console_links():
     assert "log-group/$252Faws$252Fvendedlogs$252Fstates$252Fwf/log-events" in links["logs"]
     assert links["logs"].endswith("$3FfilterPattern$3D$2522ORD-20261022-abcdef12$2522")
     assert console_links({"orderId": "ORD-1"}, "ap-south-1", "t", "/g")["execution"] is None
+
+
+def test_wallet_debit_refund_and_insufficient_balance_rows():
+    rows = feed(
+        entry("PAYMENT_CAPTURED", "₹7,597 debited from DemoPay · balance ₹9,92,403 (attempt 3)"),
+        entry("PAYMENT_REFUNDED", "₹7,597 refunded to DemoPay · balance ₹10,00,000"),
+        entry("PAYMENT_DECLINED", "Attempt 1: Insufficient wallet balance: ₹1,000 available, ₹3,499 needed"),
+    )
+
+    assert (rows[0]["message"], rows[0]["note"]) == ("₹7,597 debited from DemoPay · balance ₹9,92,403", "attempt 3")
+    assert rows[1]["message"] == "₹7,597 refunded to wallet · balance ₹10,00,000"
+    assert (rows[2]["message"], rows[2]["level"]) == ("Declined: not enough DemoPay balance (₹1,000 available)", "error")
+
+
+def test_indian_rupee_formatting():
+    from common.money import format_inr
+
+    assert format_inr(992403) == "₹9,92,403"
+    assert format_inr("1000000") == "₹10,00,000"
+    assert format_inr("1234.5") == "₹1,234.50"
+    assert format_inr(799) == "₹799"
+    assert format_inr(-3499) == "-₹3,499"

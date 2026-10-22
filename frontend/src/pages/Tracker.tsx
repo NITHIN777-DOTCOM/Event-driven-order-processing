@@ -9,6 +9,7 @@ import { ApiError, getOrder } from "../api";
 import { formatDateTime, formatDuration, formatPrice, formatTime, scenarioLabel } from "../format";
 import { deriveSteps, finishedAt, isTerminal, trackerTitle, type Step } from "../tracker";
 import type { FeedRow, Order } from "../types";
+import { useWallet } from "../wallet";
 import {
   CardIcon,
   EnvelopeCheckIcon,
@@ -176,6 +177,12 @@ export function Tracker() {
 
   const steps = useMemo(() => (order ? deriveSteps(order) : []), [order]);
 
+  // When the saga finishes, the wallet balance in the header may have changed (debit or refund).
+  const { refresh: refreshWallet } = useWallet();
+  useEffect(() => {
+    if (!running) refreshWallet();
+  }, [running, refreshWallet]);
+
   // Newest first. A poison order still PENDING after 20 s gets an explanatory info row.
   const feed = useMemo(() => {
     if (!order) return [];
@@ -287,6 +294,12 @@ export function Tracker() {
               <span>Total</span>
               <span>{formatPrice(order.totalAmount)}</span>
             </div>
+            {order.paidAmount !== undefined && (
+              <p className="mt-4 text-sm text-muted-strong">
+                Paid {formatPrice(order.paidAmount)} with DemoPay
+                {order.refunded && <span className="block text-ok">Refunded {formatPrice(order.paidAmount)} to the wallet</span>}
+              </p>
+            )}
             {(order.status === "COMPLETED" || order.status === "FAILED") && (
               <p className="mt-4 text-sm text-muted">
                 {order.status === "COMPLETED" ? "Confirmation" : "Failure"} email sent via SNS

@@ -1,73 +1,84 @@
-"""Saga step 2: take the payment. It's simulated; no real payment provider is called.
+"""Saga step 2: take the payment by debiting the customer's DemoPay wallet.
 
-The order's `simulate` field picks a behaviour, which lets every saga path be shown on demand:
-  - "none"             : the payment is captured
-  - "payment_declined" : raises PaymentDeclined, a permanent error. Step Functions does NOT retry it;
-                         it runs compensation (ReleaseInventory) instead.
-  - "payment_flaky"    : raises PaymentTransientError on attempts 1 and 2 and succeeds on attempt 3.
-                         Step Functions retries it with exponential backoff.
+The debit is ONE DynamoDB transaction across three tables:
+  wallets       balance -= total      (only if the balance is still what we read, and it covers the total)
+  wallet-txns   + DEBIT ledger entry  {orderId, amount, balanceAfter}
+  orders        paymentId, PAYMENT_CAPTURED in statusHistory   (only if the order has NO paymentId yet)
+So money moves exactly once, together with its ledger entry and the order update, or not at all.
 
-No double charge: if the order already has a paymentId, that payment is returned and nothing
-is charged again. The capture itself is conditional on there being no paymentId yet.
+Failures:
+  - balance too low          -> PaymentDeclined("Insufficient wallet balance ...")  a real, natural decline
+  - simulate=payment_declined -> PaymentDeclined (card declined), before any money moves
+  - simulate=payment_flaky   -> PaymentTransientError on attempts 1 and 2, then a normal debit on attempt 3
+Step Functions retries PaymentTransientError and catches PaymentDeclined; it then runs compensation
+(RefundPayment, then ReleaseInventory).
+
+No double charge: an order that already has a paymentId returns that payment, and the order
+condition in the transaction blocks a concurrent second debit.
 """
 
 from __future__ import annotations
 
 import os
 import uuid
+from decimal import Decimal
 from typing import Any, Callable
 
 import boto3
 from botocore.exceptions import ClientError
 
 from common.logger import StructuredLogger, get_logger
-from common.orders import PAYMENT_CAPTURED, PAYMENT_DECLINED, PAYMENT_RETRY, status_update
+from common.money import format_inr
+from common.orders import PAYMENT_CAPTURED, PAYMENT_DECLINED, PAYMENT_RETRY, cancellation_codes, status_update
 from common.tracing import instrument_aws_sdk
+from common.wallet import DEBIT, balance_update, ensure_wallet, txn_put, wallet_id
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
+WALLETS_TABLE = os.environ["WALLETS_TABLE"]
+WALLET_TXNS_TABLE = os.environ["WALLET_TXNS_TABLE"]
 
-orders_table = boto3.resource("dynamodb").Table(ORDERS_TABLE)
+dynamodb = boto3.resource("dynamodb")
+orders_table = dynamodb.Table(ORDERS_TABLE)
+wallets_table = dynamodb.Table(WALLETS_TABLE)
 logger = get_logger("process_payment")
 
 FLAKY_FAILURES = 2  # payment_flaky fails this many times before succeeding
+MAX_BALANCE_CONFLICTS = 3  # concurrent payments from the same wallet: re-read and retry this often
 
 
 class PaymentDeclined(Exception):
-    """Permanent failure: the card was declined. Caught by the state machine, which compensates."""
+    """Permanent failure. Caught by the state machine, which compensates."""
 
 
 class PaymentTransientError(Exception):
     """Temporary failure (e.g. a gateway timeout). The state machine retries it."""
 
 
-def capture_payment(order_id: str, attempt: int) -> dict[str, str]:
-    """Return a successful (fake) payment authorisation and capture."""
-    return {"paymentId": f"PAY-{uuid.uuid4().hex[:12]}", "status": "CAPTURED"}
+# --- Demo simulations: they run BEFORE any money moves ------------------------------------------
+def no_simulation(attempt: int) -> None:
+    return None
 
 
-def decline_payment(order_id: str, attempt: int) -> dict[str, str]:
+def decline(attempt: int) -> None:
     raise PaymentDeclined("Card declined by issuer (simulated)")
 
 
-def flaky_payment(order_id: str, attempt: int) -> dict[str, str]:
+def flaky(attempt: int) -> None:
     if attempt <= FLAKY_FAILURES:
         raise PaymentTransientError(f"Payment gateway timeout on attempt {attempt} (simulated)")
-    return capture_payment(order_id, attempt)
 
 
-# Maps each simulate mode to its payment behaviour.
-SIMULATIONS: dict[str, Callable[[str, int], dict[str, str]]] = {
-    "none": capture_payment,
-    "payment_declined": decline_payment,
-    "payment_flaky": flaky_payment,
+SIMULATIONS: dict[str, Callable[[int], None]] = {
+    "none": no_simulation,
+    "payment_declined": decline,
+    "payment_flaky": flaky,
 }
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, str]:
     order_id = event["orderId"]
-    amount, currency = event["amount"], event["currency"]
     simulate = event.get("simulate") or "none"
     log = logger.bind(orderId=order_id, simulate=simulate)
 
@@ -78,10 +89,10 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, str]:
 
     attempt = record_attempt(order_id)
     log = log.bind(attempt=attempt)
-    behaviour = SIMULATIONS.get(simulate, capture_payment)
 
     try:
-        payment = behaviour(order_id, attempt)
+        SIMULATIONS.get(simulate, no_simulation)(attempt)
+        return debit_wallet(order, attempt, log)
     except PaymentTransientError as err:
         log.warning("Transient payment failure; Step Functions will retry", reason=str(err))
         orders_table.update_item(
@@ -97,8 +108,6 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, str]:
         )
         raise
 
-    return save_capture(order_id, payment, amount, currency, attempt, log)
-
 
 def record_attempt(order_id: str) -> int:
     """Atomically increment paymentAttempts and return the new value (1 on the first attempt)."""
@@ -112,31 +121,54 @@ def record_attempt(order_id: str) -> int:
     return int(result["Attributes"]["paymentAttempts"])
 
 
-def save_capture(
-    order_id: str,
-    payment: dict[str, str],
-    amount: str,
-    currency: str,
-    attempt: int,
-    log: StructuredLogger,
-) -> dict[str, str]:
-    """Record the capture, but only if no other attempt has already recorded one."""
-    try:
-        orders_table.update_item(
-            Key={"orderId": order_id},
-            **status_update(
-                PAYMENT_CAPTURED,
-                f"Payment {payment['paymentId']} captured: {currency} {amount} (attempt {attempt})",
-                {"paymentId": payment["paymentId"]},
-                condition="attribute_not_exists(paymentId)",
-            ),
-        )
-    except ClientError as err:
-        if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
-            raise
-        existing = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]["paymentId"]
-        log.info("Concurrent attempt already captured payment; returning it", paymentId=existing)
-        return {"paymentId": existing, "status": "CAPTURED"}
+def debit_wallet(order: dict[str, Any], attempt: int, log: StructuredLogger) -> dict[str, str]:
+    """Move the order total out of the customer's wallet: atomically, exactly once."""
+    order_id = order["orderId"]
+    amount = Decimal(order["totalAmount"])
+    wid = wallet_id(order["customerEmail"])
 
-    log.info("Payment captured", paymentId=payment["paymentId"], amount=amount, currency=currency)
-    return payment
+    for _ in range(MAX_BALANCE_CONFLICTS):
+        before = Decimal(ensure_wallet(wallets_table, wid)["balance"])
+        if before < amount:
+            raise PaymentDeclined(
+                f"Insufficient wallet balance: {format_inr(before)} available, {format_inr(amount)} needed"
+            )
+        after = before - amount
+        payment_id = f"PAY-{uuid.uuid4().hex[:12]}"
+        detail = f"{format_inr(amount)} debited from DemoPay · balance {format_inr(after)} (attempt {attempt})"
+        try:
+            dynamodb.meta.client.transact_write_items(
+                TransactItems=[
+                    balance_update(WALLETS_TABLE, wid, before, after),
+                    txn_put(WALLET_TXNS_TABLE, wid, DEBIT, amount, after, order_id, f"Payment for {order_id}"),
+                    {
+                        "Update": {
+                            "TableName": ORDERS_TABLE,
+                            "Key": {"orderId": order_id},
+                            **status_update(
+                                PAYMENT_CAPTURED,
+                                detail,
+                                {"paymentId": payment_id, "paidAmount": amount, "walletId": wid},
+                                condition="attribute_not_exists(paymentId)",
+                            ),
+                        }
+                    },
+                ]
+            )
+        except ClientError as err:
+            if err.response["Error"]["Code"] != "TransactionCanceledException":
+                raise
+            codes = cancellation_codes(err.response)
+            if len(codes) > 2 and codes[2] == "ConditionalCheckFailed":
+                # A concurrent attempt paid first: return ITS payment and charge nothing.
+                existing = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]["paymentId"]
+                log.info("Concurrent attempt already paid; returning it", paymentId=existing)
+                return {"paymentId": existing, "status": "CAPTURED"}
+            if codes and codes[0] == "ConditionalCheckFailed":
+                log.info("Wallet balance changed concurrently; re-reading")
+                continue
+            raise
+        log.info("Wallet debited", paymentId=payment_id, amount=amount, balanceAfter=after, walletId=wid)
+        return {"paymentId": payment_id, "status": "CAPTURED"}
+
+    raise PaymentTransientError("Wallet is busy with other payments; retrying")

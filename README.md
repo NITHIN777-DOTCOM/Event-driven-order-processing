@@ -38,11 +38,31 @@ All product photos are from [Unsplash](https://unsplash.com) under the
 
 | Product | Photographer | Source |
 |---|---|---|
-| Mechanical Keyboard | Hannes Köttner | https://unsplash.com/photos/QpTZcTlk08g |
-| Wireless Mouse | Harpal Singh | https://unsplash.com/photos/KuvEVL7lXYQ |
-| USB-C Hub | Lasse Jensen | https://unsplash.com/photos/a5-AlNgVNZw |
-| Noise-Cancelling Headphones | Kiran CK | https://unsplash.com/photos/LSNJ-pltdu8 |
-| 27-inch 4K Monitor | Rohit | https://unsplash.com/photos/KZnfwqi-B0U |
+| Mechanical Keyboard, 60% Layout | Hannes Köttner | https://unsplash.com/photos/QpTZcTlk08g |
+| Compact 65% Mechanical Keyboard | Hannes Köttner | https://unsplash.com/photos/tROXvYvFtB4 |
+| Low-Profile Wireless Keyboard | Olena Bohovyk | https://unsplash.com/photos/cHlK4sZXOQo |
+| Slim Wireless Mouse | Harpal Singh | https://unsplash.com/photos/KuvEVL7lXYQ |
+| Ergonomic Wireless Mouse | Mojtaba Mosayebzadeh | https://unsplash.com/photos/jKwaXJZe1P0 |
+| Vertical Ergonomic Mouse | Boitumelo | https://unsplash.com/photos/px2CP31ygUs |
+| Noise-Cancelling Wireless Headphones | Kiran CK | https://unsplash.com/photos/LSNJ-pltdu8 |
+| True Wireless Earbuds | Daniel Romero | https://unsplash.com/photos/6V5vTuoeCZg |
+| USB Condenser Microphone | Axel Mencia | https://unsplash.com/photos/5SoYbzKhqfA |
+| Dynamic Podcast Microphone | Jon Tyson | https://unsplash.com/photos/H1ZwfJSsMVk |
+| 27-inch 4K UHD IPS Monitor | Rohit | https://unsplash.com/photos/KZnfwqi-B0U |
+| 34-inch Curved Ultrawide Monitor | Mediamodifier | https://unsplash.com/photos/9ixBVUCo6NU |
+| USB-C Hub, 6-in-1 | Lasse Jensen | https://unsplash.com/photos/a5-AlNgVNZw |
+| Aluminium Laptop Stand | Rolf van Root | https://unsplash.com/photos/ISmVDb_20_g |
+| Felt and Leather Desk Mat | Muhammet Sain | https://unsplash.com/photos/8e9KCdOj29o |
+| 1080p Streaming Webcam | Bedirhan Gul | https://unsplash.com/photos/Gq8qdtRwwJs |
+
+## DemoPay wallet
+
+Every customer email gets a demo wallet with ₹10,00,000 (DynamoDB `order-saga-wallets`, created on first use).
+`process_payment` debits it in ONE `TransactWriteItems` across three tables: wallet balance, ledger entry
+(`order-saga-wallet-txns`) and the order's paymentId. Both conditions must hold: the balance covers the total,
+and the order has no payment yet. If a later step fails, `RefundPayment` (idempotent) credits the money back
+before the stock is released. Set a low balance on `/wallet` to see a real decline. Demo only: no
+authentication, so anyone who knows an email can see that wallet.
 
 ## Monitoring
 

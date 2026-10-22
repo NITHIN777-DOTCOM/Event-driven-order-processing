@@ -28,6 +28,8 @@ os.environ.update(
     ORDERS_TABLE="test-orders",
     INVENTORY_TABLE="test-inventory",
     IDEMPOTENCY_TABLE="test-idempotency",
+    WALLETS_TABLE="test-wallets",
+    WALLET_TXNS_TABLE="test-wallet-txns",
     STATE_MACHINE_ARN=f"arn:aws:states:{REGION}:123456789012:stateMachine:test-workflow",
 )
 
@@ -74,6 +76,24 @@ def aws():
             AttributeDefinitions=[{"AttributeName": "idempotencyKey", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
+        wallets = ddb.create_table(
+            TableName="test-wallets",
+            KeySchema=[{"AttributeName": "walletId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "walletId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        wallet_txns = ddb.create_table(
+            TableName="test-wallet-txns",
+            KeySchema=[
+                {"AttributeName": "walletId", "KeyType": "HASH"},
+                {"AttributeName": "txnId", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "walletId", "AttributeType": "S"},
+                {"AttributeName": "txnId", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
         for product in PRODUCTS:
             inventory.put_item(Item=product)
 
@@ -92,6 +112,8 @@ def aws():
             orders=orders,
             inventory=inventory,
             idempotency=idempotency,
+            wallets=wallets,
+            wallet_txns=wallet_txns,
             sqs=sqs,
             queue_url=queue_url,
             sfn=sfn,
@@ -128,6 +150,13 @@ def stock_of(aws, product_id) -> tuple[int, int]:
     """(stock, reserved) of a product."""
     item = aws.inventory.get_item(Key={"productId": product_id})["Item"]
     return int(item["stock"]), int(item["reserved"])
+
+
+def wallet_of(aws, email="asha@example.com") -> tuple:
+    """(balance, [ledger entry types, oldest first]) of a wallet; (None, []) if it doesn't exist."""
+    wallet = aws.wallets.get_item(Key={"walletId": email}).get("Item")
+    txns = aws.wallet_txns.query(KeyConditionExpression="walletId = :w", ExpressionAttributeValues={":w": email})["Items"]
+    return (wallet["balance"] if wallet else None), [t["type"] for t in txns]
 
 
 def seed_order(orders_table, **overrides) -> dict:

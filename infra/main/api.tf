@@ -48,19 +48,23 @@ resource "aws_apigatewayv2_stage" "default" {
 }
 
 locals {
+  # route name => { route key, Lambda (key in local.lambda_functions) }. Several routes may share one Lambda.
   api_routes = {
-    create_order  = "POST /orders"
-    get_order     = "GET /orders/{id}"
-    list_orders   = "GET /orders"
-    list_products = "GET /products"
+    create_order  = { route = "POST /orders", fn = "create_order" }
+    get_order     = { route = "GET /orders/{id}", fn = "get_order" }
+    list_orders   = { route = "GET /orders", fn = "list_orders" }
+    list_products = { route = "GET /products", fn = "list_products" }
+    wallet_get    = { route = "GET /wallet", fn = "wallet_api" }
+    wallet_reset  = { route = "POST /wallet/reset", fn = "wallet_api" }
   }
+  api_functions = toset([for r in local.api_routes : r.fn])
 }
 
 resource "aws_apigatewayv2_integration" "lambda" {
-  for_each = local.api_routes
+  for_each = local.api_functions
 
   api_id                 = aws_apigatewayv2_api.orders.id
-  description            = "${each.value} -> Lambda ${local.lambda_names[each.key]}"
+  description            = "Proxy to Lambda ${local.lambda_names[each.key]}"
   integration_type       = "AWS_PROXY"
   integration_uri        = aws_lambda_function.fn[each.key].invoke_arn
   payload_format_version = "2.0"
@@ -70,13 +74,13 @@ resource "aws_apigatewayv2_route" "orders" {
   for_each = local.api_routes
 
   api_id    = aws_apigatewayv2_api.orders.id
-  route_key = each.value
-  target    = "integrations/${aws_apigatewayv2_integration.lambda[each.key].id}"
+  route_key = each.value.route
+  target    = "integrations/${aws_apigatewayv2_integration.lambda[each.value.fn].id}"
 }
 
-# Allow only this API to invoke the two API Lambdas.
+# Allow only this API to invoke the API Lambdas.
 resource "aws_lambda_permission" "api" {
-  for_each = local.api_routes
+  for_each = local.api_functions
 
   statement_id  = "AllowInvokeFromOrderSagaApi"
   action        = "lambda:InvokeFunction"

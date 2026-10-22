@@ -59,9 +59,26 @@ locals {
       }
     }
     process_payment = {
-      description = "Saga step - simulated payment (none / payment_declined / payment_flaky); never charges an order twice"
+      description = "Saga step - debits the DemoPay wallet atomically with the order (never twice); declines on low balance"
       environment = {
-        ORDERS_TABLE = aws_dynamodb_table.orders.name
+        ORDERS_TABLE      = aws_dynamodb_table.orders.name
+        WALLETS_TABLE     = aws_dynamodb_table.wallets.name
+        WALLET_TXNS_TABLE = aws_dynamodb_table.wallet_txns.name
+      }
+    }
+    refund_payment = {
+      description = "Saga COMPENSATION - idempotently refunds a wallet debit when a later step fails"
+      environment = {
+        ORDERS_TABLE      = aws_dynamodb_table.orders.name
+        WALLETS_TABLE     = aws_dynamodb_table.wallets.name
+        WALLET_TXNS_TABLE = aws_dynamodb_table.wallet_txns.name
+      }
+    }
+    wallet_api = {
+      description = "GET /wallet and POST /wallet/reset - DemoPay balance, recent transactions and demo balance changes"
+      environment = {
+        WALLETS_TABLE     = aws_dynamodb_table.wallets.name
+        WALLET_TXNS_TABLE = aws_dynamodb_table.wallet_txns.name
       }
     }
     release_inventory = {

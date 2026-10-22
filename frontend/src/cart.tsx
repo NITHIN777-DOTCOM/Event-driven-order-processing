@@ -19,7 +19,8 @@ interface CartState {
   isOpen: boolean;
   open: () => void;
   close: () => void;
-  add: (product: Product) => void;
+  /** Add `quantity` (default 1), capped at the product's stock. */
+  add: (product: Product, quantity?: number) => void;
   setQuantity: (productId: string, quantity: number) => void;
   remove: (productId: string) => void;
   clear: () => void;
@@ -43,15 +44,18 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => storage.set(STORAGE_KEY, JSON.stringify(lines)), [lines]);
 
-  const add = useCallback((product: Product) => {
+  const add = useCallback((product: Product, quantity = 1) => {
     setLines((current) => {
       const existing = current.find((line) => line.productId === product.productId);
       if (existing) {
         return current.map((line) =>
-          line.productId === product.productId ? { ...line, quantity: Math.min(line.quantity + 1, product.stock) } : line,
+          line.productId === product.productId
+            ? { ...line, stock: product.stock, quantity: Math.min(line.quantity + quantity, product.stock) }
+            : line,
         );
       }
-      return [...current, { ...product, quantity: 1 }];
+      const { productId, name, price, imageKey, stock } = product;
+      return [...current, { productId, name, price, imageKey, stock, quantity: Math.min(quantity, stock) }];
     });
   }, []);
 

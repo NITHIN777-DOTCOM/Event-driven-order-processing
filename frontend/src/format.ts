@@ -28,9 +28,9 @@ export function ordinal(n: number): string {
 
 /** The checkout's "Test scenario" options, shared with the Orders table. */
 export const SCENARIOS: { value: Simulate; label: string; description: string }[] = [
-  { value: "none", label: "Normal", description: "Stock is reserved, payment is captured and a confirmation email is sent." },
-  { value: "payment_declined", label: "Payment declined", description: "The card is declined, so the saga releases the reserved stock and fails the order." },
-  { value: "payment_flaky", label: "Payment glitch (retries)", description: "Payment fails twice with a transient error; Step Functions retries with backoff and it succeeds." },
+  { value: "none", label: "Normal", description: "Stock is reserved, your DemoPay wallet is debited and a confirmation email is sent." },
+  { value: "payment_declined", label: "Payment declined", description: "The card is declined before any money moves, so the saga releases the reserved stock and fails the order." },
+  { value: "payment_flaky", label: "Payment glitch (retries)", description: "Payment fails twice with a transient error; Step Functions retries with backoff and the wallet is debited once." },
   { value: "out_of_stock", label: "Out of stock", description: "Reservation fails before anything is held, so the order fails with nothing to release." },
   { value: "poison", label: "Poison message (to DLQ)", description: "The queue consumer rejects the message; after 3 attempts SQS moves it to the dead-letter queue (~3 min)." },
 ];

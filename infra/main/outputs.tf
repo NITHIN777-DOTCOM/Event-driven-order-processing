@@ -32,6 +32,14 @@ output "idempotency_table" {
   value = aws_dynamodb_table.idempotency.name
 }
 
+output "wallets_table" {
+  value = aws_dynamodb_table.wallets.name
+}
+
+output "wallet_txns_table" {
+  value = aws_dynamodb_table.wallet_txns.name
+}
+
 output "queue_url" {
   value = aws_sqs_queue.orders.url
 }

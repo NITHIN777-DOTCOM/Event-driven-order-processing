@@ -23,7 +23,10 @@ def test_products_sorted_by_price_with_stock(aws, products):
     assert result["statusCode"] == 200
     body = json.loads(result["body"])["products"]
     assert [p["productId"] for p in body] == ["WIRELESS-MOUSE", "MECH-KEYBOARD"]  # 799 < 3499
-    assert body[0] == {"productId": "WIRELESS-MOUSE", "name": "Wireless Mouse", "price": 799, "stock": 100, "imageKey": None}
+    assert {k: body[0][k] for k in ("productId", "name", "price", "stock")} == {
+        "productId": "WIRELESS-MOUSE", "name": "Wireless Mouse", "price": 799, "stock": 100,
+    }
+    assert set(body[0]) >= {"category", "mrp", "rating", "ratingCount", "highlights", "description", "imageKey"}
 
 
 def test_orders_newest_first_with_limit(aws, orders):

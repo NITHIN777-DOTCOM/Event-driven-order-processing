@@ -1,6 +1,12 @@
+"""process_payment: real DemoPay debits, natural declines, simulate modes, never charging twice."""
+
+from decimal import Decimal
+
 import pytest
 
-from conftest import seed_order
+from conftest import seed_order, wallet_of
+
+EMAIL = "asha@example.com"  # seed_order's customerEmail
 
 
 @pytest.fixture
@@ -8,77 +14,84 @@ def handler(load_handler):
     return load_handler("process_payment")
 
 
-def payment_event(order_id, simulate="none"):
-    return {"orderId": order_id, "amount": "5097.00", "currency": "INR", "simulate": simulate}
+def pay(handler, order, simulate="none"):
+    return handler.lambda_handler({"orderId": order["orderId"], "amount": "5097.00", "currency": "INR", "simulate": simulate}, None)
 
 
 def load(aws, order_id):
     return aws.orders.get_item(Key={"orderId": order_id})["Item"]
 
 
-def test_simulate_none_captures_payment(aws, handler):
+def test_debits_wallet_records_ledger_and_marks_order_paid(aws, handler):
     order = seed_order(aws.orders)
 
-    result = handler.lambda_handler(payment_event(order["orderId"]), None)
+    result = pay(handler, order)
 
-    assert result["status"] == "CAPTURED"
-    assert result["paymentId"].startswith("PAY-")
+    assert result["status"] == "CAPTURED" and result["paymentId"].startswith("PAY-")
+    balance, ledger = wallet_of(aws, EMAIL)
+    assert balance == Decimal("1000000") - Decimal("5097.00")  # wallet created lazily with ₹10,00,000
+    assert ledger == ["DEBIT"]
     saved = load(aws, order["orderId"])
     assert saved["status"] == "PAYMENT_CAPTURED"
-    assert saved["paymentId"] == result["paymentId"]
-    assert saved["paymentAttempts"] == 1
-    assert saved["statusHistory"][-1]["detail"] == f"Payment {result['paymentId']} captured: INR 5097.00 (attempt 1)"
+    assert saved["paymentId"] == result["paymentId"] and saved["paidAmount"] == Decimal("5097")
+    assert saved["statusHistory"][-1]["detail"] == "₹5,097 debited from DemoPay · balance ₹9,94,903 (attempt 1)"
 
 
-def test_payment_declined_raises_permanent_error(aws, handler):
+def test_insufficient_balance_is_a_natural_decline_with_no_debit(aws, handler):
+    aws.wallets.put_item(Item={"walletId": EMAIL, "balance": Decimal("1000"), "currency": "INR"})
+    order = seed_order(aws.orders)
+
+    with pytest.raises(handler.PaymentDeclined, match="Insufficient wallet balance"):
+        pay(handler, order)
+
+    assert wallet_of(aws, EMAIL) == (Decimal("1000"), [])  # untouched, no ledger entry
+    saved = load(aws, order["orderId"])
+    assert saved["status"] == "PAYMENT_DECLINED" and "paymentId" not in saved
+    assert "₹1,000 available, ₹5,097 needed" in saved["statusHistory"][-1]["detail"]
+
+
+def test_simulated_card_decline_moves_no_money(aws, handler):
     order = seed_order(aws.orders, simulate="payment_declined")
 
     with pytest.raises(handler.PaymentDeclined, match="declined"):
-        handler.lambda_handler(payment_event(order["orderId"], "payment_declined"), None)
+        pay(handler, order, "payment_declined")
 
-    saved = load(aws, order["orderId"])
-    assert "paymentId" not in saved
-    assert saved["status"] == "PAYMENT_DECLINED"
-    assert saved["statusHistory"][-1]["detail"] == "Attempt 1: Card declined by issuer (simulated)"
+    assert wallet_of(aws, EMAIL) == (None, [])  # the wallet was never even touched
+    assert load(aws, order["orderId"])["statusHistory"][-1]["detail"] == "Attempt 1: Card declined by issuer (simulated)"
 
 
-def test_payment_flaky_fails_twice_then_succeeds(aws, handler):
+def test_flaky_payment_retries_and_debits_exactly_once(aws, handler):
     order = seed_order(aws.orders, simulate="payment_flaky")
-    event = payment_event(order["orderId"], "payment_flaky")
 
-    # Step Functions would retry; here we call the handler 3 times by hand.
-    for _ in range(2):
+    for _ in range(2):  # Step Functions would retry; here we call the handler by hand
         with pytest.raises(handler.PaymentTransientError):
-            handler.lambda_handler(event, None)
-    result = handler.lambda_handler(event, None)
+            pay(handler, order, "payment_flaky")
+    pay(handler, order, "payment_flaky")
 
-    assert result["status"] == "CAPTURED"
     saved = load(aws, order["orderId"])
     assert saved["paymentAttempts"] == 3
-    statuses = [h["status"] for h in saved["statusHistory"]]
-    assert statuses == ["PENDING", "PAYMENT_RETRY", "PAYMENT_RETRY", "PAYMENT_CAPTURED"]
-    assert "Attempt 2 failed" in saved["statusHistory"][2]["detail"]
+    assert [h["status"] for h in saved["statusHistory"]] == ["PENDING", "PAYMENT_RETRY", "PAYMENT_RETRY", "PAYMENT_CAPTURED"]
+    assert wallet_of(aws, EMAIL)[1] == ["DEBIT"]
 
 
-def test_already_paid_order_is_not_charged_again(aws, handler):
-    order = seed_order(aws.orders, paymentId="PAY-existing0001")
-
-    result = handler.lambda_handler(payment_event(order["orderId"]), None)
-
-    assert result == {"paymentId": "PAY-existing0001", "status": "CAPTURED"}
-    saved = load(aws, order["orderId"])
-    assert "paymentAttempts" not in saved  # not even counted as an attempt
-    assert len(saved["statusHistory"]) == 1  # nothing appended
-
-
-def test_capture_race_returns_the_winning_payment(aws, handler):
-    """Two attempts in flight at once: the second capture write is refused by its condition."""
+def test_already_paid_order_is_never_debited_again(aws, handler):
     order = seed_order(aws.orders)
-    first = handler.lambda_handler(payment_event(order["orderId"]), None)
+    first = pay(handler, order)
 
-    result = handler.save_capture(
-        order["orderId"], {"paymentId": "PAY-loser", "status": "CAPTURED"}, "5097.00", "INR", 2, handler.logger
-    )
+    second = pay(handler, order)  # e.g. a Lambda retry after a lost response
+
+    assert second == first
+    balance, ledger = wallet_of(aws, EMAIL)
+    assert ledger == ["DEBIT"] and balance == Decimal("994903")
+
+
+def test_concurrent_attempt_that_paid_first_wins(aws, handler):
+    """Two attempts read 'unpaid' at the same time: the order condition in the transaction lets only one debit."""
+    order = seed_order(aws.orders)
+    first = pay(handler, order)
+    stale_copy = {**order}  # what the second attempt read before the first one committed
+
+    result = handler.debit_wallet(stale_copy, 2, handler.logger)
 
     assert result["paymentId"] == first["paymentId"]
-    assert load(aws, order["orderId"])["paymentId"] == first["paymentId"]
+    assert wallet_of(aws, EMAIL)[1] == ["DEBIT"]  # still exactly one debit

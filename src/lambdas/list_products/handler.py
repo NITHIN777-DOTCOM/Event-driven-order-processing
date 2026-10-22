@@ -22,7 +22,10 @@ INVENTORY_TABLE = os.environ["INVENTORY_TABLE"]
 inventory_table = boto3.resource("dynamodb").Table(INVENTORY_TABLE)
 logger = get_logger("list_products")
 
-FIELDS = ("productId", "name", "price", "stock", "imageKey")
+FIELDS = (
+    "productId", "name", "category", "price", "mrp", "rating", "ratingCount",
+    "stock", "highlights", "description", "imageKey",
+)
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:

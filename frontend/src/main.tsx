@@ -9,12 +9,18 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
 import { loadConfig } from "./api";
 import { CartProvider } from "./cart";
+import { CatalogProvider } from "./catalog";
+import { ToastProvider } from "./toast";
+import { WalletProvider } from "./wallet";
 import { Layout } from "./components/Layout";
 import { ErrorBanner } from "./components/ui";
+import { CartPage } from "./pages/CartPage";
 import { Checkout } from "./pages/Checkout";
+import { Listing } from "./pages/Listing";
 import { Orders } from "./pages/Orders";
-import { Shop } from "./pages/Shop";
+import { ProductPage } from "./pages/ProductPage";
 import { Tracker } from "./pages/Tracker";
+import { WalletPage } from "./pages/WalletPage";
 
 function NotFound() {
   return (
@@ -47,19 +53,31 @@ function App() {
   }
 
   return (
-    <CartProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route element={<Layout />}>
-            <Route index element={<Shop />} />
-            <Route path="checkout" element={<Checkout />} />
-            <Route path="orders" element={<Orders />} />
-            <Route path="orders/:id" element={<Tracker />} />
-            <Route path="*" element={<NotFound />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
-    </CartProvider>
+    <CatalogProvider>
+      <WalletProvider>
+        <CartProvider>
+          <BrowserRouter>
+            <ToastProvider>
+              <Routes>
+                <Route element={<Layout />}>
+                  <Route index element={<Listing />} />
+                  <Route path="c/:category" element={<Listing />} />
+                  <Route path="deals" element={<Listing />} />
+                  <Route path="search" element={<Listing />} />
+                  <Route path="p/:productId" element={<ProductPage />} />
+                  <Route path="cart" element={<CartPage />} />
+                  <Route path="checkout" element={<Checkout />} />
+                  <Route path="wallet" element={<WalletPage />} />
+                  <Route path="orders" element={<Orders />} />
+                  <Route path="orders/:id" element={<Tracker />} />
+                  <Route path="*" element={<NotFound />} />
+                </Route>
+              </Routes>
+            </ToastProvider>
+          </BrowserRouter>
+        </CartProvider>
+      </WalletProvider>
+    </CatalogProvider>
   );
 }
 

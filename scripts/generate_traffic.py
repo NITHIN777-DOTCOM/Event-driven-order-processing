@@ -25,7 +25,8 @@ from tf_outputs import load_outputs
 
 MIX = {"none": 0.7, "payment_declined": 0.1, "payment_flaky": 0.1, "out_of_stock": 0.1}
 EXPECTED_STATUS = {"none": "COMPLETED", "payment_flaky": "COMPLETED", "payment_declined": "FAILED", "out_of_stock": "FAILED"}
-PRODUCTS = [product_id for product_id, _, _ in seed_inventory.PRODUCTS]
+# Only well-stocked products, so a "none" order never fails by running out of stock.
+PRODUCTS = [p["productId"] for p in seed_inventory.PRODUCTS if p["stock"] >= 20]
 CUSTOMERS = ["Asha Rao", "Rahul Mehta", "Priya Sharma", "Vikram Iyer", "Neha Gupta", "Arjun Nair"]
 
 

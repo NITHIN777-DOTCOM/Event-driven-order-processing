@@ -27,6 +27,8 @@ PAYMENT_RETRY_BACKOFF = 2
 
 _ATTEMPT = re.compile(r"[Aa]ttempt (\d+)")
 _COUNT = re.compile(r"for (\d+) product")
+_AVAILABLE = re.compile(r"(₹[\d,.]+) available")
+_ATTEMPT_SUFFIX = re.compile(r" \(attempt \d+\)$")
 
 
 def _attempt(detail: str) -> int | None:
@@ -73,10 +75,19 @@ def rows_for(entry: dict[str, Any], order: dict[str, Any]) -> list[dict[str, Any
         wait = PAYMENT_RETRY_INTERVAL_SECONDS * PAYMENT_RETRY_BACKOFF ** (attempt - 1)
         return [row(WORKFLOW, f"Payment glitch, retrying in {wait}s", "retry", f"attempt {attempt}")]
     if status == "PAYMENT_DECLINED":
+        if "Insufficient wallet balance" in detail:
+            available = _AVAILABLE.search(detail)
+            suffix = f" ({available.group(1)} available)" if available else ""
+            return [row(PAYMENT, f"Declined: not enough DemoPay balance{suffix}", "error")]
         return [row(PAYMENT, "Payment declined by the card issuer", "error")]
     if status == "PAYMENT_CAPTURED":
         attempt = _attempt(detail) or 1
+        note = f"attempt {attempt}" if attempt > 1 else None
+        if detail.startswith("₹"):  # wallet debit: "₹7,597 debited from DemoPay · balance ₹9,92,403 (attempt 1)"
+            return [row(PAYMENT, _ATTEMPT_SUFFIX.sub("", detail), note=note)]
         return [row(PAYMENT, "Payment captured" + (f" on attempt {attempt}" if attempt > 1 else ""))]
+    if status == "PAYMENT_REFUNDED":
+        return [row(PAYMENT, detail.replace("refunded to DemoPay", "refunded to wallet"))]
     if status == "INVENTORY_RELEASED":
         return [row(INVENTORY, "Stock released back to inventory")]
     if status == "COMPLETED":

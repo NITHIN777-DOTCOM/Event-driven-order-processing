@@ -14,6 +14,7 @@ resource "aws_sfn_state_machine" "order_saga" {
     reserve_inventory_function_arn = aws_lambda_function.fn["reserve_inventory"].arn
     process_payment_function_arn   = aws_lambda_function.fn["process_payment"].arn
     release_inventory_function_arn = aws_lambda_function.fn["release_inventory"].arn
+    refund_payment_function_arn    = aws_lambda_function.fn["refund_payment"].arn
     orders_table_name              = aws_dynamodb_table.orders.name
     notifications_topic_arn        = aws_sns_topic.notifications.arn
   })

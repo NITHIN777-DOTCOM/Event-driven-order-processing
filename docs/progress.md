@@ -3,7 +3,7 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Phase 4 — Frontend: DONE (2026-10-22).** Next: **Phase 4.1 — Amazon-style catalog + DemoPay wallet.**
+**Phase 4.1 — Amazon-style catalog + DemoPay wallet: DONE (2026-10-22).** Next: **Phase 5 — CI/CD (GitHub Actions + OIDC).**
 
 ## Done
 ### Phase 0
@@ -55,10 +55,23 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - Scripts: deploy_frontend.py, capture_ui.py (Playwright), backfill_order_index.py.
 - Unit tests: 51 passed, 96% coverage. UI evidence: docs/evidence/ui/ (11 desktop + 5 mobile screenshots).
 
-## Next (Phase 4.1)
-- 16-product catalogue in 5 categories, Amazon-style listing/product/cart pages, DemoPay wallet with real debits/refunds.
+### Phase 4.1
+- Catalogue: 16 products in 5 categories (seed_inventory.py), with category/mrp/rating/highlights/description.
+  16 Unsplash photos (credits in README).
+- DemoPay: tables `order-saga-wallets` + `order-saga-wallet-txns`; process_payment debits in one
+  TransactWriteItems (wallet + ledger + order); new Lambdas `order-saga-refund-payment` (idempotent compensation)
+  and `order-saga-wallet-api` (GET /wallet, POST /wallet/reset with an optional custom balance).
+- ASL: ProcessPayment / MarkOrderCompleted failures -> RefundPayment -> ReleaseInventory -> ...
+- Frontend: two-row header with search + wallet; listing with filters/sort (/, /c/:cat, /deals, /search);
+  product page (/p/:id); cart page; 2-step checkout with DemoPay; wallet page; toasts.
+- Tests: 65 unit tests (95% coverage); e2e_test.py 8/8 (adds wallet checks + a real low-balance decline);
+  capture_ui.py: 6/6 UI scenarios with ledger checks. Evidence: docs/evidence/e2e-failure-tests.md, docs/evidence/ui/.
+
+## Next (Phase 5)
+- GitHub Actions with OIDC: tests on PRs; terraform plan/apply + deploy_frontend on main.
 
 ## Known limitations / ideas (good viva points)
+- DemoPay has no authentication: wallets are keyed by email, so anyone who knows an email can view or reset it (demo only).
 - If create_order crashes after the DynamoDB transaction but before SQS SendMessage, the order stays PENDING,
   and a client retry only replays it. Fix: a transactional outbox (DynamoDB Streams -> Pipes -> SQS).
 - HTTP APIs (API Gateway v2) don't support X-Ray tracing; only REST APIs do.

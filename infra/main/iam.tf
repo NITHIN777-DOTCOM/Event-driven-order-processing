@@ -130,6 +130,52 @@ data "aws_iam_policy_document" "process_payment" {
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
   }
+  # Create the wallet on first use (PutItem), read it, and debit it inside a transaction (UpdateItem).
+  statement {
+    sid       = "DebitWallet"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.wallets.arn]
+  }
+  statement {
+    sid       = "WriteLedgerEntry"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.wallet_txns.arn]
+  }
+}
+
+data "aws_iam_policy_document" "refund_payment" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["refund_payment"].json]
+
+  statement {
+    sid       = "ReadOrderAndMarkRefunded"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.orders.arn]
+  }
+  statement {
+    sid       = "CreditWallet"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.wallets.arn]
+  }
+  statement {
+    sid       = "WriteLedgerEntry"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.wallet_txns.arn]
+  }
+}
+
+data "aws_iam_policy_document" "wallet_api" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["wallet_api"].json]
+
+  statement {
+    sid       = "ReadAndSetWallet"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.wallets.arn]
+  }
+  statement {
+    sid       = "ReadAndWriteLedger"
+    actions   = ["dynamodb:Query", "dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.wallet_txns.arn]
+  }
 }
 
 data "aws_iam_policy_document" "release_inventory" {
@@ -157,6 +203,8 @@ locals {
     release_inventory = data.aws_iam_policy_document.release_inventory.json
     list_orders       = data.aws_iam_policy_document.list_orders.json
     list_products     = data.aws_iam_policy_document.list_products.json
+    refund_payment    = data.aws_iam_policy_document.refund_payment.json
+    wallet_api        = data.aws_iam_policy_document.wallet_api.json
   }
 }
 
@@ -200,7 +248,7 @@ data "aws_iam_policy_document" "sfn" {
     sid     = "InvokeSagaLambdas"
     actions = ["lambda:InvokeFunction"]
     resources = flatten([
-      for key in ["reserve_inventory", "process_payment", "release_inventory"] : [
+      for key in ["reserve_inventory", "process_payment", "refund_payment", "release_inventory"] : [
         aws_lambda_function.fn[key].arn,
         "${aws_lambda_function.fn[key].arn}:*", # versions/aliases
       ]
