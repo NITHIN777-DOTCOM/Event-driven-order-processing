@@ -365,7 +365,7 @@ def write_evidence(results: list[Scenario], duration: float) -> None:
             lines += ["", "statusHistory:", "```"]
             lines += [f"{e['timestamp']}  {e['status']:<19} {e['detail']}" for e in r.timeline]
             lines.append("```")
-    EVIDENCE_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    EVIDENCE_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 def main() -> int:
