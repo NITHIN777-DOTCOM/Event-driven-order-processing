@@ -50,6 +50,7 @@ sqs = boto3.client("sqs")
 logger = get_logger("create_order")
 
 CURRENCY = "INR"
+ORDER_LIST_PARTITION = "ORDER"  # every order shares this GSI partition key (fine at demo scale)
 MAX_ITEMS = 20  # well under the DynamoDB transaction limit used by reserve_inventory
 MAX_QUANTITY = 50
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -229,6 +230,9 @@ def build_order(request: dict[str, Any], idempotency_key: str) -> dict[str, Any]
         "simulate": request["simulate"],
         "createdAt": now,
         "updatedAt": now,
+        # GSI "gsi1" lists orders newest-first for GET /orders without a table scan.
+        "gsi1pk": ORDER_LIST_PARTITION,
+        "gsi1sk": now,
     }
 
 

@@ -1,7 +1,7 @@
 # Orders: one item per order. Only the key is declared; DynamoDB is schemaless otherwise.
 # Stored attributes: orderId, customerName, customerEmail, items[{productId, name, quantity, unitPrice}],
 # totalAmount, currency (INR), status, statusHistory[{status, timestamp, detail}], simulate,
-# createdAt, updatedAt, executionArn, paymentId.
+# createdAt, updatedAt, executionArn, paymentId, gsi1pk/gsi1sk (see below).
 resource "aws_dynamodb_table" "orders" {
   name         = "${var.project_prefix}-orders"
   billing_mode = "PAY_PER_REQUEST" # on-demand: $0 when idle
@@ -12,6 +12,25 @@ resource "aws_dynamodb_table" "orders" {
   attribute {
     name = "orderId"
     type = "S"
+  }
+  attribute {
+    name = "gsi1pk"
+    type = "S"
+  }
+  attribute {
+    name = "gsi1sk"
+    type = "S"
+  }
+
+  # "Recent orders" index for GET /orders: gsi1pk = "ORDER" (constant), gsi1sk = createdAt.
+  # One Query with ScanIndexForward=false returns the newest N orders without a table scan.
+  # A single constant partition key is fine at demo scale; at high volume you'd shard it (e.g. ORDER#<day>).
+  global_secondary_index {
+    name               = "gsi1"
+    hash_key           = "gsi1pk"
+    range_key          = "gsi1sk"
+    projection_type    = "INCLUDE"
+    non_key_attributes = ["createdAt", "status", "simulate", "totalAmount", "currency", "customerName", "deadLettered"]
   }
 
   # Off to keep cost at zero for a course project; encryption at rest uses the AWS-owned key (default).

@@ -200,7 +200,7 @@ locals {
 # Dashboard: 7 rows on a 24-column grid, top to bottom following the order's path
 # -----------------------------------------------------------------------------
 locals {
-  # One Lambda graph per metric, with all 6 functions on it.
+  # One Lambda graph per metric, with every function on it.
   lambda_widgets = [
     for index, spec in [
       { title = "Lambda invocations", metric = "Invocations", stat = "Sum" },

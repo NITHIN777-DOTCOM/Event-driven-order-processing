@@ -59,6 +59,27 @@ data "aws_iam_policy_document" "get_order" {
   }
 }
 
+data "aws_iam_policy_document" "list_orders" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["list_orders"].json]
+
+  # Query on the index only: this function can't read the base table or scan it.
+  statement {
+    sid       = "QueryRecentOrdersIndex"
+    actions   = ["dynamodb:Query"]
+    resources = ["${aws_dynamodb_table.orders.arn}/index/gsi1"]
+  }
+}
+
+data "aws_iam_policy_document" "list_products" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["list_products"].json]
+
+  statement {
+    sid       = "ReadCatalogue"
+    actions   = ["dynamodb:Scan"]
+    resources = [aws_dynamodb_table.inventory.arn]
+  }
+}
+
 data "aws_iam_policy_document" "start_workflow" {
   source_policy_documents = [data.aws_iam_policy_document.lambda_base["start_workflow"].json]
 
@@ -134,6 +155,8 @@ locals {
     reserve_inventory = data.aws_iam_policy_document.reserve_inventory.json
     process_payment   = data.aws_iam_policy_document.process_payment.json
     release_inventory = data.aws_iam_policy_document.release_inventory.json
+    list_orders       = data.aws_iam_policy_document.list_orders.json
+    list_products     = data.aws_iam_policy_document.list_products.json
   }
 }
 

@@ -45,7 +45,21 @@ def aws():
         orders = ddb.create_table(
             TableName="test-orders",
             KeySchema=[{"AttributeName": "orderId", "KeyType": "HASH"}],
-            AttributeDefinitions=[{"AttributeName": "orderId", "AttributeType": "S"}],
+            AttributeDefinitions=[
+                {"AttributeName": "orderId", "AttributeType": "S"},
+                {"AttributeName": "gsi1pk", "AttributeType": "S"},
+                {"AttributeName": "gsi1sk", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "gsi1",
+                    "KeySchema": [
+                        {"AttributeName": "gsi1pk", "KeyType": "HASH"},
+                        {"AttributeName": "gsi1sk", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
             BillingMode="PAY_PER_REQUEST",
         )
         inventory = ddb.create_table(

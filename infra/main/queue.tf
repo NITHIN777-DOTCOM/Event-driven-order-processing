@@ -22,7 +22,7 @@ resource "aws_sqs_queue" "orders" {
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.orders_dlq.arn
-    maxReceiveCount     = 3
+    maxReceiveCount     = local.max_receive_count
   })
 
   tags = {

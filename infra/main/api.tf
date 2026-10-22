@@ -4,7 +4,8 @@ resource "aws_apigatewayv2_api" "orders" {
   protocol_type = "HTTP"
 
   cors_configuration {
-    allow_origins = ["*"] # tightened to the CloudFront domain in Phase 4
+    # Only the storefront (CloudFront) and the local Vite dev server may call the API from a browser.
+    allow_origins = ["https://${aws_cloudfront_distribution.frontend.domain_name}", "http://localhost:5173"]
     allow_methods = ["GET", "POST", "OPTIONS"]
     allow_headers = ["content-type", "idempotency-key"]
     # Lets browser JavaScript read the idempotency response headers.
@@ -48,8 +49,10 @@ resource "aws_apigatewayv2_stage" "default" {
 
 locals {
   api_routes = {
-    create_order = "POST /orders"
-    get_order    = "GET /orders/{id}"
+    create_order  = "POST /orders"
+    get_order     = "GET /orders/{id}"
+    list_orders   = "GET /orders"
+    list_products = "GET /products"
   }
 }
 

@@ -14,13 +14,13 @@ from tf_outputs import load_outputs
 
 STOCK = 100
 
-# productId, name, unit price (INR)
+# productId, name, unit price (INR). Each photo is frontend/public/products/<productId lower-case>.webp.
 PRODUCTS = [
-    ("WIRELESS-MOUSE", "Logitech M331 Silent Wireless Mouse", "799.00"),
-    ("MECH-KEYBOARD", "Keychron K2 Mechanical Keyboard", "3499.00"),
-    ("USBC-HUB", "Anker 7-in-1 USB-C Hub", "1999.00"),
-    ("ANC-HEADPHONES", "Sony WH-1000XM5 Noise Cancelling Headphones", "26990.00"),
-    ("4K-MONITOR", "LG 27-inch 4K UHD IPS Monitor", "24999.00"),
+    ("WIRELESS-MOUSE", "Wireless Mouse", "799.00"),
+    ("MECH-KEYBOARD", "Mechanical Keyboard", "3499.00"),
+    ("USBC-HUB", "USB-C Hub", "1999.00"),
+    ("ANC-HEADPHONES", "Noise-Cancelling Headphones", "26990.00"),
+    ("4K-MONITOR", "27-inch 4K Monitor", "24999.00"),
 ]
 
 
@@ -37,6 +37,7 @@ def main() -> None:
                     "price": Decimal(price),
                     "stock": STOCK,
                     "reserved": 0,
+                    "imageKey": f"products/{product_id.lower()}.webp",
                 }
             )
 

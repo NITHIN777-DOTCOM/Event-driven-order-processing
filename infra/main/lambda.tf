@@ -22,9 +22,23 @@ locals {
       }
     }
     get_order = {
-      description = "GET /orders/{id} - returns an order and its statusHistory timeline"
+      description = "GET /orders/{id} - returns an order, its statusHistory, a plain-English live feed and AWS Console links"
+      environment = {
+        ORDERS_TABLE       = aws_dynamodb_table.orders.name
+        WORKFLOW_LOG_GROUP = "/aws/vendedlogs/states/${local.state_machine_name}"
+      }
+    }
+    list_orders = {
+      description = "GET /orders?limit=N - newest orders first via the gsi1 index (Query, no scan)"
       environment = {
         ORDERS_TABLE = aws_dynamodb_table.orders.name
+        ORDERS_INDEX = "gsi1"
+      }
+    }
+    list_products = {
+      description = "GET /products - storefront catalogue with live stock"
+      environment = {
+        INVENTORY_TABLE = aws_dynamodb_table.inventory.name
       }
     }
     start_workflow = {
@@ -34,6 +48,7 @@ locals {
       environment = {
         ORDERS_TABLE      = aws_dynamodb_table.orders.name
         STATE_MACHINE_ARN = local.state_machine_arn
+        MAX_RECEIVE_COUNT = tostring(local.max_receive_count)
       }
     }
     reserve_inventory = {

@@ -36,7 +36,10 @@ def test_payment_declined_raises_permanent_error(aws, handler):
     with pytest.raises(handler.PaymentDeclined, match="declined"):
         handler.lambda_handler(payment_event(order["orderId"], "payment_declined"), None)
 
-    assert "paymentId" not in load(aws, order["orderId"])
+    saved = load(aws, order["orderId"])
+    assert "paymentId" not in saved
+    assert saved["status"] == "PAYMENT_DECLINED"
+    assert saved["statusHistory"][-1]["detail"] == "Attempt 1: Card declined by issuer (simulated)"
 
 
 def test_payment_flaky_fails_twice_then_succeeds(aws, handler):

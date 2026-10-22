@@ -3,3 +3,5 @@ boto3
 pytest
 moto
 pytest-cov
+# UI evidence (scripts/capture_ui.py); then run: python -m playwright install chromium
+playwright

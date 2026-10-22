@@ -10,4 +10,7 @@ locals {
   state_machine_arn = "arn:aws:states:${var.region}:${local.account_id}:stateMachine:${local.state_machine_name}"
 
   log_retention_days = 7
+
+  # SQS redrive: failed receives before a message moves to the DLQ (also tells start_workflow when that happens).
+  max_receive_count = 3
 }

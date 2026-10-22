@@ -17,7 +17,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from common.logger import get_logger
-from common.orders import RESERVED, cancellation_codes, status_update
+from common.orders import OUT_OF_STOCK, RESERVED, cancellation_codes, status_update
 from common.tracing import instrument_aws_sdk
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
@@ -52,13 +52,13 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         log.info("Stock already reserved for this order; skipping")
     elif order.get("simulate") == "out_of_stock":
         log.warning("Simulated out-of-stock")
-        raise OutOfStock(f"Insufficient stock for: {order['items'][0]['productId']} (simulated)")
+        raise record_out_of_stock(order_id, f"Insufficient stock for: {order['items'][0]['productId']} (simulated)")
     else:
         try:
             reserve_stock(order)
         except OutOfStock as err:
             log.warning("Out of stock", reason=str(err))
-            raise
+            raise record_out_of_stock(order_id, str(err)) from err
         log.info("Inventory reserved", items=[(i["productId"], i["quantity"]) for i in order["items"]])
 
     # Only what later states need goes back to the state machine.
@@ -70,6 +70,12 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "itemsSummary": format_items(order),
         "simulate": order.get("simulate", "none"),
     }
+
+
+def record_out_of_stock(order_id: str, reason: str) -> OutOfStock:
+    """Append OUT_OF_STOCK to the timeline (so the tracker shows WHAT failed) and return the error to raise."""
+    orders_table.update_item(Key={"orderId": order_id}, **status_update(OUT_OF_STOCK, reason))
+    return OutOfStock(reason)
 
 
 def reserve_stock(order: dict[str, Any]) -> None:

@@ -12,11 +12,17 @@ PROCESSING = "PROCESSING"  # Step Functions execution started
 RESERVED = "RESERVED"  # stock reserved for every item
 PAYMENT_RETRY = "PAYMENT_RETRY"  # a transient payment failure; Step Functions will retry
 PAYMENT_CAPTURED = "PAYMENT_CAPTURED"  # (simulated) payment succeeded
+PAYMENT_DECLINED = "PAYMENT_DECLINED"  # permanent payment failure; compensation follows
+OUT_OF_STOCK = "OUT_OF_STOCK"  # reservation impossible; nothing was reserved
 INVENTORY_RELEASED = "INVENTORY_RELEASED"  # compensation: reserved stock given back
 COMPLETED = "COMPLETED"  # terminal: success (written by the state machine itself)
 FAILED = "FAILED"  # terminal: failure (written by the state machine itself)
 
 TERMINAL_STATUSES = frozenset({COMPLETED, FAILED})
+
+# History-only events: appended to statusHistory WITHOUT changing `status` (the order stays PENDING).
+DELIVERY_RETRY = "DELIVERY_RETRY"  # an SQS delivery attempt failed and SQS will retry it
+DEAD_LETTERED = "DEAD_LETTERED"  # final attempt failed; SQS moves the message to the DLQ
 
 
 def history_entry(status: str, detail: str, timestamp: str | None = None) -> dict[str, str]:
@@ -69,6 +75,30 @@ def status_update(
         "ExpressionAttributeNames": names,
         "ExpressionAttributeValues": values,
     }
+
+
+def history_event(event: str, detail: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """UpdateItem arguments that append one statusHistory entry WITHOUT changing `status`.
+
+    Used for events that the tracker should show, but that aren't order states, such as failed
+    SQS delivery attempts of a poison message.
+    """
+    now = utc_now_iso()
+    names: dict[str, str] = {}
+    values: dict[str, Any] = {":now": now, ":entry": [history_entry(event, detail, now)]}
+    assignments = ["updatedAt = :now", "statusHistory = list_append(statusHistory, :entry)"]
+    for index, (attribute, value) in enumerate((extra or {}).items()):
+        names[f"#x{index}"] = attribute
+        values[f":x{index}"] = value
+        assignments.append(f"#x{index} = :x{index}")
+    args: dict[str, Any] = {
+        "UpdateExpression": "SET " + ", ".join(assignments),
+        "ConditionExpression": "attribute_exists(orderId)",
+        "ExpressionAttributeValues": values,
+    }
+    if names:
+        args["ExpressionAttributeNames"] = names
+    return args
 
 
 def cancellation_codes(error_response: dict[str, Any]) -> list[str]:

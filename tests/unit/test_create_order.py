@@ -36,6 +36,7 @@ def test_valid_order_is_saved_pending_and_enqueued(aws, handler):
     assert order["simulate"] == "none"
     assert [h["status"] for h in order["statusHistory"]] == ["PENDING"]
     assert order["items"][0]["name"] == "Wireless Mouse"
+    assert order["gsi1pk"] == "ORDER" and order["gsi1sk"] == order["createdAt"]
 
     messages = aws.sqs.receive_message(QueueUrl=aws.queue_url)["Messages"]
     assert json.loads(messages[0]["Body"]) == {"orderId": body["orderId"]}

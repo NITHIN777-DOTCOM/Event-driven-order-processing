@@ -21,7 +21,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from common.logger import StructuredLogger, get_logger
-from common.orders import PAYMENT_CAPTURED, PAYMENT_RETRY, status_update
+from common.orders import PAYMENT_CAPTURED, PAYMENT_DECLINED, PAYMENT_RETRY, status_update
 from common.tracing import instrument_aws_sdk
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
@@ -91,6 +91,10 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, str]:
         raise
     except PaymentDeclined as err:
         log.warning("Payment declined; saga will compensate", reason=str(err))
+        orders_table.update_item(
+            Key={"orderId": order_id},
+            **status_update(PAYMENT_DECLINED, f"Attempt {attempt}: {err}"),
+        )
         raise
 
     return save_capture(order_id, payment, amount, currency, attempt, log)

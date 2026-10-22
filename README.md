@@ -20,6 +20,30 @@ python -m venv .venv; .venv\Scripts\python -m pip install -r requirements-dev.tx
 .venv\Scripts\python scripts\e2e_test.py                    # all 7 failure scenarios against the live API (~3 min)
 ```
 
+## Storefront
+
+React + Vite + TypeScript + Tailwind, hosted on a private S3 bucket behind CloudFront (OAC, HTTPS only).
+The order tracker polls `GET /orders/{id}` every 1.5 s and shows a live feed of what each AWS service did.
+
+```powershell
+cd frontend; npm ci; copy public\config.example.json public\config.json   # set apiUrl
+npm run dev                                                                    # http://localhost:5173
+..\.venv\Scripts\python ..\scripts\deploy_frontend.py                     # build + upload + invalidate
+```
+
+### Photo credits
+
+All product photos are from [Unsplash](https://unsplash.com) under the
+[Unsplash License](https://unsplash.com/license) (free to use). They were cropped to 4:3 and converted to WebP.
+
+| Product | Photographer | Source |
+|---|---|---|
+| Mechanical Keyboard | Hannes Köttner | https://unsplash.com/photos/QpTZcTlk08g |
+| Wireless Mouse | Harpal Singh | https://unsplash.com/photos/KuvEVL7lXYQ |
+| USB-C Hub | Lasse Jensen | https://unsplash.com/photos/a5-AlNgVNZw |
+| Noise-Cancelling Headphones | Kiran CK | https://unsplash.com/photos/LSNJ-pltdu8 |
+| 27-inch 4K Monitor | Rohit | https://unsplash.com/photos/KZnfwqi-B0U |
+
 ## Monitoring
 
 - **Dashboard** `order-saga-dashboard`: orders (started, succeeded, failed, success rate, duration), API, queue and

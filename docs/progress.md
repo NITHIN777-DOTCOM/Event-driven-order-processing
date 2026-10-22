@@ -3,7 +3,7 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Phase 3 — Monitoring: DONE (2026-10-22).** Next: **Phase 4 — Frontend (S3 + CloudFront).**
+**Phase 4 — Frontend: DONE (2026-10-22).** Next: **Phase 4.1 — Amazon-style catalog + DemoPay wallet.**
 
 ## Done
 ### Phase 0
@@ -45,8 +45,18 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - Known gap: the Step Functions state-machine segment doesn't show up in X-Ray (tracing on, IAM OK, AssumeRole OK).
   Trace propagation through SFN to the Lambdas works. See the notes in the evidence file.
 
-## Next (Phase 4)
-- Frontend on S3 + CloudFront (OAC), calling the API; tighten CORS to the CloudFront domain.
+### Phase 4
+- Storefront: https://dg38gx94mao9n.cloudfront.net (CloudFront `PriceClass_200`, OAC -> private S3
+  `order-saga-frontend-876889172858`, SPA fallback, security headers). `config.json` is written by Terraform.
+- Backend: GET /products, GET /orders (GSI `gsi1`, backfilled 52 orders), GET /orders/{id} now returns
+  `feed` + `consoleLinks`. New timeline events: PAYMENT_DECLINED, OUT_OF_STOCK, DELIVERY_RETRY, DEAD_LETTERED.
+  CORS = CloudFront domain + http://localhost:5173.
+- Frontend: frontend/ (React 18, Vite 5, Tailwind 3, React Router 6). Pages: Shop, Checkout, Order tracker, Orders.
+- Scripts: deploy_frontend.py, capture_ui.py (Playwright), backfill_order_index.py.
+- Unit tests: 51 passed, 96% coverage. UI evidence: docs/evidence/ui/ (11 desktop + 5 mobile screenshots).
+
+## Next (Phase 4.1)
+- 16-product catalogue in 5 categories, Amazon-style listing/product/cart pages, DemoPay wallet with real debits/refunds.
 
 ## Known limitations / ideas (good viva points)
 - If create_order crashes after the DynamoDB transaction but before SQS SendMessage, the order stays PENDING,

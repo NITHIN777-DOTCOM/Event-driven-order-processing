@@ -25,3 +25,6 @@ htmlcov/
 
 # Node (frontend / tooling)
 node_modules/
+
+# Frontend local runtime config (Terraform writes the deployed one to S3)
+frontend/public/config.json

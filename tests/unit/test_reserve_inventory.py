@@ -43,7 +43,8 @@ def test_insufficient_stock_raises_and_changes_nothing(aws, handler):
     assert stock_of(aws, "WIRELESS-MOUSE") == (100, 0)  # not partially reserved
     assert stock_of(aws, "MECH-KEYBOARD") == (2, 0)
     saved = aws.orders.get_item(Key={"orderId": order["orderId"]})["Item"]
-    assert saved["status"] == "PENDING"
+    assert saved["status"] == "OUT_OF_STOCK"
+    assert saved["statusHistory"][-1]["detail"] == "Insufficient stock for: MECH-KEYBOARD"
     assert "reservedItems" not in saved
 
 
@@ -54,6 +55,8 @@ def test_simulated_out_of_stock_raises_without_touching_stock(aws, handler):
         handler.lambda_handler({"orderId": order["orderId"]}, None)
 
     assert stock_of(aws, "WIRELESS-MOUSE") == (100, 0)
+    saved = aws.orders.get_item(Key={"orderId": order["orderId"]})["Item"]
+    assert [h["status"] for h in saved["statusHistory"]] == ["PENDING", "OUT_OF_STOCK"]
 
 
 def test_retry_after_success_does_not_reserve_twice(aws, handler):

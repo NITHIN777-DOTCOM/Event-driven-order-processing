@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-page font-sans text-[15px] leading-relaxed text-ink antialiased;
+  }
+  /* The only "shadow" in the design: a subtle, clearly visible keyboard focus ring. */
+  :focus-visible {
+    outline: 2px solid #c58940;
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-card border border-line bg-white;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-control px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-amber text-ink hover:bg-amber-light;
+  }
+  .btn-secondary {
+    @apply btn border border-line bg-white text-ink hover:border-ink;
+  }
+  .input {
+    @apply w-full rounded-control border border-line bg-white px-3 py-2.5 text-[15px] text-ink placeholder:text-pending focus:border-ink focus:outline-none;
+  }
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-muted-strong;
+  }
+  .section-title {
+    @apply text-[15px] font-semibold;
+  }
+  .skeleton {
+    @apply rounded-control bg-tile motion-safe:animate-pulse;
+  }
+}
+
+/* Live-feed rows: a subtle fade/slide in when a new event arrives. */
+@keyframes feed-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.feed-row-enter {
+  animation: feed-in 260ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .feed-row-enter {
+    animation: none;
+  }
+}

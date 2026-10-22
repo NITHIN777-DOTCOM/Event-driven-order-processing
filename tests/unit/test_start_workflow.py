@@ -85,6 +85,25 @@ def test_poison_message_is_reported_as_batch_item_failure(aws, handler, capsys):
     assert error_lines[0]["errorType"] == "PoisonMessage"
 
 
+def test_poison_deliveries_are_recorded_and_third_marks_dead_lettered(aws, handler):
+    order = seed_order(aws.orders, simulate="poison")
+    event = sqs_event(order["orderId"])
+
+    for receive_count in ("1", "2", "3"):
+        event["Records"][0]["attributes"]["ApproximateReceiveCount"] = receive_count
+        handler.lambda_handler(event, None)
+
+    saved = aws.orders.get_item(Key={"orderId": order["orderId"]})["Item"]
+    assert saved["status"] == "PENDING"  # history-only events never change the status
+    assert [h["status"] for h in saved["statusHistory"]] == [
+        "PENDING",
+        "DELIVERY_RETRY",
+        "DELIVERY_RETRY",
+        "DEAD_LETTERED",
+    ]
+    assert saved["deadLettered"] is True
+
+
 def test_unknown_order_and_malformed_body_fail(aws, handler):
     event = sqs_event("ORD-20261022-00000000")
     event["Records"].append({"messageId": "bad", "body": "not json"})

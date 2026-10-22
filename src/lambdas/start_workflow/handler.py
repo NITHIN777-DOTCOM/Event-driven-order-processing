@@ -21,13 +21,15 @@ import boto3
 from botocore.exceptions import ClientError
 
 from common.logger import get_logger
-from common.orders import PENDING, PROCESSING, status_update
+from common.orders import DEAD_LETTERED, DELIVERY_RETRY, PENDING, PROCESSING, history_event, status_update
 from common.tracing import instrument_aws_sdk
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
 STATE_MACHINE_ARN = os.environ["STATE_MACHINE_ARN"]
+# Must match the queue's redrive policy (maxReceiveCount); after this many failed receives, SQS dead-letters it.
+MAX_RECEIVE_COUNT = int(os.environ.get("MAX_RECEIVE_COUNT", "3"))
 
 orders_table = boto3.resource("dynamodb").Table(ORDERS_TABLE)
 sfn = boto3.client("stepfunctions")
@@ -77,6 +79,7 @@ def start_saga(record: dict[str, Any]) -> None:
     # Demo: a message that always fails. SQS retries it 3 times, then moves it to the DLQ.
     # The order stays PENDING, because the saga is never started.
     if order.get("simulate") == "poison":
+        record_failed_delivery(order_id, int(record.get("attributes", {}).get("ApproximateReceiveCount", "1")))
         raise PoisonMessage(f"Simulated poison message for order {order_id}")
 
     execution_arn = execution_arn_for(order_id)
@@ -101,6 +104,21 @@ def start_saga(record: dict[str, Any]) -> None:
         return
 
     log.info("Saga execution started", executionArn=execution_arn)
+
+
+def record_failed_delivery(order_id: str, attempt: int) -> None:
+    """Show each failed delivery in the order's timeline. The order's status stays PENDING."""
+    if attempt >= MAX_RECEIVE_COUNT:
+        update = history_event(
+            DEAD_LETTERED,
+            f"Delivery attempt {attempt} of {MAX_RECEIVE_COUNT} failed; SQS moves the message to the dead-letter queue",
+            {"deadLettered": True},
+        )
+    else:
+        update = history_event(
+            DELIVERY_RETRY, f"Delivery attempt {attempt} of {MAX_RECEIVE_COUNT} failed; SQS will retry"
+        )
+    orders_table.update_item(Key={"orderId": order_id}, **update)
 
 
 def mark_processing(order_id: str, execution_arn: str) -> None:

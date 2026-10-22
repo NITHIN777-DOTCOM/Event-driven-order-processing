@@ -7,6 +7,19 @@ output "api_url" {
   value       = aws_apigatewayv2_stage.default.invoke_url
 }
 
+output "frontend_url" {
+  description = "The storefront (CloudFront, HTTPS)."
+  value       = "https://${aws_cloudfront_distribution.frontend.domain_name}"
+}
+
+output "frontend_bucket" {
+  value = aws_s3_bucket.frontend.bucket
+}
+
+output "frontend_distribution_id" {
+  value = aws_cloudfront_distribution.frontend.id
+}
+
 output "orders_table" {
   value = aws_dynamodb_table.orders.name
 }
