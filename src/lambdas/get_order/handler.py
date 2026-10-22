@@ -10,6 +10,9 @@ import boto3
 
 from common.http import response
 from common.logger import get_logger
+from common.tracing import instrument_aws_sdk
+
+instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
 

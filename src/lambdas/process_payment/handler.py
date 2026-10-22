@@ -22,6 +22,9 @@ from botocore.exceptions import ClientError
 
 from common.logger import StructuredLogger, get_logger
 from common.orders import PAYMENT_CAPTURED, PAYMENT_RETRY, status_update
+from common.tracing import instrument_aws_sdk
+
+instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
 

@@ -51,5 +51,10 @@ output "console_links" {
     api             = "${local.console}/apigateway/main/api-detail?api=${aws_apigatewayv2_api.orders.id}&region=${var.region}"
     lambdas         = "${local.console}/lambda/home?region=${var.region}#/functions?fo=and&o0=%3A&v0=${var.project_prefix}-"
     sns_topics      = "${local.console}/sns/v3/home?region=${var.region}#/topics"
+    dashboard       = "${local.console}/cloudwatch/home?region=${var.region}#dashboards/dashboard/${aws_cloudwatch_dashboard.main.dashboard_name}"
+    alarms          = "${local.console}/cloudwatch/home?region=${var.region}#alarmsV2:?search=${var.project_prefix}"
+    xray_map        = "${local.console}/cloudwatch/home?region=${var.region}#xray:service-map/map"
+    xray_traces     = "${local.console}/cloudwatch/home?region=${var.region}#xray:traces/query"
+    saved_queries   = "${local.console}/cloudwatch/home?region=${var.region}#logsV2:logs-insights"
   }
 }

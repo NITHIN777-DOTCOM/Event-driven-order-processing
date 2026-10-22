@@ -20,6 +20,21 @@ python -m venv .venv; .venv\Scripts\python -m pip install -r requirements-dev.tx
 .venv\Scripts\python scripts\e2e_test.py                    # all 7 failure scenarios against the live API (~3 min)
 ```
 
+## Monitoring
+
+- **Dashboard** `order-saga-dashboard`: orders (started, succeeded, failed, success rate, duration), API, queue and
+  DLQ, the 6 Lambdas, DynamoDB, and a table of the latest failed orders with their reasons.
+  `scripts\generate_traffic.py` sends 40 mixed orders over 4 minutes to fill it.
+- **Alarms** go to SNS `order-saga-ops-alerts`. A compensated order is a *business* outcome, not a fault, so
+  system alarms cover the DLQ, consumer crashes, API 5xx, timed-out or aborted executions and queue backlog. A
+  separate business alarm fires when more than 50% of orders fail, and only once at least 5 orders have started.
+- **Saved Logs Insights queries** live in the `order-saga/` folder: *Trace one order*, *Failed orders by reason*,
+  *Duplicate messages ignored* and *Slowest Lambda invocations*.
+- **X-Ray**: active tracing is on every Lambda and the state machine, and botocore is patched through the
+  AWS-managed Powertools layer, so there's no Docker build. One trace follows an order from the API Lambda
+  through SQS and Step Functions to DynamoDB.
+- `scripts\collect_evidence.py --order-id <id>` exports alarm states, graphs, the service map and an order trace.
+
 ## Demo: forcing each saga path
 
 Every order can carry `"simulate"`, which picks the path it takes:

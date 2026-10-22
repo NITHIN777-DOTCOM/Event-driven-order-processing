@@ -31,6 +31,9 @@ from common.http import BadRequest, get_header, parse_json_body, response
 from common.logger import StructuredLogger, get_logger
 from common.orders import PENDING, cancellation_codes, history_entry
 from common.timeutil import utc_now_iso
+from common.tracing import instrument_aws_sdk
+
+instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
 INVENTORY_TABLE = os.environ["INVENTORY_TABLE"]

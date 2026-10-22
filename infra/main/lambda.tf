@@ -4,6 +4,11 @@ locals {
 
   default_lambda_timeout = 30
 
+  # AWS-published "Powertools for AWS Lambda (Python)" layer. We use it only for the aws-xray-sdk it
+  # bundles (see src/common/tracing.py). It's pinned so deploys are reproducible. To upgrade, look up:
+  #   aws ssm get-parameter --name /aws/service/powertools/python/arm64/python3.12/latest
+  powertools_layer_arn = "arn:aws:lambda:${var.region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-python312-arm64:40"
+
   # One entry per function. The key is the folder under src/lambdas/.
   # `timeout` is optional (default 30 s).
   lambda_functions = {
@@ -96,6 +101,7 @@ resource "aws_lambda_function" "fn" {
   runtime          = "python3.12"
   architectures    = ["arm64"] # Graviton: about 20% cheaper per GB-second than x86
   handler          = "handler.lambda_handler"
+  layers           = [local.powertools_layer_arn]
   filename         = data.archive_file.lambda[each.key].output_path
   source_code_hash = data.archive_file.lambda[each.key].output_base64sha256
   timeout          = try(each.value.timeout, local.default_lambda_timeout)

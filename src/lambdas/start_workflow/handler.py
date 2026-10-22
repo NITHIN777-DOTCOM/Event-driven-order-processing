@@ -22,6 +22,9 @@ from botocore.exceptions import ClientError
 
 from common.logger import get_logger
 from common.orders import PENDING, PROCESSING, status_update
+from common.tracing import instrument_aws_sdk
+
+instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
 STATE_MACHINE_ARN = os.environ["STATE_MACHINE_ARN"]
