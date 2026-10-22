@@ -1,42 +1,262 @@
 # Event-Driven E-Commerce Order Processing on AWS
 
-[![CI](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/ci.yml/badge.svg)](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/ci.yml) [![Deploy](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/deploy.yml/badge.svg)](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/deploy.yml)
+**A serverless saga that reserves stock, takes payment and notifies customers, and stays correct when things fail.**
 
-> 🚧 **Work in progress.** It is being built phase by phase. See [docs/progress.md](docs/progress.md).
+[![CI](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/ci.yml/badge.svg)](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/ci.yml) [![Deploy](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/deploy.yml/badge.svg)](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/deploy.yml) ![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC?style=flat&logo=terraform&logoColor=white) ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white) ![AWS](https://img.shields.io/badge/AWS-serverless-FF9900?style=flat&logo=amazonwebservices&logoColor=white)
 
-A serverless, event-driven order-processing system on AWS that uses the **saga pattern**. An API Gateway
-HTTP API accepts orders idempotently and stores them in DynamoDB. The orders are queued on SQS, which has a
-dead-letter queue. A Step Functions workflow then reserves inventory and processes a simulated payment, with
-retries for transient errors. If a step fails, the workflow runs compensating actions that release the
-inventory and mark the order FAILED. Customers and operators are notified through SNS. Everything is defined
-in Terraform (region `ap-south-1`) and traced with X-Ray, monitored with CloudWatch dashboards and alarms,
-and kept within a $5/month budget.
+**Live demo:** https://dg38gx94mao9n.cloudfront.net. At checkout, open **Test scenario** and try *Payment glitch*,
+*Payment declined* or *Poison message* to watch each failure path live. Payments use **DemoPay**, a demo wallet
+(₹10,00,000 per email). It isn't real money.
 
-## Quick start (after `terraform apply` in `infra/main`)
+![Order tracker: a "Payment glitch" order is retried with backoff, then completes](docs/images/order-saga-demo.gif)
+
+<sub>A real order on the live system. The payment fails twice, Step Functions retries it after 2 s and then 4 s, the wallet is debited once, and the order completes. Every row of the live feed is a step an AWS service performed.</sub>
+
+---
+
+## Highlights
+
+- **Saga with real compensation.** If payment or completion fails, the workflow undoes its own steps in reverse order: it **refunds** the wallet, **releases** the reserved stock, marks the order FAILED with a readable reason, and emails the customer.
+- **Idempotent at three layers.** An `Idempotency-Key` on `POST /orders` stops duplicate orders. The execution name equals the `orderId`, so a duplicate SQS delivery can't start a second saga. Payment and refund are conditional on `paymentId` / `refunded`, so a customer is **never charged or refunded twice**.
+- **Atomic money movement.** A payment is one DynamoDB `TransactWriteItems` across three tables (wallet balance, ledger entry, order), conditional on enough balance and no prior payment. A low balance is a **real** decline, not a simulated one.
+- **Retries where they help, not where they hurt.** Transient payment errors are retried with exponential backoff (2 s → 4 s → 8 s). A permanent decline goes straight to compensation.
+- **Poison messages are isolated.** After 3 failed receives, SQS moves the message to a dead-letter queue, and a CloudWatch alarm emails the operator.
+- **100% infrastructure as code.** 94 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
+- **CI/CD with no stored keys.** GitHub Actions assumes AWS roles through **OIDC**, scoped to this repo's `main` branch (deploy) or its pull requests (read-only plan). Every merge is applied, published and smoke-tested.
+- **About $0 when idle.** Everything is pay-per-use: Lambda, Step Functions, on-demand DynamoDB, SQS, SNS, CloudFront and S3. There's no VPC, NAT gateway or server. A $5/month budget alert is the backstop.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+  user["Browser"] -->|HTTPS| cf["CloudFront"] --> s3[("S3 storefront<br/>private, OAC")]
+  user -->|JSON| api["API Gateway<br/>HTTP API"]
+  api --> co["create_order"]
+  api --> reads["get_order · list_orders<br/>list_products · wallet_api"]
+  co -->|"order + idempotency key<br/>in one transaction"| ddb[("DynamoDB<br/>orders · inventory · idempotency<br/>wallets · wallet-txns")]
+  reads --> ddb
+  co -->|"orderId"| q["SQS<br/>orders-queue"]
+  q -->|"batches of 10"| sw["start_workflow"]
+  q -.->|"after 3 failed receives"| dlq["SQS DLQ"]
+  sw -->|"StartExecution<br/>name = orderId"| sfn["Step Functions<br/>order-saga-workflow"]
+  sfn --> lam["reserve · payment<br/>refund · release Lambdas"]
+  lam --> ddb
+  sfn -->|"direct UpdateItem"| ddb
+  sfn -->|"direct Publish"| sns["SNS<br/>notifications"] --> mail["Customer email"]
+  dlq -.-> cw["CloudWatch alarms"] -.-> ops["SNS ops-alerts"]
+```
+
+**Life of an order**
+
+1. The storefront calls `POST /orders` with an `Idempotency-Key`. `create_order` validates the order, prices it from inventory on the server, and writes the order plus the idempotency record in **one transaction**. It replies `202 Accepted` right away, without waiting for the saga.
+2. The `orderId` goes onto **SQS**, which absorbs spikes and decouples the API from the workflow.
+3. `start_workflow` consumes batches of 10 messages. It marks the order PROCESSING and starts a **Step Functions** execution named after the order (`ReportBatchItemFailures`: only failed messages are retried).
+4. **ReserveInventory** decrements stock for every item in one DynamoDB transaction, so stock is never partly reserved.
+5. **ProcessPayment** debits the DemoPay wallet: balance, ledger entry and order are updated atomically, exactly once.
+6. **MarkOrderCompleted** and **NotifyCustomer** call DynamoDB and SNS **directly from the state machine**, with no Lambda in between.
+7. Every step appends `{status, timestamp, detail}` to the order's `statusHistory`. The tracker polls `GET /orders/{id}` every 1.5 s and turns that history into the live feed.
+
+---
+
+## The saga
+
+```mermaid
+stateDiagram-v2
+  [*] --> ReserveInventory
+  ReserveInventory --> ProcessPayment
+  ReserveInventory --> DescribeFailure: OutOfStock or other error, nothing to undo
+  ProcessPayment --> ProcessPayment: PaymentTransientError, retry 2s 4s 8s
+  ProcessPayment --> MarkOrderCompleted
+  ProcessPayment --> RefundPayment: PaymentDeclined or retries exhausted
+  MarkOrderCompleted --> NotifyCustomer
+  MarkOrderCompleted --> RefundPayment: error after payment
+  NotifyCustomer --> OrderCompleted
+  OrderCompleted --> [*]
+  RefundPayment --> ReleaseInventory
+  ReleaseInventory --> DescribeFailure
+  DescribeFailure --> MarkOrderFailed
+  MarkOrderFailed --> NotifyCustomerFailure
+  NotifyCustomerFailure --> OrderFailed
+  OrderFailed --> [*]
+```
+
+Compensation runs in **reverse order**: refund first, then release stock. Both steps are idempotent (`RefundPayment` is a no-op if nothing was charged), so retries are always safe. `DescribeFailure` is a JSONata Pass state that turns a Lambda error into a readable reason such as *"PaymentDeclined: Insufficient wallet balance: ₹1,000 available, ₹5,999 needed"*. Definition: [`statemachine/order_saga.asl.json`](statemachine/order_saga.asl.json).
+
+---
+
+## Failure handling
+
+| Failure | What happens | Mechanism |
+|---|---|---|
+| Payment glitch | Retried twice, then succeeds; wallet debited **once** | Step Functions `Retry` on `PaymentTransientError`: up to 3 retries, 2 s interval, backoff ×2 |
+| Card declined | No money moves; stock released; order FAILED; email sent | `Catch PaymentDeclined` → RefundPayment (no-op) → ReleaseInventory |
+| Insufficient wallet balance | Real decline; nothing debited; stock released | Transaction condition `balance >= total`, then the same compensation path |
+| Out of stock | Order FAILED; no compensation needed | Reservation is one all-or-nothing transaction; `Catch OutOfStock` skips release |
+| Duplicate click or retry | Same order returned (`200`, `duplicate: true`); no second order | `Idempotency-Key` record written in the same transaction as the order (24 h TTL) |
+| Duplicate SQS delivery | Ignored; exactly one execution | Conditional PENDING → PROCESSING update; execution name = `orderId` |
+| Poison message | Retried 3× (60 s apart), then dead-lettered; ops alarm emails | SQS redrive `maxReceiveCount 3` → DLQ; CloudWatch alarm `order-saga-dlq-not-empty` |
+
+---
+
+## Design decisions & trade-offs
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| **SQS in front of the workflow** | The API answers without waiting for the saga; spikes queue up instead of failing; poison messages are isolated in a DLQ | Status is eventually consistent, so clients must poll, and there's a short delay before the saga starts |
+| **Step Functions instead of Lambdas calling Lambdas** | Retries, catches and compensation are declared in one place and visible as a graph; full execution history | ASL is verbose; there's a per-transition cost |
+| **Standard workflow, not Express** | Exactly-once step execution and a 90-day execution history in the console, which matter for payments | Costs more per transition than Express at high volume |
+| **Reserve stock before charging** | Never take money for something that can't ship; out-of-stock needs no refund | Stock is held briefly for orders whose payment then fails (released by compensation) |
+| **Direct SDK integrations** (DynamoDB, SNS) | Fewer Lambdas and cold starts; less code to maintain | Logic in ASL/JSONata is harder to unit-test than Python |
+| **HTTP API instead of REST API** | Cheaper, lower latency, built-in CORS | No X-Ray tracing, WAF or usage plans; traces start at the first Lambda |
+| **On-demand DynamoDB** | $0 when idle, no capacity planning | More expensive per request than provisioned capacity under steady heavy load |
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| AWS | API Gateway (HTTP API), Lambda (Python 3.12, arm64), SQS + DLQ, Step Functions (Standard), DynamoDB, SNS, S3, CloudFront (OAC), CloudWatch, X-Ray, IAM, Budgets |
+| Infrastructure as code | Terraform ≥ 1.10, S3 remote state with native locking; separate bootstrap stack |
+| Backend | Python, boto3, structured JSON logging, aws-xray-sdk (via the AWS Powertools layer) |
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS, React Router |
+| Testing | pytest + moto (unit), live end-to-end scenario suite, Playwright (UI) |
+| CI/CD | GitHub Actions, AWS OIDC (no stored keys), plan-on-PR comments, smoke test after every deploy |
+
+---
+
+## Testing & evidence
+
+- **65 unit tests, 95% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
+- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **8/8 scenarios passed** against the deployed system, including DemoPay ledger checks.
+
+| # | Scenario | Result |
+|---|---|---|
+| a | Normal order → COMPLETED, stock −1, wallet debited once | PASS |
+| b | Payment declined → FAILED, stock restored, RefundPayment no-op | PASS |
+| c | Payment glitch → 2 retries → COMPLETED, exactly 1 debit | PASS |
+| d | Out of stock → FAILED, nothing reserved, no release step | PASS |
+| e | Same Idempotency-Key ×3 → 1 order, 1 execution, 1 debit | PASS |
+| f | Same SQS message delivered 3× → 1 execution | PASS |
+| g | Poison message → in the DLQ within ~3 min, order stays PENDING | PASS |
+| h | Wallet balance too low → real decline, nothing debited, stock released | PASS |
+
+- **UI suite** ([`scripts/capture_ui.py`](scripts/capture_ui.py)): every scenario driven through the deployed storefront in Chromium. **6/6**, with ledger checks.
+- **Every deploy** runs a smoke test: one real order must reach COMPLETED within 60 s with exactly one wallet debit.
+- Evidence: [`docs/evidence/`](docs/evidence/). The e2e results are in [`e2e-failure-tests.md`](docs/evidence/e2e-failure-tests.md), UI screenshots in [`ui/`](docs/evidence/ui/), monitoring in [`phase3-monitoring.md`](docs/evidence/phase3-monitoring.md) and CI/CD runs in [`phase5-cicd.md`](docs/evidence/phase5-cicd.md).
+
+### Observability
+
+- **Dashboard** `order-saga-dashboard`: orders started, succeeded and failed with success rate, API traffic, queue and DLQ depth, the Lambdas, DynamoDB, and a table of the latest failed orders.
+- **6 alarms → SNS `order-saga-ops-alerts`**. System faults (DLQ not empty, consumer errors, API 5xx, stuck executions, queue backlog) are separate from a business alarm: failure rate > 50%, evaluated only when at least 5 orders have started. A declined payment is a normal outcome, not an incident.
+- **Saved Logs Insights queries**, such as *Trace one order*, which follows one `orderId` across every Lambda and the Step Functions log.
+- **X-Ray**: one trace follows an order from `create_order` through SQS and Step Functions to DynamoDB.
+
+<img src="docs/images/dashboard-orders.webp" alt="CloudWatch: saga executions started, succeeded and failed" width="720">
+
+---
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/shop.webp" alt="Storefront listing with filters"><br><sub><b>Shop</b>: 16 products, filters, sort, ratings, live stock</sub></td>
+    <td width="50%"><img src="docs/images/checkout-payment.webp" alt="Checkout payment step"><br><sub><b>Checkout</b>: DemoPay wallet, balance after payment</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/tracker-real-decline.webp" alt="Failed order tracker"><br><sub><b>A real decline</b>: insufficient balance, stock released, failure email</sub></td>
+    <td><img src="docs/images/wallet.webp" alt="DemoPay wallet ledger"><br><sub><b>Wallet</b>: ledger of debits, refunds and demo adjustments</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/tracker-live-feed.webp" alt="Order tracker live feed"><br><sub><b>Tracker</b>: progress steps and what each AWS service did</sub></td>
+    <td align="center"><img src="docs/images/mobile-tracker.webp" alt="Mobile order tracker" width="220"><br><sub><b>Mobile</b>: responsive down to 360 px</sub></td>
+  </tr>
+</table>
+
+---
+
+## Run it yourself
+
+**Prerequisites:** an AWS account with a CLI profile, Terraform ≥ 1.10, Python 3.11+, Node.js 20+. The default region is `ap-south-1`.
 
 ```powershell
+# 1. Bootstrap: Terraform state bucket, $5 budget alert, GitHub OIDC roles (local state)
+cd infra/bootstrap
+copy terraform.tfvars.example terraform.tfvars        # set alert_email
+terraform init; terraform apply                       # note the output state_bucket_name
+
+# 2. App stack: set `bucket` in infra/main/backend.tf to that state bucket first
+cd ../main
+copy terraform.tfvars.example terraform.tfvars        # set alert_email
+terraform init; terraform apply
+# confirm the 2 "AWS Notification - Subscription Confirmation" emails
+
+# 3. Data, storefront and a full test run
+cd ../..
 python -m venv .venv; .venv\Scripts\python -m pip install -r requirements-dev.txt
-.venv\Scripts\python scripts\seed_inventory.py              # 5 products, stock 100
-.venv\Scripts\python scripts\place_order.py --simulate none # place an order and follow it to COMPLETED
-.venv\Scripts\python -m pytest --cov=src                    # unit tests (moto, no AWS needed)
-.venv\Scripts\python scripts\e2e_test.py                    # all 7 failure scenarios against the live API (~3 min)
+.venv\Scripts\python scripts\seed_inventory.py
+.venv\Scripts\python scripts\deploy_frontend.py       # prints the CloudFront URL
+.venv\Scripts\python scripts\e2e_test.py              # ~3-4 min, 8 scenarios
 ```
 
-## Storefront
+On macOS or Linux, use `cp` and `.venv/bin/python`. To use CI/CD in a fork, set
+`github_oidc_subject_prefix` in `infra/bootstrap/variables.tf` to your repository's OIDC subject
+(`gh api repos/<owner>/<repo>/actions/oidc/customization/sub`), then set the repo variables
+`AWS_DEPLOY_ROLE_ARN`, `AWS_PLAN_ROLE_ARN` and `ALERT_EMAIL`.
 
-React + Vite + TypeScript + Tailwind, hosted on a private S3 bucket behind CloudFront (OAC, HTTPS only).
-The order tracker polls `GET /orders/{id}` every 1.5 s and shows a live feed of what each AWS service did.
+**Cost:** about $0 when idle. Demo traffic stays within the AWS free tier: 1 of 3 free dashboards, 8 of 10 free alarm metrics, and pay-per-use for everything else.
 
-```powershell
-cd frontend; npm ci; copy public\config.example.json public\config.json   # set apiUrl
-npm run dev                                                                    # http://localhost:5173
-..\.venv\Scripts\python ..\scripts\deploy_frontend.py                     # build + upload + invalidate
+**Tear down:** empty the `order-saga-frontend-*` bucket, then run `terraform destroy` in `infra/main`. The state bucket in `infra/bootstrap` has `prevent_destroy`; remove that line before destroying the bootstrap stack.
+
+---
+
+## Repository structure
+
+```
+infra/bootstrap/   Terraform: state bucket, budget, GitHub OIDC provider + CI roles (local state)
+infra/main/        Terraform: every app resource, one file per concern (api, queue, sfn, lambda, dynamodb, ...)
+statemachine/      Step Functions definition (ASL), rendered with templatefile()
+src/lambdas/       one folder per Lambda handler (10)
+src/common/        shared helpers: logging, orders, wallet, feed, tracing, money
+frontend/          React + Vite storefront (served from S3 via CloudFront)
+tests/unit/        pytest + moto unit tests
+scripts/           seed, deploy, e2e/smoke/UI tests, traffic generator, evidence collection
+docs/              progress log, evidence, images, resume bullets
+.github/workflows/ ci.yml (tests, validate, PR plan) and deploy.yml (apply, publish, smoke test)
 ```
 
-### Photo credits
+---
 
-All product photos are from [Unsplash](https://unsplash.com) under the
-[Unsplash License](https://unsplash.com/license) (free to use). They were cropped to 4:3 and converted to WebP.
+## Security notes & known limitations
+
+- **No end-user authentication yet.** Orders are looked up by ID, and DemoPay wallets are keyed by email, so anyone who knows an email can view or reset that demo wallet. Cognito is on the roadmap.
+- **Notification emails go to the SNS topic's subscriber** (the operator's inbox), not to the address typed at checkout. A production system would use SES or per-customer SNS endpoints.
+- **Order creation isn't a full outbox.** If `create_order` crashed between the DynamoDB write and SQS `SendMessage`, the order would stay PENDING. The fix is DynamoDB Streams → EventBridge Pipes → SQS.
+- **Tracing gap:** HTTP APIs don't support X-Ray, and the state machine's own segment doesn't appear in the service map (trace propagation to its Lambdas works).
+- **Least privilege:** each Lambda has its own IAM role scoped to the exact tables and queues it uses. The CI deploy role is limited to `order-saga-*` resources and can't modify itself.
+- **Edge security:** the API uses stage-level throttling, CORS is restricted to the storefront and localhost, the S3 bucket is private behind OAC, and the bucket policy is TLS-only.
+
+---
+
+## Roadmap
+
+- [ ] Load test with k6 and a scaling graph (not run yet, so there are no throughput claims)
+- [ ] Cognito sign-in for customers; wallets keyed by user ID
+- [ ] Publish order events to EventBridge (analytics, a shipping service)
+- [ ] Shipping step in the saga, with a cancellation window
+- [ ] Transactional outbox (DynamoDB Streams → Pipes) for create_order
+- [ ] AWS WAF on CloudFront, and a custom domain with ACM
+
+---
+
+## Credits
+
+<details>
+<summary>Product photos: Unsplash (Unsplash License)</summary>
+
+All product photos are from [Unsplash](https://unsplash.com) under the [Unsplash License](https://unsplash.com/license). They were cropped to 4:3 and converted to WebP.
 
 | Product | Photographer | Source |
 |---|---|---|
@@ -57,65 +277,8 @@ All product photos are from [Unsplash](https://unsplash.com) under the
 | Felt and Leather Desk Mat | Muhammet Sain | https://unsplash.com/photos/8e9KCdOj29o |
 | 1080p Streaming Webcam | Bedirhan Gul | https://unsplash.com/photos/Gq8qdtRwwJs |
 
-## CI/CD (GitHub Actions + OIDC, no stored AWS keys)
+</details>
 
-| Workflow | Trigger | What it does |
-|---|---|---|
-| `ci.yml` | every push and PR | pytest (coverage ≥ 85%), `terraform fmt -check` + `validate` for both stacks, frontend typecheck + build. **On PRs:** a read-only `terraform plan` (role `order-saga-github-plan-role`) posted as a PR comment |
-| `deploy.yml` | CI green on `main`, or manual | `terraform apply` with `order-saga-github-deploy-role`, publish the storefront, smoke test (1 real order → COMPLETED, exactly 1 wallet DEBIT), job summary |
+## License
 
-The roles live in `infra/bootstrap/github_oidc.tf`. Their trust policies accept only GitHub's OIDC token for
-**this repository**: `ref:refs/heads/main` for deploy and `pull_request` for plan. Sessions last at most 1 h.
-The deploy role is scoped to `order-saga-*` resources and is explicitly denied from editing its own IAM role.
-Repo variables (not secrets): `AWS_DEPLOY_ROLE_ARN`, `AWS_PLAN_ROLE_ARN`, `ALERT_EMAIL`.
-
-## DemoPay wallet
-
-Every customer email gets a demo wallet with ₹10,00,000 (DynamoDB `order-saga-wallets`, created on first use).
-`process_payment` debits it in ONE `TransactWriteItems` across three tables: wallet balance, ledger entry
-(`order-saga-wallet-txns`) and the order's paymentId. Both conditions must hold: the balance covers the total,
-and the order has no payment yet. If a later step fails, `RefundPayment` (idempotent) credits the money back
-before the stock is released. Set a low balance on `/wallet` to see a real decline. Demo only: no
-authentication, so anyone who knows an email can see that wallet.
-
-## Monitoring
-
-- **Dashboard** `order-saga-dashboard`: orders (started, succeeded, failed, success rate, duration), API, queue and
-  DLQ, the 6 Lambdas, DynamoDB, and a table of the latest failed orders with their reasons.
-  `scripts\generate_traffic.py` sends 40 mixed orders over 4 minutes to fill it.
-- **Alarms** go to SNS `order-saga-ops-alerts`. A compensated order is a *business* outcome, not a fault, so
-  system alarms cover the DLQ, consumer crashes, API 5xx, timed-out or aborted executions and queue backlog. A
-  separate business alarm fires when more than 50% of orders fail, and only once at least 5 orders have started.
-- **Saved Logs Insights queries** live in the `order-saga/` folder: *Trace one order*, *Failed orders by reason*,
-  *Duplicate messages ignored* and *Slowest Lambda invocations*.
-- **X-Ray**: active tracing is on every Lambda and the state machine, and botocore is patched through the
-  AWS-managed Powertools layer, so there's no Docker build. One trace follows an order from the API Lambda
-  through SQS and Step Functions to DynamoDB.
-- `scripts\collect_evidence.py --order-id <id>` exports alarm states, graphs, the service map and an order trace.
-
-## Demo: forcing each saga path
-
-Every order can carry `"simulate"`, which picks the path it takes:
-
-| `--simulate` | What happens | Final status |
-|---|---|---|
-| `none` | Reserve, then pay, then complete, then email | COMPLETED |
-| `payment_flaky` | Payment fails twice (`PaymentTransientError`), and Step Functions retries it after 2 s and then 4 s | COMPLETED |
-| `payment_declined` | `PaymentDeclined`, then **ReleaseInventory** (compensation), then FAILED, then email | FAILED |
-| `out_of_stock` | `OutOfStock`, then FAILED (nothing was reserved, so there's nothing to release) | FAILED |
-| `poison` | `start_workflow` rejects the SQS message, which goes to the **DLQ** after 3 receives | stays PENDING |
-
-Duplicate protection: `place_order.py --repeat 3` sends one `Idempotency-Key` three times. You get back one order and one
-execution, and only one charge.
-
-### Why the poison message reaches the DLQ in about 3 minutes
-
-SQS moves a message to the dead-letter queue only after it has been received `maxReceiveCount` (3) times. A
-message that failed becomes visible again only when its **visibility timeout** expires, so the wait is roughly
-`maxReceiveCount x visibility timeout`.
-
-AWS recommends a visibility timeout of at least **6x the consumer Lambda's timeout**, so that a message is never
-redelivered while a slow invocation is still working on it. `start_workflow` only calls `StartExecution`, so its
-timeout is set to **10 s**. That makes the queue's visibility timeout **60 s**, and a poison message lands in
-`order-saga-orders-dlq` after 3 x 60 s, about **3 minutes**. With the default 30 s timeout, the visibility timeout
-would be 180 s and the wait would be 9 minutes, which is too long for a live demo.
+[MIT](LICENSE) © 2026 Nithin
