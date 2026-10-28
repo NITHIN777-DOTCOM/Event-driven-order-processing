@@ -1,15 +1,20 @@
 """POST /orders: validate and accept a new order, exactly once per Idempotency-Key.
 
 Flow: read or generate the Idempotency-Key -> validate the body -> replay check -> price the items
-from the inventory table -> atomically save {idempotency record + PENDING order} -> enqueue
-{orderId} on SQS -> 202 Accepted.
+from the inventory table -> atomically save {idempotency record + PENDING order} -> 202 Accepted.
+
+Transactional outbox: this function makes exactly ONE write, the DynamoDB transaction. It never sends
+to SQS itself. The new order row is the outbox record: the table's stream feeds the EventBridge pipe
+order-saga-orders-outbox, which delivers {orderId} to the orders queue (infra/main/outbox.tf). So if
+this function crashes right after the commit, the order is still delivered; there is no second write
+that can be lost (the old "dual write" was DynamoDB, then SQS SendMessage).
 
 Reserving stock and taking payment happen later, asynchronously, in the Step Functions saga.
 That keeps this API fast, and the queue absorbs traffic spikes.
 
 Idempotency: when a client retries (a network timeout, a double-click, a load balancer retry)
 with the same Idempotency-Key, it gets the ORIGINAL order back (200, duplicate=true). A second
-order is never created and never enqueued, so it can never be charged twice.
+order is never created (so no second stream INSERT), so it can never be charged twice.
 """
 
 from __future__ import annotations
@@ -38,14 +43,12 @@ instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/traci
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
 INVENTORY_TABLE = os.environ["INVENTORY_TABLE"]
 IDEMPOTENCY_TABLE = os.environ["IDEMPOTENCY_TABLE"]
-ORDERS_QUEUE_URL = os.environ["ORDERS_QUEUE_URL"]
 
 # Clients are created once per Lambda container and reused across invocations.
 dynamodb = boto3.resource("dynamodb")
 orders_table = dynamodb.Table(ORDERS_TABLE)
 inventory_table = dynamodb.Table(INVENTORY_TABLE)
 idempotency_table = dynamodb.Table(IDEMPOTENCY_TABLE)
-sqs = boto3.client("sqs")
 
 logger = get_logger("create_order")
 
@@ -73,7 +76,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     log = log.bind(idempotencyKey=key)
     fingerprint = request_fingerprint(request)
 
-    # Fast path: a replayed key returns the original order without touching inventory or SQS.
+    # Fast path: a replayed key returns the original order without touching inventory or the orders table.
     record = idempotency_table.get_item(Key={"idempotencyKey": key}, ConsistentRead=True).get("Item")
     if record:
         return replay(record, fingerprint, key, log)
@@ -90,7 +93,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             # Lost a race with a concurrent request that used the same key: replay the winner.
             record = idempotency_table.get_item(Key={"idempotencyKey": key}, ConsistentRead=True)["Item"]
             return replay(record, fingerprint, key, log)
-        enqueue_order(order["orderId"])
+        # No SQS call here: the committed order row reaches the queue via the stream + outbox pipe.
     except Exception:
         log.exception("Failed to accept order")
         return response(500, {"error": "Internal error, please retry with the same Idempotency-Key"})
@@ -275,7 +278,3 @@ def save_order_once(order: dict[str, Any], key: str, fingerprint: str) -> bool:
                 return False
         raise
     return True
-
-
-def enqueue_order(order_id: str) -> None:
-    sqs.send_message(QueueUrl=ORDERS_QUEUE_URL, MessageBody=json.dumps({"orderId": order_id}))

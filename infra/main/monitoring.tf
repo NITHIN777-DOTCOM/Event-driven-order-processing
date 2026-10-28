@@ -534,7 +534,7 @@ locals {
           stat   = "Sum"
           period = 60
           metrics = [
-            ["AWS/SQS", "NumberOfMessagesSent", "QueueName", local.orders_queue, { label = "Sent (create_order + outbox pipe)" }],
+            ["AWS/SQS", "NumberOfMessagesSent", "QueueName", local.orders_queue, { label = "Sent (by the outbox pipe)" }],
             ["AWS/SQS", "NumberOfMessagesDeleted", "QueueName", local.orders_queue, { label = "Deleted (by start_workflow)" }],
           ]
         }

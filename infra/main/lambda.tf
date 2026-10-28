@@ -13,12 +13,11 @@ locals {
   # `timeout` is optional (default 30 s).
   lambda_functions = {
     create_order = {
-      description = "POST /orders - idempotent (Idempotency-Key): validates and prices the order, saves it as PENDING and enqueues it on SQS"
+      description = "POST /orders - idempotent (Idempotency-Key): validates and prices the order and saves it as PENDING; the outbox pipe enqueues it"
       environment = {
         ORDERS_TABLE      = aws_dynamodb_table.orders.name
         INVENTORY_TABLE   = aws_dynamodb_table.inventory.name
         IDEMPOTENCY_TABLE = aws_dynamodb_table.idempotency.name
-        ORDERS_QUEUE_URL  = aws_sqs_queue.orders.url
       }
     }
     get_order = {

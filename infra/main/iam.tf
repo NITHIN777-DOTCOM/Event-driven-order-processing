@@ -42,11 +42,8 @@ data "aws_iam_policy_document" "create_order" {
     actions   = ["dynamodb:PutItem"]
     resources = [aws_dynamodb_table.orders.arn, aws_dynamodb_table.idempotency.arn]
   }
-  statement {
-    sid       = "EnqueueOrders"
-    actions   = ["sqs:SendMessage"]
-    resources = [aws_sqs_queue.orders.arn]
-  }
+  # Deliberately NO SQS permission: new orders reach the queue through the outbox pipe (outbox.tf).
+  # The precondition on aws_iam_role_policy.lambda below fails the plan if one is ever added back.
 }
 
 data "aws_iam_policy_document" "get_order" {
@@ -222,6 +219,15 @@ resource "aws_iam_role_policy" "lambda" {
   name   = "${local.lambda_names[each.key]}-policy"
   role   = aws_iam_role.lambda[each.key].id
   policy = local.lambda_policies[each.key]
+
+  lifecycle {
+    # Transactional-outbox guard: create_order must never be able to publish to SQS again (that was the
+    # dual write). Checked on every plan, in CI and locally, before anything is changed.
+    precondition {
+      condition     = each.key != "create_order" || !strcontains(local.lambda_policies["create_order"], "sqs:")
+      error_message = "create_order's role must not have any sqs:* permission: new orders are delivered by the outbox pipe (outbox.tf)."
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------

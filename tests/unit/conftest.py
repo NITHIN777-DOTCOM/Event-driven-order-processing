@@ -97,9 +97,10 @@ def aws():
         for product in PRODUCTS:
             inventory.put_item(Item=product)
 
+        # create_order no longer uses SQS (transactional outbox), so its env var is NOT set. The queue
+        # exists only so tests can assert that nothing was ever sent to it.
         sqs = boto3.client("sqs", region_name=REGION)
         queue_url = sqs.create_queue(QueueName="test-orders-queue")["QueueUrl"]
-        os.environ["ORDERS_QUEUE_URL"] = queue_url
 
         sfn = boto3.client("stepfunctions", region_name=REGION)
         state_machine_arn = sfn.create_state_machine(

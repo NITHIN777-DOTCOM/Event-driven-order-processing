@@ -361,7 +361,105 @@ invokes do appear in the same trace, so the header is propagated. **Unresolved**
 
 ---
 
-## 8. Known gaps (and where they get fixed)
+## 8. Transactional outbox (DynamoDB Streams → EventBridge Pipes → SQS)
+
+### What
+`create_order` makes exactly one write, the DynamoDB transaction that saves the PENDING order. The order row
+*is* the outbox record: the `order-saga-orders` stream feeds the pipe `order-saga-orders-outbox`, which
+delivers `{"orderId": ...}` to `order-saga-orders-queue`. `create_order` has no SQS code and no SQS permission.
+
+### Why (the problem it solves)
+The dual write. Before step 1.1, `create_order` committed the order and *then* called `sqs.send_message`.
+Two systems, no shared transaction: if the Lambda crashed, timed out or got throttled by SQS between the two,
+the order sat PENDING forever. A client retry with the same Idempotency-Key only replayed the stuck order,
+because the idempotency record had already committed. You can't fix that by reordering (send first and the
+message can point to an order that never got saved) or by retrying in the same process (the process is what
+died). The fix is to make the database write the only write and derive the message from it.
+
+### How
+- Stream on `order-saga-orders`, view type `NEW_IMAGE` (`infra/main/dynamodb.tf`).
+- Pipe `order-saga-orders-outbox` (`infra/main/outbox.tf`):
+  - filter `{"eventName": ["INSERT"], "dynamodb": {"NewImage": {"status": {"S": ["PENDING"]}}}}`. Every saga
+    step writes a MODIFY to the same row, and forwarding those would restart the saga.
+  - input template `{"orderId": "<$.dynamodb.NewImage.orderId.S>"}`: byte-for-byte the body the old
+    `enqueue_order` sent, so `start_workflow` didn't change (it reads only `orderId` and loads the rest from the table).
+  - `batch_size = 1` (one record → one SQS message), `starting_position = TRIM_HORIZON`, `maximum_retry_attempts = 5`,
+    `maximum_record_age_in_seconds = 3600`, then DLQ `order-saga-outbox-dlq`.
+  - its own role: `DescribeStream`/`GetRecords`/`GetShardIterator` on this stream ARN only, `sqs:SendMessage` on the
+    orders queue and the outbox DLQ only; trust limited by `aws:SourceAccount` + `aws:SourceArn`.
+- Delivery is **at least once**. Duplicates are safe because `start_workflow` is an idempotent consumer: a conditional
+  PENDING→PROCESSING update plus execution name = orderId (`ExecutionAlreadyExists` = success).
+- Guardrail: a Terraform `precondition` on the Lambda role policies fails any plan that gives `create_order` an `sqs:`
+  permission (`infra/main/iam.tf`). There's also a unit test that the handler loads with no queue configured and sends nothing.
+- Alarms `order-saga-outbox-dlq-not-empty` and `order-saga-outbox-pipe-failures` (pipe `ExecutionFailed`) → ops-alerts.
+  The dashboard has a row for pipe invocations/failures, pipe duration, stream `GetRecords` calls and the outbox DLQ.
+- Rollout in two commits so delivery never stopped: (A) add the stream + pipe *next to* the direct send, so every order
+  was delivered twice and the idempotent consumer was proven live; then (B) remove the direct send and its IAM permission.
+
+### Trade-offs / alternatives considered
+- **Pipes vs a Lambda relay on the stream** (both use the stream; neither needs custom polling):
+
+  | | EventBridge Pipe (chosen) | Lambda on the stream |
+  |---|---|---|
+  | Idle polling cost | Pipes' stream reads aren't on AWS's free list. Estimated ≈ $1.57/month (4 polls/s × 30 days ≈ 10.4M reads, minus the 2.5M free tier, at $0.02/100K). Measured: see Numbers | $0: GetRecords made by Lambda triggers aren't charged |
+  | Per-order cost | $0.40 per million pipe requests, counted after filtering | one Lambda invocation + one SendMessage |
+  | Code to own | none: filter + input template are configuration | ~30 lines + tests + its own role, log group and alarms |
+  | Retries / DLQ | `MaximumRetryAttempts`, `MaximumRecordAgeInSeconds`, SQS/SNS DLQ on the pipe | the same knobs on the event source mapping, plus `BisectBatchOnFunctionError` and an on-failure destination |
+  | Filtering | before the target, filtered events not billed | ESM filter criteria, filtered events not invoked |
+
+  **Why Pipes:** zero code on the delivery path (nothing to unit-test or patch), the console shows source → filter →
+  target as one resource, and the extra ≈ $1.6/month at idle was explicitly accepted. If cost mattered more than
+  "no code", the Lambda relay is the better choice, and this is the trade-off I'd describe in an interview.
+- **A polling relay** (a scheduled Lambda scanning for PENDING rows): adds latency equal to the schedule interval,
+  costs something even when idle, and needs its own "already sent" bookkeeping. The stream already gives ordered,
+  exactly-the-new-rows change data.
+- **INSERT-only filtering** rather than "status = PENDING" alone: a later MODIFY that sets the status back to PENDING
+  (a bug, a manual fix) would re-enter the queue. eventName is a property of the change, not of the data.
+- **TRIM_HORIZON** rather than LATEST: AWS warns a LATEST pipe can miss events for several minutes after creation or
+  after its polling settings change. The stream keeps only 24 h, and re-reading a record is a harmless duplicate.
+- **`batch_size = 1`** gives exactly one message per order and simple failure isolation. It limits throughput per shard
+  (one in-flight batch per shard); `parallelization_factor` (up to 10) is the lever if the load test in 3.3 needs it.
+- **No pipe log group:** the pipe's metrics, the outbox DLQ and the pipe's `StateReason` cover failures. Pipe logging
+  would also need extra deploy-role permissions for a new log-group prefix.
+
+### Numbers
+- Commit A (direct send + pipe both active), 10 orders: every order was delivered **twice** (start_workflow logged
+  1 start + 1 "Duplicate message ignored", from two different SQS message IDs) and still had exactly **1 execution and
+  1 DEBIT** (`docs/evidence/upgrade-1.1/before.md`).
+- Before (direct send), median of 10: PENDING→PROCESSING **72 ms**, PENDING→COMPLETED **366 ms**, client
+  POST→COMPLETED **688 ms** (`before.md`).
+- After (pipe only): see `docs/evidence/upgrade-1.1/after.md` (filled in after commit B deploys).
+
+### Likely interview questions
+1. *What if the pipe delivers twice?* start_workflow is idempotent: the PENDING→PROCESSING update is conditional, and
+   the execution is named after the orderId, so a second StartExecution gets `ExecutionAlreadyExists` (or, while the
+   first is still starting with identical input, the same execution back). Commit A ran *every* order twice in production
+   and got exactly one execution and one charge each.
+2. *What if the stream record expires (24 h)?* The pipe gives up long before that: after 5 failed attempts or once the
+   record is 1 h old, it writes to the outbox DLQ and the alarm fires. The order row is still PENDING in the table, so
+   recovery is to send `{"orderId": ...}` to the orders queue. What isn't covered is an outage longer than the stream's
+   24 h that loses the record before the pipe even reads it. That needs a sweeper (see Known gaps).
+3. *Why not a DynamoDB transaction that also writes to SQS?* There isn't one: `TransactWriteItems` only covers
+   DynamoDB tables, and SQS has no two-phase commit. That's exactly why the outbox exists: put the message in the same
+   database transaction as the state, then relay it.
+4. *Why not send to SQS first, then write the order?* Then a crash leaves a message pointing at an order that doesn't
+   exist (start_workflow would dead-letter it), and the client's retry creates the order without a message.
+5. *Why filter on INSERT if new orders are always PENDING anyway?* Because every saga step modifies the row, and a
+   status that goes back to PENDING (a bug or a manual edit) must not restart a saga. Insert-only means only a new order
+   can trigger a saga.
+
+### Debugging story
+The first "before" timing run reported 1 of 10 orders as **not** delivered twice (0 start / 0 duplicate log lines),
+even though it had exactly 1 execution and 1 DEBIT. The logs did contain both deliveries, from two different SQS message
+IDs. The script filtered CloudWatch Logs by a start time taken from the *local* clock, which runs ahead of AWS's
+timestamps, so the first order's lines fell before the window. Fix: widen the window by 2 minutes (orderIds are unique,
+so nothing else can match). For the MODIFY test, the check now compares this order's log-line count before and after,
+with no time window at all, because a clock-dependent window there could hide a line and fake a pass.
+(`scripts/outbox_check.py`, `scripts/e2e_test.py`.)
+
+---
+
+## 9. Known gaps (and where they get fixed)
 
 ### What
 Design limits found and documented, each with a planned fix.
@@ -371,11 +469,11 @@ Being able to say what's wrong with your own design, and how you'd fix it, is a 
 claiming there are no gaps.
 
 ### How
-- **Outbox gap** (being fixed in step 1.1; commit A adds the stream + pipe NEXT TO the direct send,
-  commit B removes the direct send): `create_order` commits the DynamoDB transaction, *then* calls
-  `sqs.send_message` (`enqueue_order`). A crash in between leaves the order PENDING forever, and a client retry
-  only replays it. Fix: DynamoDB Streams on `order-saga-orders` → EventBridge Pipe (filter `INSERT`) → SQS,
-  so the write to the table *is* the publish.
+- ~~Outbox gap~~ **fixed in step 1.1**: see section 8.
+- **No sweeper for orders stuck in PENDING** if delivery fails beyond the stream's 24 h retention (for example the
+  pipe is stopped or broken for over a day, or a record's details in the outbox DLQ are never acted on). The order row
+  stays PENDING and nothing re-sends it. Fix: a scheduled sweeper that queries PENDING orders older than N minutes
+  (the `gsi1` index already projects `status`) and re-sends `{"orderId": ...}`. That's safe because start_workflow is idempotent.
 - **Email-keyed wallets with no authentication** (fixed in step 1.2): `GET /wallet?email=` and
   `POST /wallet/reset` accept any email, and `customerEmail` on orders comes from the client
   (`src/lambdas/wallet_api/handler.py`, `src/common/wallet.py`). Fix: Cognito with a JWT authorizer;
@@ -387,8 +485,8 @@ claiming there are no gaps.
 - HTTP API has no X-Ray; the SFN segment is missing from the map (section 7).
 
 ### Trade-offs / alternatives considered
-- Outbox options: Streams + Pipes (chosen, no code), Streams + Lambda (code to own), or a polling relay
-  (latency, cost when idle).
+- Sweeper vs nothing: a sweeper adds a scheduled job and a "how old is stuck?" threshold, but it's the only safety
+  net for anything the stream never delivered.
 
 ### Numbers
 None recorded.

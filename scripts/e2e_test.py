@@ -8,17 +8,23 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
   b) payment_declined  -> FAILED, stock restored, ReleaseInventory ran, execution FAILED at OrderFailed
   c) payment_flaky     -> COMPLETED after retries: paymentAttempts == 3, 2 x PAYMENT_RETRY
   d) out_of_stock      -> FAILED, stock unchanged, ReleaseInventory did NOT run
-  e) same Idempotency-Key x3 -> exactly 1 order and 1 execution
+  e) same Idempotency-Key x3 -> exactly 1 order, 1 stream INSERT and 1 execution
   f) the same {orderId} sent to SQS twice more -> still exactly 1 execution
-  g) poison            -> message lands in the DLQ (polled for up to 5 min), order stays PENDING
+  g) poison            -> message lands in the orders DLQ (polled for up to 5 min), order stays PENDING,
+                          and NOT in the outbox DLQ (the pipe delivered it fine; start_workflow rejected it)
   h) low wallet balance -> a REAL decline (no simulate flag): no debit, stock released, order FAILED
+  i) crash simulation  -> an order row written straight into DynamoDB (no API, no SQS send: exactly what a
+                          crash right after the DynamoDB write leaves behind) still runs to COMPLETED via
+                          the outbox (stream -> pipe -> queue)
+  j) MODIFY            -> flipping an existing order's status back to PENDING (a MODIFY event) does NOT
+                          re-enter the queue: the pipe only forwards INSERTs
 
 DemoPay: the shared test wallet is reset to ₹10,00,000 first, and each scenario checks the ledger
 (exactly one DEBIT for each paid order, none for failed ones).
 
 The poison order is placed FIRST, so its ~3 minutes of SQS retries overlap the other scenarios.
 The DLQ is only peeked (VisibilityTimeout=0) and is never purged, so it stays for screenshots.
-Results are printed and written to docs/evidence/phase2-failure-tests.md. Exit code 1 if anything fails.
+Results are printed and written to docs/evidence/e2e-failure-tests.md. Exit code 1 if anything fails.
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ LOW_BALANCE_EMAIL = "e2e.lowbalance@example.com"
 
 ddb = boto3.resource("dynamodb", region_name=REGION)
 orders_table = ddb.Table(OUT["orders_table"])
+streams = boto3.client("dynamodbstreams", region_name=REGION)
 inventory_table = ddb.Table(OUT["inventory_table"])
 sfn = boto3.client("stepfunctions", region_name=REGION)
 sqs = boto3.client("sqs", region_name=REGION)
@@ -161,6 +168,31 @@ def executions_named(names: set[str]) -> int:
     count = 0
     for page in sfn.get_paginator("list_executions").paginate(stateMachineArn=OUT["state_machine_arn"]):
         count += sum(1 for e in page["executions"] if e["name"] in names)
+    return count
+
+
+def stream_inserts(order_id: str) -> int:
+    """Count INSERT records for this order in the orders table stream (it keeps 24 h of records).
+
+    Reads every shard from TRIM_HORIZON; a shard is done when it's closed or returns no more records.
+    """
+    count = 0
+    shards = streams.describe_stream(StreamArn=OUT["orders_stream_arn"])["StreamDescription"]["Shards"]
+    for shard in shards:
+        iterator = streams.get_shard_iterator(
+            StreamArn=OUT["orders_stream_arn"], ShardId=shard["ShardId"], ShardIteratorType="TRIM_HORIZON"
+        )["ShardIterator"]
+        empty_reads = 0
+        while iterator and empty_reads < 2:
+            page = streams.get_records(ShardIterator=iterator, Limit=1000)
+            records = page["Records"]
+            empty_reads = 0 if records else empty_reads + 1
+            count += sum(
+                1
+                for r in records
+                if r["eventName"] == "INSERT" and r["dynamodb"]["Keys"]["orderId"]["S"] == order_id
+            )
+            iterator = page.get("NextShardIterator")
     return count
 
 
@@ -297,6 +329,8 @@ def scenario_duplicate_idempotency_key() -> Scenario:
     s.timeline = order.get("statusHistory", [])
     s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
     s.check(executions_named(ids) == 1, f"executions: {executions_named(ids)} (expected 1)")
+    inserts = stream_inserts(s.order_id)
+    s.check(inserts == 1, f"INSERT records for this order in the orders stream: {inserts} (expected 1, not 3)")
     after = stock_of("4K-MONITOR")
     s.check(after[0] == before[0] - 1, f"4K-MONITOR stock {before[0]} -> {after[0]} (expected -1, not -3)")
     s.check(debits_for(s.order_id) == 1, f"DEBIT ledger entries: {debits_for(s.order_id)} (expected 1, not 3)")
@@ -305,7 +339,7 @@ def scenario_duplicate_idempotency_key() -> Scenario:
 
 def scenario_duplicate_sqs_message() -> Scenario:
     s = Scenario("f", "same {orderId} delivered 3x via SQS -> exactly 1 execution")
-    since_ms = int(time.time() * 1000)
+    since_ms = int(time.time() * 1000) - 120_000  # slack for local-clock skew; the orderId is unique anyway
     code, body = place_order("WIRELESS-MOUSE", 1, "none")
     s.check(code == 202, f"POST /orders returned {code} (expected 202)")
     s.order_id = body.get("orderId")
@@ -388,6 +422,86 @@ def finish_poison(s: Scenario, started: float) -> Scenario:
     s.check(executions_named({s.order_id}) == 0, "no execution was started")
     errors = count_log_lines("/aws/lambda/order-saga-start-workflow", "PoisonMessage", s.order_id, since_ms=0)
     s.check(errors >= 3, f"start_workflow ERROR log lines with this orderId: {errors} (expected >= 3, one per receive)")
+    outbox_dlq = int(
+        sqs.get_queue_attributes(QueueUrl=OUT["outbox_dlq_url"], AttributeNames=["ApproximateNumberOfMessages"])[
+            "Attributes"
+        ]["ApproximateNumberOfMessages"]
+    )
+    s.check(outbox_dlq == 0, f"order-saga-outbox-dlq messages: {outbox_dlq} (expected 0: the pipe delivered it)")
+    return s
+
+
+def scenario_crash_after_db_write() -> Scenario:
+    s = Scenario("i", "crash simulation: order row written directly (no API, no SQS) -> COMPLETED via the outbox")
+    product = inventory_table.get_item(Key={"productId": "LOWPRO-KEYBOARD"}, ConsistentRead=True)["Item"]
+    now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    s.order_id = f"ORD-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:8]}"
+    # The same shape create_order writes (see build_order), but nothing is ever sent to SQS.
+    orders_table.put_item(
+        Item={
+            "orderId": s.order_id,
+            "idempotencyKey": f"e2e-crash-{uuid.uuid4().hex[:8]}",
+            "customerName": "E2E Crash Simulation",
+            "customerEmail": WALLET_EMAIL,
+            "items": [
+                {"productId": "LOWPRO-KEYBOARD", "name": product["name"], "quantity": 1, "unitPrice": product["price"]}
+            ],
+            "totalAmount": product["price"],
+            "currency": "INR",
+            "status": "PENDING",
+            "statusHistory": [
+                {
+                    "status": "PENDING",
+                    "timestamp": now,
+                    "detail": "Order row written directly to DynamoDB by e2e_test.py (crash simulation: no SQS send)",
+                }
+            ],
+            "simulate": "none",
+            "createdAt": now,
+            "updatedAt": now,
+            "gsi1pk": "ORDER",
+            "gsi1sk": now,
+        },
+        ConditionExpression="attribute_not_exists(orderId)",
+    )
+    order = wait_for_terminal(s.order_id)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
+    s.check(executions_named({s.order_id}) == 1, f"executions: {executions_named({s.order_id})} (expected 1)")
+    s.check(debits_for(s.order_id) == 1, f"DEBIT ledger entries: {debits_for(s.order_id)} (expected 1)")
+    inserts = stream_inserts(s.order_id)
+    s.check(inserts == 1, f"INSERT records for this order in the orders stream: {inserts} (expected 1)")
+    return s
+
+
+def scenario_modify_does_not_restart(order_id: str) -> Scenario:
+    """Flip a COMPLETED order back to PENDING (a MODIFY that passes the status filter but not the
+    eventName filter), check nothing re-enters the queue, then put the status back."""
+    s = Scenario("j", "MODIFY on an existing order (status -> PENDING) does NOT start a new delivery or execution")
+    s.order_id = order_id
+    # Count this order's start_workflow log lines before and after, instead of using a time window:
+    # the local clock can be off from CloudWatch's, which could hide a line and fake a pass.
+    time.sleep(10)  # let the original delivery's log lines arrive in CloudWatch first
+    baseline = count_log_lines("/aws/lambda/order-saga-start-workflow", order_id, since_ms=0)
+    orders_table.update_item(
+        Key={"orderId": order_id},
+        UpdateExpression="SET #status = :pending, outboxModifyTestAt = :now",
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={":pending": "PENDING", ":now": datetime.now(timezone.utc).isoformat()},
+    )
+    time.sleep(45)  # far longer than a pipe delivery takes: if it were forwarded, start_workflow would have run
+    order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+    s.check(order["status"] == "PENDING", f"status {order['status']} (expected PENDING: start_workflow never picked it up)")
+    lines = count_log_lines("/aws/lambda/order-saga-start-workflow", order_id, since_ms=0) - baseline
+    s.check(lines == 0, f"new start_workflow log lines for this order after the MODIFY: {lines} (expected 0)")
+    s.check(executions_named({order_id}) == 1, f"executions: {executions_named({order_id})} (expected 1, unchanged)")
+    orders_table.update_item(  # restore the real final status
+        Key={"orderId": order_id},
+        UpdateExpression="SET #status = :completed",
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={":completed": "COMPLETED"},
+    )
+    s.timeline = get_order(order_id).get("statusHistory", [])
     return s
 
 
@@ -439,6 +553,7 @@ def main() -> int:
         scenario_duplicate_idempotency_key,
         scenario_duplicate_sqs_message,
         scenario_low_balance,
+        scenario_crash_after_db_write,
     ):
         result = run()
         print(f"[{'PASS' if result.passed else 'FAIL'}] {result.key}) {result.title}  {result.order_id}")
@@ -446,6 +561,10 @@ def main() -> int:
             if not ok:
                 print(f"      FAIL: {text}")
         results.append(result)
+
+    crash = next(r for r in results if r.key == "i")
+    results.append(scenario_modify_does_not_restart(crash.order_id))
+    print(f"[{'PASS' if results[-1].passed else 'FAIL'}] j) {results[-1].title}  {crash.order_id}")
 
     print("Waiting for the poison message to reach the DLQ (up to 5 min from placement)...")
     results.append(finish_poison(poison, poison_started))

@@ -21,7 +21,7 @@ def handler(load_handler):
     return load_handler("create_order")
 
 
-def test_valid_order_is_saved_pending_and_enqueued(aws, handler):
+def test_valid_order_is_saved_pending(aws, handler):
     result = handler.lambda_handler(api_event(VALID_BODY), None)
 
     assert result["statusCode"] == 202
@@ -38,8 +38,29 @@ def test_valid_order_is_saved_pending_and_enqueued(aws, handler):
     assert order["items"][0]["name"] == "Wireless Mouse"
     assert order["gsi1pk"] == "ORDER" and order["gsi1sk"] == order["createdAt"]
 
-    messages = aws.sqs.receive_message(QueueUrl=aws.queue_url)["Messages"]
-    assert json.loads(messages[0]["Body"]) == {"orderId": body["orderId"]}
+
+
+# --- Transactional outbox: the DynamoDB transaction is the ONLY write -------------------------
+
+
+def test_create_order_never_sends_to_sqs(aws, handler):
+    result = handler.lambda_handler(api_event(VALID_BODY), None)
+
+    assert result["statusCode"] == 202
+    # The order row exists (its stream INSERT is what the outbox pipe delivers)...
+    assert aws.orders.scan()["Count"] == 1
+    # ...and nothing was published directly: no message in any queue.
+    for url in aws.sqs.list_queues().get("QueueUrls", []):
+        assert "Messages" not in aws.sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=10)
+
+
+def test_handler_needs_no_queue_configuration(aws, load_handler, monkeypatch):
+    monkeypatch.delenv("ORDERS_QUEUE_URL", raising=False)
+
+    module = load_handler("create_order")  # would raise KeyError if it still read ORDERS_QUEUE_URL
+
+    assert not hasattr(module, "sqs") and not hasattr(module, "enqueue_order")
+    assert module.lambda_handler(api_event(VALID_BODY), None)["statusCode"] == 202
 
 
 @pytest.mark.parametrize(
@@ -105,9 +126,7 @@ def test_same_key_returns_original_order_and_creates_nothing_new(aws, handler):
         "duplicate": True,
     }
     assert second["headers"]["Idempotent-Replayed"] == "true"
-    assert aws.orders.scan()["Count"] == 1
-    messages = aws.sqs.receive_message(QueueUrl=aws.queue_url, MaxNumberOfMessages=10)["Messages"]
-    assert len(messages) == 1  # enqueued once, so the saga runs (and charges) once
+    assert aws.orders.scan()["Count"] == 1  # one row = one stream INSERT, so the saga runs (and charges) once
 
 
 def test_same_key_with_different_body_is_rejected(aws, handler):
