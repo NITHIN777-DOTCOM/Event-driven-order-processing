@@ -270,7 +270,8 @@ data "aws_iam_policy_document" "github_deploy" {
       "cognito-idp:DescribeUserPool", "cognito-idp:UpdateUserPool", "cognito-idp:DeleteUserPool",
       "cognito-idp:GetUserPoolMfaConfig", "cognito-idp:SetUserPoolMfaConfig", "cognito-idp:AddCustomAttributes",
       "cognito-idp:TagResource", "cognito-idp:UntagResource", "cognito-idp:ListTagsForResource",
-      # app clients
+      # app clients (the AWS provider lists a pool's clients before updating one)
+      "cognito-idp:ListUserPoolClients",
       "cognito-idp:CreateUserPoolClient", "cognito-idp:DescribeUserPoolClient",
       "cognito-idp:UpdateUserPoolClient", "cognito-idp:DeleteUserPoolClient",
       # hosted domain + managed login
