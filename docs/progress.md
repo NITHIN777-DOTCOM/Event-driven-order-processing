@@ -34,6 +34,10 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - Idle cost: the pipe polls the stream ~4x/s, ESTIMATED ~$1.6/month (not measured; approved). Evidence: docs/evidence/upgrade-1.1-outbox.md.
 - Test row `OUTBOX-DLQ-TEST-68c7af7e<U+0001>` (status PROCESSING) is a labelled DLQ probe; leave it.
 
+### Step 1.2 prep: AWS provider 5.x -> 6.68.x (own commit, before commit A)
+- Needed for `aws_cognito_managed_login_branding`. Lock file relocked for linux_amd64 + windows_amd64.
+  `terraform plan` against the live stack: No changes.
+
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
 - GET /products stays public; checkout, orders and wallet require login.
