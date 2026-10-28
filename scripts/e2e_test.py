@@ -181,10 +181,15 @@ def executions_named(names: set[str]) -> int:
     return count
 
 
+EMPTY_READS_TO_STOP = 10
+
+
 def stream_inserts(order_id: str) -> int:
     """Count INSERT records for this order in the orders table stream (it keeps 24 h of records).
 
-    Reads every shard from TRIM_HORIZON; a shard is done when it's closed or returns no more records.
+    Reads every shard from TRIM_HORIZON. An OPEN shard can return empty pages before its end (DynamoDB Streams
+    pages by time, not by record), so a shard counts as done only after EMPTY_READS_TO_STOP empty pages in a row.
+    (With 2, a 4-shard stream gave up early and reported 0 INSERTs for an order that had 1: step 1.2 run.)
     """
     count = 0
     shards = streams.describe_stream(StreamArn=OUT["orders_stream_arn"])["StreamDescription"]["Shards"]
@@ -193,7 +198,7 @@ def stream_inserts(order_id: str) -> int:
             StreamArn=OUT["orders_stream_arn"], ShardId=shard["ShardId"], ShardIteratorType="TRIM_HORIZON"
         )["ShardIterator"]
         empty_reads = 0
-        while iterator and empty_reads < 2:
+        while iterator and empty_reads < EMPTY_READS_TO_STOP:
             page = streams.get_records(ShardIterator=iterator, Limit=1000)
             records = page["Records"]
             empty_reads = 0 if records else empty_reads + 1
@@ -325,7 +330,9 @@ def scenario_duplicate_idempotency_key() -> Scenario:
     s.check(len(ids) == 1, f"distinct orderIds returned: {len(ids)} (expected 1)")
     s.check([b.get("duplicate") for _, b in responses] == [False, True, True], "duplicate flags [False, True, True]")
 
-    scan_kwargs = {"FilterExpression": "idempotencyKey = :k", "ExpressionAttributeValues": {":k": key}}
+    # create_order stores the key scoped to the caller ("<sub>#<key>", step 1.2), so look for that.
+    scoped = f"{test_user(USER)['sub']}#{key}"
+    scan_kwargs = {"FilterExpression": "idempotencyKey = :k", "ExpressionAttributeValues": {":k": scoped}}
     matches = 0
     while True:
         page = orders_table.scan(**scan_kwargs)
@@ -333,7 +340,7 @@ def scenario_duplicate_idempotency_key() -> Scenario:
         if "LastEvaluatedKey" not in page:
             break
         scan_kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-    s.check(matches == 1, f"orders with this key in DynamoDB: {matches} (expected 1)")
+    s.check(matches == 1, f"orders with this (user-scoped) key in DynamoDB: {matches} (expected 1)")
 
     order = wait_for_terminal(s.order_id)
     s.timeline = order.get("statusHistory", [])

@@ -4,9 +4,10 @@
 
 [![CI](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/ci.yml/badge.svg)](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/ci.yml) [![Deploy](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/deploy.yml/badge.svg)](https://github.com/NITHIN777-DOTCOM/Event-driven-order-processing/actions/workflows/deploy.yml) ![Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC?style=flat&logo=terraform&logoColor=white) ![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white) ![AWS](https://img.shields.io/badge/AWS-serverless-FF9900?style=flat&logo=amazonwebservices&logoColor=white)
 
-**Live demo:** https://dg38gx94mao9n.cloudfront.net. At checkout, open **Test scenario** and try *Payment glitch*,
-*Payment declined* or *Poison message* to watch each failure path live. Payments use **DemoPay**, a demo wallet
-(₹10,00,000 per email). It isn't real money.
+**Live demo:** https://dg38gx94mao9n.cloudfront.net. Browse freely; **Sign in** (top right) to check out. Use
+*Create an account* on the sign-in page: any email you can read works, and Cognito emails you a 6-digit code.
+At checkout, open **Test scenario** and try *Payment glitch*, *Payment declined* or *Poison message* to watch each
+failure path live. Payments use **DemoPay**, a demo wallet (₹10,00,000 per account). It isn't real money.
 
 ![Order tracker: a "Payment glitch" order is retried with backoff, then completes](docs/images/order-saga-demo.gif)
 
@@ -21,8 +22,12 @@
 - **Atomic money movement.** A payment is one DynamoDB `TransactWriteItems` across three tables (wallet balance, ledger entry, order), conditional on enough balance and no prior payment. A low balance is a **real** decline, not a simulated one.
 - **Retries where they help, not where they hurt.** Transient payment errors are retried with exponential backoff (2 s → 4 s → 8 s). A permanent decline goes straight to compensation.
 - **Transactional outbox, no dual write.** `create_order` makes exactly one write: the DynamoDB transaction. The new order row *is* the outbox record. A **DynamoDB stream → EventBridge Pipe** (INSERT-only filter) delivers it to SQS, so a crash right after the write can't lose the order.
+- **Sign-in and row-level isolation.** Cognito managed login (authorization code + PKCE). API Gateway's **JWT authorizer**
+  rejects missing or forged tokens before any Lambda runs; the handlers take identity **only from the verified claims**
+  (`sub`). Orders and wallets are keyed by the user; someone else's order is a **404**, not a 403; idempotency keys
+  are scoped per user.
 - **Poison messages are isolated.** After 3 failed receives, SQS moves the message to a dead-letter queue, and a CloudWatch alarm emails the operator.
-- **100% infrastructure as code.** 94 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
+- **100% infrastructure as code.** 106 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
 - **CI/CD with no stored keys.** GitHub Actions assumes AWS roles through **OIDC**, scoped to this repo's `main` branch (deploy) or its pull requests (read-only plan). Every merge is applied, published and smoke-tested.
 - **Close to $0 when idle.** Everything is pay-per-use: Lambda, Step Functions, on-demand DynamoDB, SQS, SNS, CloudFront and S3. There's no VPC, NAT gateway or server. The one fixed cost is the outbox pipe polling the stream, estimated at about $1.6/month (an estimate from AWS's documented polling rate, not measured; see [the evidence](docs/evidence/upgrade-1.1-outbox.md)). A $5/month budget alert is the backstop.
 
@@ -33,7 +38,10 @@
 ```mermaid
 flowchart LR
   user["Browser"] -->|HTTPS| cf["CloudFront"] --> s3[("S3 storefront<br/>private, OAC")]
-  user -->|JSON| api["API Gateway<br/>HTTP API"]
+  user -->|"sign in: code + PKCE"| cog["Cognito<br/>managed login<br/>order-saga-users"]
+  cog -->|"ID token (JWT)"| user
+  user -->|"JSON + Authorization: JWT"| api["API Gateway<br/>HTTP API<br/>JWT authorizer"]
+  cog -.->|"signing keys (JWKS)"| api
   api --> co["create_order"]
   api --> reads["get_order · list_orders<br/>list_products · wallet_api"]
   co -->|"order + idempotency key<br/>in one transaction"| ddb[("DynamoDB<br/>orders · inventory · idempotency<br/>wallets · wallet-txns")]
@@ -54,7 +62,10 @@ flowchart LR
 
 **Life of an order**
 
-1. The storefront calls `POST /orders` with an `Idempotency-Key`. `create_order` validates the order, prices it from inventory on the server, and writes the order plus the idempotency record in **one transaction**. That's its only write. It replies `202 Accepted` right away, without waiting for the saga.
+0. The shopper signs in through **Cognito managed login** (authorization code + PKCE). Every API call carries the
+   ID token; API Gateway's **JWT authorizer** checks its signature, issuer, audience and expiry, and the Lambdas read
+   the user's id (`sub`) and verified email from the claims, never from the request body.
+1. The storefront calls `POST /orders` with an `Idempotency-Key` (scoped to the user). `create_order` validates the order, prices it from inventory on the server, and writes the order plus the idempotency record in **one transaction**. That's its only write. It replies `202 Accepted` right away, without waiting for the saga.
 2. **Transactional outbox:** the new order row appears on the table's **DynamoDB stream**. The **EventBridge Pipe** `order-saga-orders-outbox` forwards only INSERTs with status PENDING, as `{"orderId": ...}`, onto **SQS**, which absorbs spikes and decouples the API from the workflow. Delivery is at least once; duplicates are harmless (next step).
 3. `start_workflow` consumes batches of 10 messages. It marks the order PROCESSING and starts a **Step Functions** execution named after the order (`ReportBatchItemFailures`: only failed messages are retried).
 4. **ReserveInventory** decrements stock for every item in one DynamoDB transaction, so stock is never partly reserved.
@@ -116,6 +127,7 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | **Standard workflow, not Express** | Exactly-once step execution and a 90-day execution history in the console, which matter for payments | Costs more per transition than Express at high volume |
 | **Reserve stock before charging** | Never take money for something that can't ship; out-of-stock needs no refund | Stock is held briefly for orders whose payment then fails (released by compensation) |
 | **Direct SDK integrations** (DynamoDB, SNS) | Fewer Lambdas and cold starts; less code to maintain | Logic in ASL/JSONata is harder to unit-test than Python |
+| **Cognito + API Gateway JWT authorizer** | Token checks are configuration, not code; bad tokens are rejected before a Lambda runs; free up to 10,000 monthly users | Ownership ("is this order yours?") still has to be checked in each handler; the ID token, not the access token, is the API credential (it carries the verified email) |
 | **HTTP API instead of REST API** | Cheaper, lower latency, built-in CORS | No X-Ray tracing, WAF or usage plans; traces start at the first Lambda |
 | **On-demand DynamoDB** | $0 when idle, no capacity planning | More expensive per request than provisioned capacity under steady heavy load |
 
@@ -125,10 +137,10 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 
 | Layer | Technology |
 |---|---|
-| AWS | API Gateway (HTTP API), Lambda (Python 3.12, arm64), DynamoDB Streams, EventBridge Pipes, SQS + DLQ, Step Functions (Standard), DynamoDB, SNS, S3, CloudFront (OAC), CloudWatch, X-Ray, IAM, Budgets |
+| AWS | Cognito (user pool, managed login), API Gateway (HTTP API + JWT authorizer), Lambda (Python 3.12, arm64), DynamoDB Streams, EventBridge Pipes, SQS + DLQ, Step Functions (Standard), DynamoDB, SNS, S3, CloudFront (OAC), CloudWatch, X-Ray, IAM, Budgets |
 | Infrastructure as code | Terraform ≥ 1.10, S3 remote state with native locking; separate bootstrap stack |
 | Backend | Python, boto3, structured JSON logging, aws-xray-sdk (via the AWS Powertools layer) |
-| Frontend | React 18, TypeScript, Vite, Tailwind CSS, React Router |
+| Frontend | React 18, TypeScript, Vite, Tailwind CSS, React Router, oidc-client-ts + react-oidc-context |
 | Testing | pytest + moto (unit), live end-to-end scenario suite, Playwright (UI) |
 | CI/CD | GitHub Actions, AWS OIDC (no stored keys), plan-on-PR comments, smoke test after every deploy |
 
@@ -136,8 +148,8 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 
 ## Testing & evidence
 
-- **67 unit tests, 95% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
-- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **10/10 scenarios passed** against the deployed system, including DemoPay ledger checks and the transactional outbox.
+- **81 unit tests, 94% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
+- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **14/14 scenarios passed** against the deployed system, signed in as two Cognito test users, including DemoPay ledger checks, the transactional outbox and per-user isolation.
 
 | # | Scenario | Result |
 |---|---|---|
@@ -151,10 +163,14 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | h | Wallet balance too low → real decline, nothing debited, stock released | PASS |
 | i | Crash simulation: order row written straight into DynamoDB, no SQS send → COMPLETED via the outbox | PASS |
 | j | MODIFY on an existing order (status back to PENDING) → not re-delivered | PASS |
+| k | No token / tampered / forged token → 401 from the JWT authorizer; access token → 403; `GET /products` public | PASS |
+| l | User A reading B's order → 404 (worded like a missing order); each order list holds only its owner's orders | PASS |
+| m | A's wallet reset with B's ids in the body → only A's wallet changes | PASS |
+| n | B reusing A's Idempotency-Key → B's own new order; A's replay still returns A's | PASS |
 
-- **UI suite** ([`scripts/capture_ui.py`](scripts/capture_ui.py)): every scenario driven through the deployed storefront in Chromium. **6/6**, with ledger checks.
+- **UI suite** ([`scripts/capture_ui.py`](scripts/capture_ui.py)): every scenario driven through the deployed storefront in Chromium, signing in through Cognito managed login. **6/6**, with ledger checks.
 - **Every deploy** runs a smoke test: one real order must reach COMPLETED within 60 s with exactly one wallet debit.
-- Evidence: [`docs/evidence/`](docs/evidence/). The e2e results are in [`e2e-failure-tests.md`](docs/evidence/e2e-failure-tests.md), UI screenshots in [`ui/`](docs/evidence/ui/), monitoring in [`phase3-monitoring.md`](docs/evidence/phase3-monitoring.md) and CI/CD runs in [`phase5-cicd.md`](docs/evidence/phase5-cicd.md).
+- Evidence: [`docs/evidence/`](docs/evidence/). The e2e results are in [`e2e-failure-tests.md`](docs/evidence/e2e-failure-tests.md), UI screenshots in [`ui/`](docs/evidence/ui/), monitoring in [`phase3-monitoring.md`](docs/evidence/phase3-monitoring.md), CI/CD runs in [`phase5-cicd.md`](docs/evidence/phase5-cicd.md) and sign-in/isolation in [`upgrade-1.2-auth.md`](docs/evidence/upgrade-1.2-auth.md).
 
 ### Observability
 
@@ -209,8 +225,9 @@ terraform init; terraform apply
 cd ../..
 python -m venv .venv; .venv\Scripts\python -m pip install -r requirements-dev.txt
 .venv\Scripts\python scripts\seed_inventory.py
+.venv\Scripts\python scripts\create_test_users.py    # Cognito test users A + B (passwords -> SSM SecureStrings)
 .venv\Scripts\python scripts\deploy_frontend.py       # prints the CloudFront URL
-.venv\Scripts\python scripts\e2e_test.py              # ~3-4 min, 8 scenarios
+.venv\Scripts\python scripts\e2e_test.py              # ~4 min, 14 scenarios
 ```
 
 On macOS or Linux, use `cp` and `.venv/bin/python`. To use CI/CD in a fork, set
@@ -243,8 +260,16 @@ docs/              progress log, evidence, images, resume bullets
 
 ## Security notes & known limitations
 
-- **No end-user authentication yet.** Orders are looked up by ID, and DemoPay wallets are keyed by email, so anyone who knows an email can view or reset that demo wallet. Cognito is on the roadmap.
-- **Notification emails go to the SNS topic's subscriber** (the operator's inbox), not to the address typed at checkout. A production system would use SES or per-customer SNS endpoints.
+- **Authentication:** Cognito user pool `order-saga-users` (self-sign-up, email verification), managed login with
+  authorization code + PKCE; the public `spa` app client has no password API flow at all. Scripts and CI sign in as
+  test users through a separate IAM-gated `automation` client; their passwords live only in SSM SecureStrings.
+- **Authorization:** every route except `GET /products` needs a valid Cognito JWT. Handlers use only the token's
+  `sub`/verified email; orders and wallets are per user, and another user's order returns 404.
+- **Token storage:** tokens are in `sessionStorage` (cleared when the tab closes), 60-minute lifetime, refresh tokens
+  rotate. An XSS bug could still read them; there is no Content-Security-Policy header yet.
+- **Cognito's default email sender** is limited to a few dozen emails per day per account (sign-up codes); a busy
+  demo day could hit it. Production would send through SES.
+- **Notification emails go to the SNS topic's subscriber** (the operator's inbox), not to the signed-in user's address. A production system would use SES or per-customer SNS endpoints.
 - **No sweeper for stuck PENDING orders.** The outbox fixed the dual write. But if delivery failed for longer than the stream's 24 h retention, nothing would re-send the order. The fix is a scheduled sweeper that re-sends `{orderId}` for old PENDING orders (safe, because `start_workflow` is idempotent).
 - **Tracing gap:** HTTP APIs don't support X-Ray, and the state machine's own segment doesn't appear in the service map (trace propagation to its Lambdas works).
 - **Least privilege:** each Lambda has its own IAM role scoped to the exact tables and queues it uses. The CI deploy role is limited to `order-saga-*` resources and can't modify itself.
@@ -255,7 +280,7 @@ docs/              progress log, evidence, images, resume bullets
 ## Roadmap
 
 - [ ] Load test with k6 and a scaling graph (not run yet, so there are no throughput claims)
-- [ ] Cognito sign-in for customers; wallets keyed by user ID
+- [x] Cognito sign-in for customers; wallets and orders keyed by user ID
 - [ ] Publish order events to EventBridge (analytics, a shipping service)
 - [ ] Shipping step in the saga, with a cancellation window
 - [ ] Per-customer emails with Amazon SES (SNS topic currently notifies a single subscribed inbox)

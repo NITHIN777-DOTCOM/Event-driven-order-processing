@@ -3,7 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 1.1 — Transactional outbox: DONE (2026-10-28).** Next: **1.2 Cognito + user-keyed wallets/orders.**
+**Upgrade step 1.2 — Cognito auth + user-keyed wallets/orders: DONE (2026-10-28). Phase 1 (Foundation) is complete.**
+Next: **2.1 async payment (waitForTaskToken + HMAC webhook + timeout).**
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)
@@ -38,7 +39,7 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - Needed for `aws_cognito_managed_login_branding`. Lock file relocked for linux_amd64 + windows_amd64.
   `terraform plan` against the live stack: No changes.
 
-### Step 1.2 (Cognito auth + user-keyed data): IN PROGRESS
+### Step 1.2 (Cognito auth + user-keyed data): DONE
 - Bootstrap: deploy role + `cognito-idp:AdminInitiateAuth` (applied locally 2026-10-28, 1 changed; re-plan: no changes).
 - Commit A: `infra/main/auth.tf` (pool `order-saga-users` ESSENTIALS, managed login v2 domain, `spa` + `automation`
   clients, branding), config.json `auth` block, CORS allows `authorization`; `scripts/create_test_users.py` (users A/B,
@@ -50,6 +51,9 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - Commit B: JWT authorizer `order-saga-cognito-jwt` (all routes but GET /products), `src/common/auth.py` (identity only
   from claims), orders carry userId/walletId, gsi1pk = USER#<sub>, gsi1sk = <createdAt>#<orderId>, GET /orders/{id}
   404 for others' orders, wallets keyed by sub, idempotency keys stored as <sub>#<key>. e2e adds k-n (auth + isolation).
+- Commit B `2c1444b` green (Deploy 40736924726, apply 1 added / 15 changed). Live e2e 14/14 (adds k-n); unit tests 81, 94%.
+  Evidence: docs/evidence/upgrade-1.2-auth.md. Test users: order-saga-test-a/b@example.com (creds in SSM, never printed).
+- Orders DLQ: 11 messages + 1 in flight (the UI run's poison order) = 12 (each e2e/UI run adds its poison order). Do NOT purge or redrive. UI suite 6/6.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
@@ -86,7 +90,7 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - Unit tests: 37 passed, 96% coverage. Live e2e: `scripts/e2e_test.py` 7/7 passed
   (see `docs/evidence/phase2-failure-tests.md`).
 - The orders DLQ intentionally holds the poison messages from demo/e2e runs (9 after step 1.1, incl.
-  ORD-20261022-7b1a4028 and the outbox DLQ probe), so `order-saga-dlq-not-empty` is in ALARM. Do NOT purge or redrive it.
+  ORD-20261022-7b1a4028 and the outbox DLQ probe), so `order-saga-dlq-not-empty` is in ALARM (12 after step 1.2). Do NOT purge or redrive it.
 
 ### Phase 3
 - `infra/main/monitoring.tf`: dashboard `order-saga-dashboard` (7 rows); 6 alarms (8 alarm metrics, free tier)
@@ -131,12 +135,13 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   Evidence: docs/evidence/phase5-cicd.md.
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
-## Next (upgrade step 1.2)
-- Cognito user pool + managed login (code + PKCE, self sign-up with email verification); JWT authorizer on checkout,
-  orders and wallet routes (GET /products stays public); wallets/orders keyed by the token `sub`; scripts get a test user.
+## Next (upgrade step 2.1)
+- Async payment: ProcessPayment waits with `waitForTaskToken`; an HMAC-signed webhook completes it; a timeout fails it.
 
 ## Known limitations / ideas (good viva points)
-- DemoPay has no authentication: wallets are keyed by email, so anyone who knows an email can view or reset it (demo only).
+- (Fixed in 1.2) Wallets/orders are keyed by the Cognito `sub`; the API has a JWT authorizer.
+- No Content-Security-Policy header yet (tokens are in sessionStorage). The ID token is the API credential.
+- Cognito's default email sender is limited to a few dozen emails/day (sign-up codes).
 - (Fixed in 1.1) The create_order dual write is gone: transactional outbox via DynamoDB Streams -> Pipes -> SQS.
 - No sweeper for orders stuck in PENDING if delivery fails beyond the stream's 24 h retention.
 - HTTP APIs (API Gateway v2) don't support X-Ray tracing; only REST APIs do.

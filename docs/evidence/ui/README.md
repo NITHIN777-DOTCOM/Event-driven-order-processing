@@ -6,16 +6,20 @@ After each order the DemoPay ledger was checked through `GET /wallet`.
 
 | Scenario | orderId | Tracker result | Wallet DEBITs (expected) |
 |---|---|---|---|
-| Normal | `ORD-20261022-06c32eba` | Order completed; balance 1,000,000 -> 996,501 | 1 (1) ✓ |
-| Payment glitch (retries) | `ORD-20261022-89ca34f6` | Order completed | 1 (1) ✓ |
-| Payment declined | `ORD-20261022-0575b65e` | Order failed | 0 (0) ✓ |
-| Low balance (real decline) | `ORD-20261022-564a027a` | Order failed | 0 (0) ✓ |
-| Duplicate test (3 requests) | `ORD-20261022-279b8b33` | Order completed · 1 order | 1 (1) ✓ |
-| Poison message (to DLQ) | `ORD-20261022-e830d4c0` | Stuck in the dead-letter queue | 0 (0) ✓ |
+| Normal | `ORD-20261028-e7b319fa` | Order completed; balance 1,000,000 -> 996,501 | 1 (1) ✓ |
+| Payment glitch (retries) | `ORD-20261028-c765f7db` | Order completed | 1 (1) ✓ |
+| Payment declined | `ORD-20261028-27f51557` | Order failed | 0 (0) ✓ |
+| Low balance (real decline) | `ORD-20261028-b4d56f34` | Order failed | 0 (0) ✓ |
+| Duplicate test (3 requests) | `ORD-20261028-cb8df6a3` | Order completed · 1 order | 1 (1) ✓ |
+| Poison message (to DLQ) | `ORD-20261028-67d9704f` | Stuck in the dead-letter queue | 0 (0) ✓ |
 
 Browser console errors during the run: 0
 
 ## Screenshots
+
+### desktop-00-managed-login
+
+![desktop-00-managed-login](desktop-00-managed-login.png)
 
 ### desktop-01-shop
 

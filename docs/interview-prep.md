@@ -579,7 +579,15 @@ behind Cognito), carried as a signed token the API can verify without calling ba
   USER_PASSWORD_AUTH → "flow not enabled for this client"; CUSTOM_AUTH → "Custom auth lambda trigger is not configured".
 - Unit tests: 81 passed, 94% coverage (adds claims-only identity, 404 for others' orders, wallet isolation,
   per-user idempotency).
-- Live E2E isolation and 401 checks: see `docs/evidence/upgrade-1.2-auth.md`.
+- Live E2E after commit B: **14/14** (`docs/evidence/upgrade-1.2-auth.md`, `e2e-failure-tests.md`):
+  - no token on any protected route → **401**; tampered signature → 401; payload forged with user B's `sub` → 401;
+    access token (no email) → **403**; `GET /products` without a token → 200 (scenario k);
+  - A reading B's order `ORD-20261028-007c022f` → **404**, same wording as a missing order; A's list (18) and B's (5)
+    share no orderId (l);
+  - A's reset with B's ids in the body → A = ₹4,321, **B unchanged** (₹9,98,701, 7 → 7 ledger entries) (m);
+  - B reusing A's key → B's own order `ORD-20261028-660da4c0` (202), A's replay → 200 duplicate (n).
+- Browser: protected page → managed login with `code_challenge_method=S256` → back on the page; tokens only in
+  `sessionStorage`; 0 console errors.
 
 ### Likely interview questions
 1. *Why PKCE if there's no client secret?* Exactly because there's none: anyone can see a public client's ID, so
