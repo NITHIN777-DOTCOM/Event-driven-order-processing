@@ -2,7 +2,8 @@
 
     python scripts/smoke_test.py
 
-It resets the CI wallet to ₹10,00,000, places one "none" order through the public API, waits up to
+It signs in as Cognito test user A (auth_tokens.py; create_test_users.py runs first in the deploy job),
+resets that user's wallet to ₹10,00,000, places one "none" order through the public API, waits up to
 60 s for COMPLETED, and checks the DemoPay ledger holds exactly 1 DEBIT for that order. It also
 checks that the storefront and its config.json are served. Inside GitHub Actions it writes a job
 summary ($GITHUB_STEP_SUMMARY). Exit code 1 on any failure, which fails the deploy.
@@ -18,9 +19,9 @@ import urllib.error
 import urllib.request
 import uuid
 
+from auth_tokens import auth_header, test_user
 from tf_outputs import load_outputs
 
-EMAIL = "ci-smoke@example.com"
 PRODUCT = "WIRELESS-MOUSE"
 TIMEOUT_S = 60
 
@@ -49,12 +50,16 @@ def main() -> int:
     status, config = http_json("GET", site + "/config.json")
     checks.append((config.get("apiUrl") == api, f"config.json apiUrl matches the API ({config.get('apiUrl')})"))
 
-    http_json("POST", f"{api}/wallet/reset", {"email": EMAIL})
+    checks.append((bool(config.get("auth", {}).get("clientId")), "config.json has the Cognito settings (auth.clientId)"))
+    auth = auth_header("a")
+    email = test_user("a")["email"]
+
+    http_json("POST", f"{api}/wallet/reset", {"email": email}, auth)
     status, body = http_json(
         "POST",
         f"{api}/orders",
-        {"customerName": "CI Smoke Test", "customerEmail": EMAIL, "items": [{"productId": PRODUCT, "quantity": 1}], "simulate": "none"},
-        {"Idempotency-Key": f"ci-smoke-{uuid.uuid4()}"},
+        {"customerName": "CI Smoke Test", "customerEmail": email, "items": [{"productId": PRODUCT, "quantity": 1}], "simulate": "none"},
+        {"Idempotency-Key": f"ci-smoke-{uuid.uuid4()}", **auth},
     )
     checks.append((status == 202, f"POST /orders -> HTTP {status}"))
     order_id = body.get("orderId", "?")
@@ -63,14 +68,14 @@ def main() -> int:
     deadline = time.monotonic() + TIMEOUT_S
     started = time.monotonic()
     while time.monotonic() < deadline:
-        order = http_json("GET", f"{api}/orders/{order_id}")[1]
+        order = http_json("GET", f"{api}/orders/{order_id}", headers=auth)[1]
         if order.get("status") in ("COMPLETED", "FAILED"):
             break
         time.sleep(2)
     elapsed = time.monotonic() - started
     checks.append((order.get("status") == "COMPLETED", f"order {order_id} is {order.get('status')} after {elapsed:.1f}s (expected COMPLETED within {TIMEOUT_S}s)"))
 
-    txns = http_json("GET", f"{api}/wallet?email={EMAIL}")[1].get("transactions", [])
+    txns = http_json("GET", f"{api}/wallet?email={email}", headers=auth)[1].get("transactions", [])
     debits = sum(1 for t in txns if t.get("orderId") == order_id and t["type"] == "DEBIT")
     checks.append((debits == 1, f"DemoPay ledger: {debits} DEBIT for the order (expected exactly 1)"))
 

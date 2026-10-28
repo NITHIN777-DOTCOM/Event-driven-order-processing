@@ -1,12 +1,15 @@
 /**
  * Thin client for the order-saga HTTP API. The base URL comes from /config.json at runtime, so one
  * build works against any deployment (Terraform writes config.json next to the app in S3).
+ * Every request carries the signed-in user's Cognito ID token (when there is one) as "Authorization".
  */
+import { getIdToken, type AuthConfig } from "./auth";
 import type { CreateOrderResponse, Order, OrderSummary, Product, Simulate, Wallet } from "./types";
 
 export interface AppConfig {
   apiUrl: string;
   region: string;
+  auth: AuthConfig;
 }
 
 let apiUrl = "";
@@ -31,10 +34,11 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
   let res: Response;
+  const token = await getIdToken();
   try {
     res = await fetch(`${apiUrl}${path}`, {
       ...init,
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: token } : {}), ...(init?.headers ?? {}) },
     });
   } catch {
     throw new ApiError("Can't reach the API. Check your connection and try again.", 0);

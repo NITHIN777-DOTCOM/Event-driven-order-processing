@@ -71,6 +71,11 @@ jobs:
       - name: Publish storefront (S3 + CloudFront invalidation)
         run: python scripts/deploy_frontend.py
 
+      # Idempotent: creates the Cognito test users A and B (password -> SSM SecureString) only if missing,
+      # then proves both can sign in. The smoke test signs in as user A.
+      - name: Ensure test users (Cognito + SSM)
+        run: python scripts/create_test_users.py
+
       - name: Smoke test (one real order, wallet debited exactly once)
         env:
           GITHUB_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}

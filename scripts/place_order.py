@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 import uuid
 
+from auth_tokens import LABELS, auth_header, test_user
 from tf_outputs import load_outputs
 
 TERMINAL_STATUSES = {"COMPLETED", "FAILED"}
@@ -63,7 +64,7 @@ def main() -> int:
     parser.add_argument("--simulate", choices=SIMULATE_MODES, default="none")
     parser.add_argument("--item", action="append", help="PRODUCT_ID:QTY (repeatable)")
     parser.add_argument("--name", default="Asha Rao")
-    parser.add_argument("--email", default="asha.rao@example.com")
+    parser.add_argument("--user", choices=LABELS, default="a", help="Cognito test user to sign in as (create_test_users.py)")
     parser.add_argument("--idempotency-key", help="Idempotency-Key header (default: a new UUID)")
     parser.add_argument("--repeat", type=int, default=1, help="send the same request N times with the same key")
     parser.add_argument("--timeout", type=int, default=60, help="seconds to wait for a terminal status")
@@ -75,7 +76,7 @@ def main() -> int:
     key = args.idempotency_key or str(uuid.uuid4())
     payload = {
         "customerName": args.name,
-        "customerEmail": args.email,
+        "customerEmail": test_user(args.user)["email"],
         "items": [parse_item(spec) for spec in (args.item or DEFAULT_ITEMS)],
         "simulate": args.simulate,
     }
@@ -83,7 +84,7 @@ def main() -> int:
     order_ids = set()
     for attempt in range(1, args.repeat + 1):
         print(f"POST {api_url}/orders  simulate={args.simulate}  Idempotency-Key={key}  (send {attempt}/{args.repeat})")
-        status_code, body, _ = http_json("POST", f"{api_url}/orders", payload, {"Idempotency-Key": key})
+        status_code, body, _ = http_json("POST", f"{api_url}/orders", payload, {"Idempotency-Key": key, **auth_header(args.user)})
         print(f"  -> HTTP {status_code} {json.dumps(body)}")
         if status_code not in (200, 202):
             return 1
@@ -103,7 +104,7 @@ def main() -> int:
     deadline = time.monotonic() + args.timeout
     last_status, order = None, {}
     while time.monotonic() < deadline:
-        _, order, _ = http_json("GET", f"{api_url}/orders/{order_id}")
+        _, order, _ = http_json("GET", f"{api_url}/orders/{order_id}", headers=auth_header(args.user))
         if order.get("status") != last_status:
             last_status = order.get("status")
             print(f"  [{time.strftime('%H:%M:%S')}] {order_id} is {last_status}")

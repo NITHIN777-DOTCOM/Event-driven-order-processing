@@ -8,6 +8,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
 import { loadConfig } from "./api";
+import { AuthCallback, AuthProvider, CALLBACK_PATH, RequireAuth, initAuth } from "./auth";
 import { CartProvider } from "./cart";
 import { CatalogProvider } from "./catalog";
 import { ToastProvider } from "./toast";
@@ -33,13 +34,16 @@ function NotFound() {
   );
 }
 
-/** Loads /config.json (the API URL) before rendering any page. */
+/** Loads /config.json (API URL + Cognito settings) before rendering any page. */
 function App() {
   const [state, setState] = useState<"loading" | "ready" | string>("loading");
 
   useEffect(() => {
     loadConfig()
-      .then(() => setState("ready"))
+      .then((config) => {
+        initAuth(config.auth);
+        setState("ready");
+      })
       .catch((err: Error) => setState(err.message));
   }, []);
 
@@ -52,32 +56,36 @@ function App() {
     );
   }
 
+  // Browsing (shop, product pages, cart) works signed out; checkout, wallet and orders need an account.
   return (
-    <CatalogProvider>
-      <WalletProvider>
-        <CartProvider>
-          <BrowserRouter>
-            <ToastProvider>
-              <Routes>
-                <Route element={<Layout />}>
-                  <Route index element={<Listing />} />
-                  <Route path="c/:category" element={<Listing />} />
-                  <Route path="deals" element={<Listing />} />
-                  <Route path="search" element={<Listing />} />
-                  <Route path="p/:productId" element={<ProductPage />} />
-                  <Route path="cart" element={<CartPage />} />
-                  <Route path="checkout" element={<Checkout />} />
-                  <Route path="wallet" element={<WalletPage />} />
-                  <Route path="orders" element={<Orders />} />
-                  <Route path="orders/:id" element={<Tracker />} />
-                  <Route path="*" element={<NotFound />} />
-                </Route>
-              </Routes>
-            </ToastProvider>
-          </BrowserRouter>
-        </CartProvider>
-      </WalletProvider>
-    </CatalogProvider>
+    <AuthProvider>
+      <CatalogProvider>
+        <WalletProvider>
+          <CartProvider>
+            <BrowserRouter>
+              <ToastProvider>
+                <Routes>
+                  <Route element={<Layout />}>
+                    <Route index element={<Listing />} />
+                    <Route path="c/:category" element={<Listing />} />
+                    <Route path="deals" element={<Listing />} />
+                    <Route path="search" element={<Listing />} />
+                    <Route path="p/:productId" element={<ProductPage />} />
+                    <Route path="cart" element={<CartPage />} />
+                    <Route path={CALLBACK_PATH.slice(1)} element={<AuthCallback />} />
+                    <Route path="checkout" element={<RequireAuth><Checkout /></RequireAuth>} />
+                    <Route path="wallet" element={<RequireAuth><WalletPage /></RequireAuth>} />
+                    <Route path="orders" element={<RequireAuth><Orders /></RequireAuth>} />
+                    <Route path="orders/:id" element={<RequireAuth><Tracker /></RequireAuth>} />
+                    <Route path="*" element={<NotFound />} />
+                  </Route>
+                </Routes>
+              </ToastProvider>
+            </BrowserRouter>
+          </CartProvider>
+        </WalletProvider>
+      </CatalogProvider>
+    </AuthProvider>
   );
 }
 

@@ -1,11 +1,12 @@
 /**
  * Page chrome. Sticky two-row header:
- *   row 1 (#222831): logo · deliver-to · search (category + query) · DemoPay wallet · Orders · Cart
+ *   row 1 (#222831): logo · deliver-to · search (category + query) · account · DemoPay wallet · Orders · Cart
  *   row 2 (#393E46): category links + Today's deals
  * Then the content area, a one-line footer and the quick-add cart drawer.
  */
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { useSession } from "../auth";
 import { useCart } from "../cart";
 import { CATEGORIES, DELIVER_TO } from "../catalog";
 import { formatPrice } from "../format";
@@ -83,6 +84,31 @@ function HeaderLink({ to, top, main, className = "" }: { to: string; top: string
   );
 }
 
+/** Signed out: "Sign in" (Cognito managed login, which also offers sign-up). Signed in: email + "Sign out". */
+function AccountButton() {
+  const session = useSession();
+  if (session.isLoading) return <span className="w-20" aria-hidden="true" />;
+  if (!session.isSignedIn) {
+    return (
+      <button type="button" onClick={() => session.signIn()} className="flex flex-col rounded-control px-2 py-1 text-left leading-tight text-white hover:bg-white/10">
+        <span className="text-[11px] text-white/60">Hello, guest</span>
+        <span className="whitespace-nowrap text-sm font-semibold">Sign in</span>
+      </button>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => session.signOut()}
+      className="flex max-w-[11rem] flex-col rounded-control px-2 py-1 text-left leading-tight text-white hover:bg-white/10"
+      title={`Signed in as ${session.email}. Click to sign out.`}
+    >
+      <span className="truncate text-[11px] text-white/60">{session.email}</span>
+      <span className="whitespace-nowrap text-sm font-semibold">Sign out</span>
+    </button>
+  );
+}
+
 export function Layout() {
   const cart = useCart();
   const { wallet } = useWallet();
@@ -112,6 +138,7 @@ export function Layout() {
               <SearchBar />
             </div>
             <nav className="ml-auto flex items-center gap-1" aria-label="Account">
+              <AccountButton />
               <HeaderLink to="/wallet" top="DemoPay" main={wallet ? formatPrice(wallet.balance) : "Wallet"} />
               <HeaderLink to="/orders" top="Returns &" main="Orders" className="hidden sm:flex" />
               <Link
@@ -145,8 +172,8 @@ export function Layout() {
       <footer className="border-t border-line">
         <div className="mx-auto flex max-w-content flex-wrap items-center justify-between gap-2 px-4 py-6 text-sm text-muted sm:px-8">
           <span>
-            API Gateway · SQS · Step Functions · Lambda · DynamoDB · SNS
-            <span className="ml-3 rounded-full bg-cream px-2 py-0.5 text-xs font-semibold text-ink">v1.1 · deployed by GitHub Actions</span>
+            Cognito · API Gateway · SQS · Step Functions · Lambda · DynamoDB · SNS
+            <span className="ml-3 rounded-full bg-cream px-2 py-0.5 text-xs font-semibold text-ink">v1.2 · deployed by GitHub Actions</span>
           </span>
           <a href={GITHUB_URL} target="_blank" rel="noreferrer" className="font-medium text-muted-strong hover:text-ink">
             GitHub

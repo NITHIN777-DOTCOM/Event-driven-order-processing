@@ -1,6 +1,7 @@
 /**
  * Checkout (/checkout), two steps:
- *   1. Contact + delivery + demo test scenario (and the duplicate test)
+ *   1. Name + delivery + demo test scenario (and the duplicate test). The account (and so the wallet) is the
+ *      signed-in Cognito user's: this page sits behind <RequireAuth> and has no email field.
  *   2. Payment: the DemoPay wallet card (balance, amount due, balance after) and "Pay ₹X"
  * Paying places the order (with an Idempotency-Key) and goes straight to the live tracker.
  * The wallet is actually debited later, by the saga's ProcessPayment step.
@@ -10,9 +11,10 @@ import { Link, useNavigate } from "react-router-dom";
 import { createOrder, type NewOrder } from "../api";
 import { useCart } from "../cart";
 import { DELIVER_TO } from "../catalog";
+import { useSession } from "../auth";
 import { SCENARIOS, formatPrice } from "../format";
 import type { Simulate } from "../types";
-import { EMAIL_PATTERN, useWallet } from "../wallet";
+import { useWallet } from "../wallet";
 import { ErrorBanner, ProductImage } from "../components/ui";
 
 type Step = "details" | "payment";
@@ -44,8 +46,9 @@ function StepHeader({ step }: { step: Step }) {
 export function Checkout() {
   const cart = useCart();
   const navigate = useNavigate();
+  const session = useSession();
   const { contact, saveContact, wallet, refresh } = useWallet();
-  const [form, setForm] = useState({ ...contact, address: contact.address || DELIVER_TO });
+  const [form, setForm] = useState({ name: contact.name || session.name, address: contact.address || DELIVER_TO });
   const [step, setStep] = useState<Step>("details");
   const [simulate, setSimulate] = useState<Simulate>("none");
   const [busy, setBusy] = useState<"order" | "duplicate" | null>(null);
@@ -53,14 +56,13 @@ export function Checkout() {
   const [duplicateResult, setDuplicateResult] = useState<{ requests: number; orderIds: string[] } | null>(null);
 
   const scenario = SCENARIOS.find((s) => s.value === simulate)!;
-  const detailsValid = form.name.trim().length > 0 && EMAIL_PATTERN.test(form.email.trim()) && form.address.trim().length > 0;
-  const walletMatches = wallet && wallet.walletId === form.email.trim().toLowerCase();
-  const balance = walletMatches ? wallet.balance : null;
+  const detailsValid = form.name.trim().length > 0 && form.address.trim().length > 0;
+  const balance = wallet ? wallet.balance : null;
   const after = balance === null ? null : balance - cart.total;
 
   const buildOrder = (): NewOrder => ({
     customerName: form.name.trim(),
-    customerEmail: form.email.trim(),
+    customerEmail: session.email, // the verified email from the ID token, not user input
     items: cart.lines.map((line) => ({ productId: line.productId, quantity: line.quantity })),
     simulate,
   });
@@ -68,7 +70,7 @@ export function Checkout() {
   function continueToPayment(event: FormEvent) {
     event.preventDefault();
     if (!detailsValid) return;
-    saveContact({ name: form.name.trim(), email: form.email.trim(), address: form.address.trim() });
+    saveContact({ name: form.name.trim(), address: form.address.trim() });
     setError(null);
     setStep("payment");
   }
@@ -91,7 +93,7 @@ export function Checkout() {
   /** Sends the SAME request 3 times with ONE Idempotency-Key: the API must create exactly one order. */
   async function duplicateTest() {
     if (!detailsValid || busy) return;
-    saveContact({ name: form.name.trim(), email: form.email.trim(), address: form.address.trim() });
+    saveContact({ name: form.name.trim(), address: form.address.trim() });
     setBusy("duplicate");
     setError(null);
     setDuplicateResult(null);
@@ -140,15 +142,12 @@ export function Checkout() {
               </h2>
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field id="name" label="Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} autoComplete="name" />
-                <Field
-                  id="email"
-                  label="Email (your DemoPay wallet)"
-                  type="email"
-                  value={form.email}
-                  onChange={(v) => setForm({ ...form, email: v })}
-                  autoComplete="email"
-                  invalid={form.email.length > 0 && !EMAIL_PATTERN.test(form.email.trim())}
-                />
+                <div>
+                  <span className="label">Signed in as</span>
+                  <p className="flex h-10 items-center text-[15px] text-muted-strong" data-testid="account-email">
+                    {session.email}
+                  </p>
+                </div>
               </div>
             </section>
 
@@ -205,7 +204,7 @@ export function Checkout() {
                 <h2 id="payment-title" className="section-title">
                   DemoPay wallet
                 </h2>
-                <p className="text-sm text-muted">{form.email.trim().toLowerCase()}</p>
+                <p className="text-sm text-muted">{session.email}</p>
               </div>
               <button type="button" className="text-sm font-medium text-muted-strong underline underline-offset-2" onClick={() => setStep("details")}>
                 Change details
@@ -236,7 +235,7 @@ export function Checkout() {
               {busy === "order" ? "Placing order…" : `Pay ${formatPrice(cart.total)}`}
             </button>
             <p className="mt-3 text-center text-xs text-muted">
-              Demo wallet: not real money. Every email starts with ₹10,00,000. <Link to="/wallet" className="underline underline-offset-2">Manage wallet</Link>
+              Demo wallet: not real money. Every account starts with ₹10,00,000. <Link to="/wallet" className="underline underline-offset-2">Manage wallet</Link>
             </p>
           </section>
         )}
@@ -271,7 +270,7 @@ export function Checkout() {
               <button type="submit" form="details-form" className="btn-primary mt-5 w-full" disabled={!detailsValid || cart.lines.length === 0}>
                 Continue to payment
               </button>
-              {!detailsValid && <p className="mt-3 text-center text-xs text-muted">Enter your name, a valid email and an address.</p>}
+              {!detailsValid && <p className="mt-3 text-center text-xs text-muted">Enter your name and an address.</p>}
             </>
           )}
         </aside>

@@ -38,6 +38,15 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - Needed for `aws_cognito_managed_login_branding`. Lock file relocked for linux_amd64 + windows_amd64.
   `terraform plan` against the live stack: No changes.
 
+### Step 1.2 (Cognito auth + user-keyed data): IN PROGRESS
+- Bootstrap: deploy role + `cognito-idp:AdminInitiateAuth` (applied locally 2026-10-28, 1 changed; re-plan: no changes).
+- Commit A: `infra/main/auth.tf` (pool `order-saga-users` ESSENTIALS, managed login v2 domain, `spa` + `automation`
+  clients, branding), config.json `auth` block, CORS allows `authorization`; `scripts/create_test_users.py` (users A/B,
+  passwords in SSM `/order-saga/test-users/a|b`), `scripts/auth_tokens.py`; every API script sends the ID token;
+  deploy.yml ensures the test users before the smoke test; frontend login (oidc-client-ts 3.5.0 + react-oidc-context
+  3.3.1). API still has NO authorizer; backend unchanged.
+- Commit B (next): JWT authorizer, identity from claims, user-keyed orders/wallets/GSI, per-user idempotency.
+
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
 - GET /products stays public; checkout, orders and wallet require login.

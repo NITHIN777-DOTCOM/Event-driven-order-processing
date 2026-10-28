@@ -1,28 +1,29 @@
 /**
- * The shopper's identity (contact details remembered in localStorage) and their DemoPay wallet.
+ * The signed-in shopper's DemoPay wallet, plus their delivery details (name + address, remembered in
+ * localStorage). Identity comes from Cognito, never from a form: the wallet belongs to whoever is signed in.
  * The header shows the balance; checkout, the tracker and the wallet page call refresh() after a payment.
  */
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { getWallet } from "./api";
+import { useSession } from "./auth";
 import { storage } from "./format";
 import type { Wallet } from "./types";
 
+/** Delivery details only. The email is the account's (verified by Cognito), so it isn't stored here. */
 export interface Contact {
   name: string;
-  email: string;
   address: string;
 }
 
 const CONTACT_KEY = "order-saga.contact";
-export const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const REFRESH_MS = 15_000;
 
 function loadContact(): Contact {
   try {
     const saved = JSON.parse(storage.get(CONTACT_KEY) ?? "{}");
-    return { name: String(saved.name ?? ""), email: String(saved.email ?? ""), address: String(saved.address ?? "") };
+    return { name: String(saved.name ?? ""), address: String(saved.address ?? "") };
   } catch {
-    return { name: "", email: "", address: "" };
+    return { name: "", address: "" };
   }
 }
 
@@ -37,12 +38,13 @@ interface WalletState {
 const WalletContext = createContext<WalletState | null>(null);
 
 export function WalletProvider({ children }: { children: ReactNode }) {
+  const session = useSession();
   const [contact, setContact] = useState<Contact>(loadContact);
   const [wallet, setWallet] = useState<Wallet | null>(null);
-  const email = contact.email.trim();
+  const email = session.isSignedIn ? session.email : "";
 
   const refresh = useCallback(async () => {
-    if (!EMAIL_PATTERN.test(email)) {
+    if (!email) {
       setWallet(null);
       return;
     }

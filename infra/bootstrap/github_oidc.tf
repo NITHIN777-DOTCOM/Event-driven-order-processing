@@ -278,9 +278,11 @@ data "aws_iam_policy_document" "github_deploy" {
       "cognito-idp:CreateManagedLoginBranding", "cognito-idp:DescribeManagedLoginBranding",
       "cognito-idp:DescribeManagedLoginBrandingByClient", "cognito-idp:UpdateManagedLoginBranding",
       "cognito-idp:DeleteManagedLoginBranding",
-      # the demo/CI test user (step 1.2)
+      # the demo/CI test users (step 1.2)
       "cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser", "cognito-idp:AdminDeleteUser",
       "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminUpdateUserAttributes",
+      # the CI smoke test signs in as a test user through the "automation" app client (ADMIN_USER_PASSWORD_AUTH)
+      "cognito-idp:AdminInitiateAuth",
     ]
     resources = ["arn:aws:cognito-idp:${var.region}:${local.account_id}:userpool/*"]
     condition {

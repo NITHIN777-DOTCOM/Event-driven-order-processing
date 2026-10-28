@@ -8,7 +8,8 @@ One section per feature, with the same headings each time. Rules for this file:
 Evidence referenced below:
 `docs/evidence/phase1-happy-path.md`, `docs/evidence/phase2-failure-tests.md`,
 `docs/evidence/e2e-failure-tests.md` (latest e2e run, 8/8, 2026-10-22 13:21 UTC),
-`docs/evidence/phase3-monitoring.md`, `docs/evidence/phase5-cicd.md`.
+`docs/evidence/phase3-monitoring.md`, `docs/evidence/phase5-cicd.md`, `docs/evidence/upgrade-1.1-outbox.md`,
+`docs/evidence/upgrade-1.2-auth.md`.
 
 ---
 
@@ -473,7 +474,92 @@ with no time window at all, because a clock-dependent window there could hide a 
 
 ---
 
-## 9. Known gaps (and where they get fixed)
+## 9. Authentication and row-level isolation (Cognito + JWT authorizer)
+
+Status: commit A of step 1.2 (sign-in for the storefront and scripts). The API doesn't enforce it yet; that is
+commit B (JWT authorizer, identity from token claims, user-keyed orders and wallets).
+
+### What
+- Cognito user pool `order-saga-users` (Essentials plan): email is the username, open self-sign-up with an emailed
+  verification code, `PreventUserExistenceErrors` on, MFA off. Managed login (v2) on the free prefix domain
+  `order-saga-<account id>.auth.ap-south-1.amazoncognito.com`.
+- App client **`spa`** (the storefront): public, no secret, **authorization code + PKCE only**, scopes
+  openid/email/profile, callback `<origin>/auth/callback` for the CloudFront URL and `http://localhost:5173`,
+  60-minute ID/access tokens, 7-day refresh token with **rotation**, and no password API flows at all.
+- App client **`automation`** (scripts and CI only): `ADMIN_USER_PASSWORD_AUTH`, which is an IAM-signed admin call.
+- Two test users (A and B) created by `scripts/create_test_users.py`; their passwords are random and live only in
+  SSM SecureStrings (`/order-saga/test-users/a|b`). `scripts/auth_tokens.py` signs in and caches the tokens; every
+  API-calling script and the CI smoke test uses it.
+- Storefront: browsing is public; checkout, wallet, orders and the tracker send signed-out visitors to managed login
+  and back. Every API call carries the ID token. Checkout no longer asks for an email: it's the account's.
+
+### Why (the problem it solves)
+Before this, DemoPay wallets were keyed by an email the client typed, so anyone could open or reset anyone's wallet,
+and `GET /orders` listed everybody's orders. Identity has to come from something the user proves (a password
+behind Cognito), carried as a signed token the API can verify without calling back to Cognito.
+
+### How
+- `infra/main/auth.tf`: pool, domain (`managed_login_version = 2`), both clients, and a managed-login style for the
+  `spa` client (`aws_cognito_managed_login_branding`, which needed AWS provider 6.x: upgraded in its own commit first,
+  with a no-changes plan).
+- `config.json` (written by Terraform, so it changes in the same apply as the clients) carries the issuer URL, pool
+  ID, SPA client ID and domain. None of them are secrets.
+- Frontend `src/auth.tsx`: `oidc-client-ts` + `react-oidc-context`. `UserManager` discovers the endpoints from the
+  issuer, adds PKCE, stores the user in `sessionStorage` and renews tokens with the refresh token. Sign-out revokes
+  the refresh token, clears local state, then calls Cognito's `/logout?client_id=&logout_uri=` (Cognito's own
+  endpoint, not the standard OIDC end-session one).
+- `<RequireAuth>` wraps the protected routes and passes the current path through the OIDC `state`, so the user
+  lands back where they started; `/auth/callback` only accepts same-site paths from it.
+- The **ID token** is sent as `Authorization`: the API needs the user's id (`sub`) and *verified* email, and Cognito
+  puts the email only in the ID token. API Gateway's JWT authorizer can validate it (its `aud` is the app client).
+- CI: the deploy job runs `create_test_users.py` (idempotent) before the smoke test. The deploy role got
+  `cognito-idp:AdminInitiateAuth`, scoped to pools tagged `Project=aws-order-saga`.
+
+### Trade-offs / alternatives considered
+- **Authorization code + PKCE vs implicit flow:** implicit returns tokens in the URL fragment (browser history,
+  referrers, extensions) and can't use refresh tokens; OAuth 2.0 Security BCP deprecates it. Code + PKCE swaps a
+  one-time code for tokens over a back-channel POST, and PKCE stops a stolen code from being redeemed by anyone
+  without the verifier. The `spa` client allows only `code`.
+- **oidc-client-ts vs Amplify:** the app needs redirect, code exchange, refresh and sign-out. A standard OIDC client
+  does exactly that and isn't tied to AWS; it added about 19 kB gzipped (bundle 70.7 → 90.1 kB). Amplify Auth
+  brings much more (its own UI and API abstractions) than this needs.
+- **Token storage (sessionStorage):** any script on the origin can read it, so an XSS bug could steal a token.
+  Mitigated by no third-party scripts, React's escaping, 60-minute tokens, refresh-token rotation and
+  sessionStorage (gone when the tab closes). Not done: a Content-Security-Policy header. The stronger design is a
+  backend-for-frontend holding tokens in an HttpOnly cookie, which needs a server component.
+- **Separate automation client vs password auth on the SPA client:** scripts need a non-interactive sign-in. Putting
+  `USER_PASSWORD_AUTH` on the public client would let anyone on the internet try passwords against the API directly.
+  `ADMIN_USER_PASSWORD_AUTH` on its own client requires AWS credentials with `cognito-idp:AdminInitiateAuth` on this
+  pool, so only the deploy role and the admin user can use it.
+- **Test-user passwords outside Terraform:** a password set in Terraform ends up in plain text in the state file.
+  SSM SecureString (AWS-managed key, free tier) keeps it encrypted; Secrets Manager is off-limits here (cost) and
+  adds rotation this doesn't need.
+- **No M2M (client-credentials) client:** Cognito charges for M2M token requests, and the scripts must act *as a
+  user* anyway, to prove per-user isolation.
+- **Email sender:** Cognito's default sender is free but limited to a few dozen emails per day per account
+  (verification codes, password resets). Enough for a demo; production would use SES.
+
+### Numbers
+- Frontend bundle with the OIDC libraries: 302.99 kB (90.13 kB gzipped), up from 227.16 kB (70.74 kB gzipped).
+- Live sign-in, isolation and 401 checks: recorded in `docs/evidence/upgrade-1.2-auth.md` once commit B is deployed.
+
+### Likely interview questions
+1. *Why PKCE if there's no client secret?* Exactly because there's none: anyone can see a public client's ID, so
+   PKCE binds the code to the browser that started the login. A stolen code is useless without the verifier.
+2. *Why send the ID token and not the access token?* The API needs the verified email, which Cognito puts only in
+   the ID token. The OIDC purist answer is "access tokens for APIs": the alternative is the access token plus a
+   pre-token-generation Lambda that adds the email to it, at the cost of one more Lambda.
+3. *Where are the tokens stored, and what if there's an XSS bug?* sessionStorage; an XSS bug could read them. The
+   damage is limited by 60-minute tokens and refresh-token rotation; the real fix is a BFF with HttpOnly cookies.
+4. *How does CI sign in without a browser?* As a real test user, via `AdminInitiateAuth` on a separate client. That
+   call is IAM-signed, so the password flow isn't exposed publicly, and the password comes from an SSM SecureString.
+
+### Debugging story
+None recorded yet.
+
+---
+
+## 10. Known gaps (and where they get fixed)
 
 ### What
 Design limits found and documented, each with a planned fix.

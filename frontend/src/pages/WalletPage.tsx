@@ -1,13 +1,15 @@
 /**
  * DemoPay wallet (/wallet): balance, transaction history, reset to ₹10,00,000, and a "set balance"
  * demo control. For example, set it to ₹1,000 and buy something pricier to see a REAL decline.
+ * Always the signed-in user's own wallet (the page is behind <RequireAuth>).
  */
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { setWalletBalance } from "../api";
+import { useSession } from "../auth";
 import { formatDateTime, formatPrice } from "../format";
 import type { WalletTxnType } from "../types";
-import { EMAIL_PATTERN, useWallet } from "../wallet";
+import { useWallet } from "../wallet";
 import { ErrorBanner, Skeleton, StatusPill, type PillTone } from "../components/ui";
 
 const TYPE: Record<WalletTxnType, { label: string; tone: PillTone }> = {
@@ -17,13 +19,11 @@ const TYPE: Record<WalletTxnType, { label: string; tone: PillTone }> = {
 };
 
 export function WalletPage() {
-  const { contact, saveContact, wallet, refresh, setWallet } = useWallet();
-  const [emailInput, setEmailInput] = useState(contact.email);
+  const { wallet, refresh, setWallet } = useWallet();
+  const { email } = useSession();
   const [custom, setCustom] = useState("1000");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const email = contact.email.trim();
-  const hasEmail = EMAIL_PATTERN.test(email);
 
   useEffect(() => {
     refresh();
@@ -41,35 +41,12 @@ export function WalletPage() {
     }
   }
 
-  function chooseEmail(event: FormEvent) {
-    event.preventDefault();
-    if (EMAIL_PATTERN.test(emailInput.trim())) saveContact({ ...contact, email: emailInput.trim() });
-  }
-
-  if (!hasEmail) {
-    return (
-      <div className="card mx-auto max-w-md p-8">
-        <h1 className="text-[32px] font-semibold">DemoPay wallet</h1>
-        <p className="mt-2 text-muted">Each email address gets its own demo wallet with ₹10,00,000.</p>
-        <form onSubmit={chooseEmail} className="mt-6 space-y-3">
-          <label htmlFor="wallet-email" className="label">
-            Email
-          </label>
-          <input id="wallet-email" type="email" className="input" value={emailInput} onChange={(e) => setEmailInput(e.target.value)} />
-          <button type="submit" className="btn-primary w-full" disabled={!EMAIL_PATTERN.test(emailInput.trim())}>
-            Open wallet
-          </button>
-        </form>
-      </div>
-    );
-  }
-
   return (
     <>
       <div className="mb-8 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-[32px] font-semibold leading-tight">DemoPay wallet</h1>
-          <p className="mt-1 text-muted">{email.toLowerCase()} · demo money, not real</p>
+          <p className="mt-1 text-muted">{email} · demo money, not real</p>
         </div>
       </div>
       {error && (

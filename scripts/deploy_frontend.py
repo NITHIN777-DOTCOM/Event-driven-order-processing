@@ -2,18 +2,21 @@
 
     python scripts/deploy_frontend.py            # build, upload, invalidate
     python scripts/deploy_frontend.py --no-build # upload the existing frontend/dist
+    python scripts/deploy_frontend.py --local-config  # only write frontend/public/config.json for `npm run dev`
 
 Caching strategy:
   assets/*        content-hashed file names -> "public, max-age=31536000, immutable"
   index.html      -> "no-cache" (always revalidated, so a new deploy shows up at once)
   other files     (product photos, favicon) -> 1 day
-  config.json     is NOT uploaded here: Terraform owns it (it holds the API URL).
+  config.json     is NOT uploaded here: Terraform owns it (API URL + Cognito pool, SPA client and domain),
+                  so it changes in the same apply as those resources.
 Then it invalidates /index.html and /config.json and prints the URL.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import mimetypes
 import shutil
 import subprocess
@@ -60,6 +63,26 @@ def cache_control(key: str) -> str:
     return ONE_DAY
 
 
+def write_local_config(outputs: dict) -> Path:
+    """frontend/public/config.json for the Vite dev server (gitignored), from the same Terraform outputs
+    that Terraform uses for the deployed one. Login works on localhost because http://localhost:5173 is an
+    allowed callback/logout URL of the "spa" app client."""
+    domain = outputs["auth_domain"]
+    config = {
+        "apiUrl": outputs["api_url"].rstrip("/"),
+        "region": outputs["region"],
+        "auth": {
+            "authority": f"https://cognito-idp.{outputs['region']}.amazonaws.com/{outputs['user_pool_id']}",
+            "userPoolId": outputs["user_pool_id"],
+            "clientId": outputs["spa_client_id"],
+            "domain": domain,
+        },
+    }
+    path = FRONTEND / "public" / "config.json"
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def content_type(path: Path) -> str:
     return CONTENT_TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
@@ -67,9 +90,13 @@ def content_type(path: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-build", action="store_true", help="upload the existing dist/ without rebuilding")
+    parser.add_argument("--local-config", action="store_true", help="only write frontend/public/config.json for local dev")
     args = parser.parse_args()
 
     outputs = load_outputs()
+    if args.local_config:
+        print(f"Wrote {write_local_config(outputs)}")
+        return
     if not args.no_build:
         build()
 

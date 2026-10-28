@@ -3,8 +3,8 @@
     python -m pip install playwright && python -m playwright install chromium   # one-time, dev only
     python scripts/capture_ui.py
 
-A person's path, end to end: browse -> product page -> cart -> checkout (contact, delivery, test
-scenario) -> payment (DemoPay "Pay ₹X") -> live tracker. Scenarios: normal, payment glitch,
+A person's path, end to end: browse -> sign in (Cognito managed login, as test user A) -> product
+page -> cart -> checkout (name, delivery, test scenario) -> payment (DemoPay "Pay ₹X") -> live tracker. Scenarios: normal, payment glitch,
 payment declined, a REAL low-balance decline (the balance is set to ₹1,000 on the wallet page),
 the duplicate test and poison. After each order, the DemoPay ledger is checked through the API.
 Desktop (1440 px) and mobile (360 px) screenshots and docs/evidence/ui/README.md are written.
@@ -21,11 +21,13 @@ from pathlib import Path
 
 from playwright.sync_api import Page, expect, sync_playwright
 
+from auth_tokens import auth_header, credentials
 from tf_outputs import load_outputs
 
 OUT_DIR = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "ui"
 TERMINAL_TITLES = re.compile(r"Order completed|Order failed|Stuck in the dead-letter queue")
-NAME, EMAIL = "Asha Rao", "asha.rao@example.com"
+NAME = "Asha Rao"
+USER = "a"  # Cognito test user (create_test_users.py); the wallet and orders are this account's
 DESKTOP = {"width": 1440, "height": 900}
 MOBILE = {"width": 360, "height": 780}
 
@@ -42,17 +44,42 @@ class Run:
             self.api + path,
             data=json.dumps(body).encode() if body is not None else None,
             method=method,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **auth_header(USER)},
         )
         with urllib.request.urlopen(request, timeout=15) as resp:
             return json.loads(resp.read())
 
+    def wallet_path(self) -> str:
+        return f"/wallet?email={credentials(USER)['email']}"
+
     def debits(self, order_id: str) -> int:
-        txns = self.api_json("GET", f"/wallet?email={EMAIL}")["transactions"]
+        txns = self.api_json("GET", self.wallet_path())["transactions"]
         return sum(1 for t in txns if t.get("orderId") == order_id and t["type"] == "DEBIT")
 
     def balance(self) -> float:
-        return self.api_json("GET", f"/wallet?email={EMAIL}")["balance"]
+        return self.api_json("GET", self.wallet_path())["balance"]
+
+    def sign_in(self, page: Page, shot_name: str | None = None) -> None:
+        """Header "Sign in" -> Cognito managed login -> back on the storefront, signed in.
+        The password is typed into the page only; it is never printed or saved in a screenshot."""
+        page.goto(self.base + "/")
+        page.get_by_role("button", name=re.compile(r"Sign in")).click()
+        page.wait_for_url(re.compile(r"amazoncognito\.com"), timeout=20_000)
+        creds = credentials(USER)
+        username = page.locator('input[name="username"]:visible, input[type="email"]:visible').first
+        expect(username).to_be_visible(timeout=15_000)
+        if shot_name:
+            self.shot(page, shot_name, full_page=False)  # empty form: no credentials in the image
+        username.fill(creds["email"])
+        password = page.locator('input[type="password"]:visible').first
+        if not password.is_visible():  # two-step page: email first, then "Next"
+            page.get_by_role("button", name=re.compile(r"^(Next|Continue)$")).click()
+        expect(password).to_be_visible(timeout=15_000)
+        password.fill(creds["password"])
+        del creds
+        page.get_by_role("button", name=re.compile(r"^(Sign in|Continue|Next)$")).click()
+        page.wait_for_url(re.compile("^" + re.escape(self.base)), timeout=20_000)
+        expect(page.get_by_role("button", name=re.compile(r"Sign out"))).to_be_visible(timeout=20_000)
 
     @staticmethod
     def shot(page: Page, name: str, full_page: bool = True) -> None:
@@ -68,7 +95,6 @@ class Run:
         """Checkout step 1 (details + scenario) -> step 2 (DemoPay) -> Pay. Returns the orderId."""
         page.goto(self.base + "/checkout")
         page.locator("#name").fill(NAME)
-        page.locator("#email").fill(EMAIL)
         page.locator("#scenario").select_option(label=scenario)
         if shot_prefix:
             self.shot(page, f"{shot_prefix}-checkout-details")
@@ -100,8 +126,12 @@ class Run:
     # ---------------------------------------------------------------- scenarios
     def desktop(self, page: Page) -> None:
         base = self.base
-        self.api_json("POST", "/wallet/reset", {"email": EMAIL})  # start from ₹10,00,000
+        self.api_json("POST", "/wallet/reset", {"email": credentials(USER)["email"]})  # start from ₹10,00,000
 
+        # Signed out, the shop still works; the header offers "Sign in".
+        page.goto(base + "/")
+        expect(page.get_by_role("button", name=re.compile(r"Sign in"))).to_be_visible()
+        self.sign_in(page, shot_name="desktop-00-managed-login")
         page.goto(base + "/")
         expect(page.get_by_role("button", name=re.compile(r"^Add .* to cart$"))).to_have_count(16)
         page.wait_for_load_state("networkidle")
@@ -158,7 +188,6 @@ class Run:
         self.add_from_listing(page, "USB Condenser Microphone")
         page.goto(base + "/checkout")
         page.locator("#name").fill(NAME)
-        page.locator("#email").fill(EMAIL)
         page.locator("#scenario").select_option(label="Normal")
         page.get_by_role("button", name="Continue to payment").click()
         expect(page.get_by_role("alert")).to_contain_text("Not enough balance")
@@ -176,7 +205,6 @@ class Run:
         self.add_from_listing(page, "Slim Wireless Mouse")
         page.goto(base + "/checkout")
         page.locator("#name").fill(NAME)
-        page.locator("#email").fill(EMAIL)
         page.get_by_role("button", name=re.compile(r"Send same order 3")).click()
         status = page.get_by_role("status").filter(has_text="requests")
         expect(status).to_contain_text("3 requests → 1 order", timeout=20_000)
@@ -202,6 +230,7 @@ class Run:
 
     def mobile(self, phone: Page) -> None:
         base = self.base
+        self.sign_in(phone)
         phone.goto(base + "/")
         expect(phone.get_by_role("button", name=re.compile(r"^Add .* to cart$"))).to_have_count(16)
         phone.wait_for_load_state("networkidle")
@@ -212,7 +241,6 @@ class Run:
         phone.get_by_role("button", name="Close").click()
         phone.goto(base + "/checkout")
         phone.locator("#name").fill(NAME)
-        phone.locator("#email").fill(EMAIL)
         phone.get_by_role("button", name="Continue to payment").click()
         expect(phone.get_by_role("button", name=re.compile(r"^Pay ₹"))).to_be_visible()
         self.shot(phone, "mobile-03-checkout-payment")

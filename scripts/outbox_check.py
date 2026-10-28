@@ -31,7 +31,7 @@ import boto3
 from e2e_test import (
     OUT,
     REGION,
-    WALLET_EMAIL,
+    USER,
     count_log_lines,
     debits_for,
     executions_named,
@@ -84,7 +84,7 @@ def summary(values: list[float]) -> str:
 
 
 def run_timing(label: str, count: int, dual: bool) -> int:
-    set_wallet(WALLET_EMAIL)  # DemoPay: start from ₹10,00,000
+    set_wallet(USER)  # DemoPay: start from ₹10,00,000
     # 2 min of slack: the local clock can run ahead of CloudWatch; orderIds are unique, so nothing else matches.
     since_ms = int(time.time() * 1000) - 120_000
     rows, failures = [], []

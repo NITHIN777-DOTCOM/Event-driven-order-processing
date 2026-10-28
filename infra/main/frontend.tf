@@ -149,6 +149,8 @@ resource "aws_s3_bucket_policy" "frontend" {
 }
 
 # Runtime config read by the app at startup (GET /config.json). no-cache, so a backend change shows up at once.
+# Written here (not by deploy_frontend.py) so it changes in the same apply as the API and the Cognito clients.
+# Nothing in it is secret: the pool and SPA client IDs are public by design (a PKCE client has no secret).
 resource "aws_s3_object" "frontend_config" {
   bucket        = aws_s3_bucket.frontend.id
   key           = "config.json"
@@ -157,5 +159,11 @@ resource "aws_s3_object" "frontend_config" {
   content = jsonencode({
     apiUrl = trimsuffix(aws_apigatewayv2_stage.default.invoke_url, "/")
     region = var.region
+    auth = {
+      authority  = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.users.id}"
+      userPoolId = aws_cognito_user_pool.users.id
+      clientId   = aws_cognito_user_pool_client.spa.id
+      domain     = "https://${aws_cognito_user_pool_domain.users.domain}.auth.${var.region}.amazoncognito.com"
+    }
   })
 }

@@ -92,3 +92,33 @@ output "outbox_pipe_name" {
 output "outbox_dlq_url" {
   value = aws_sqs_queue.outbox_dlq.url
 }
+
+# --- Authentication (auth.tf) ----------------------------------------------------------------
+
+output "user_pool_id" {
+  value = aws_cognito_user_pool.users.id
+}
+
+output "spa_client_id" {
+  description = "Public app client used by the storefront (authorization code + PKCE)."
+  value       = aws_cognito_user_pool_client.spa.id
+}
+
+output "automation_client_id" {
+  description = "App client used only by scripts/CI (AdminInitiateAuth with the test users)."
+  value       = aws_cognito_user_pool_client.automation.id
+}
+
+output "auth_domain" {
+  description = "Managed login base URL."
+  value       = "https://${aws_cognito_user_pool_domain.users.domain}.auth.${var.region}.amazoncognito.com"
+}
+
+output "signup_url" {
+  description = "Managed login sign-up page for the storefront client (opens the shop again afterwards)."
+  value       = "https://${aws_cognito_user_pool_domain.users.domain}.auth.${var.region}.amazoncognito.com/signup?client_id=${aws_cognito_user_pool_client.spa.id}&response_type=code&scope=openid+email+profile&redirect_uri=${urlencode("https://${aws_cloudfront_distribution.frontend.domain_name}/auth/callback")}"
+}
+
+output "user_pool_console_url" {
+  value = "${local.console}/cognito/v2/idp/user-pools/${aws_cognito_user_pool.users.id}/overview?region=${var.region}"
+}

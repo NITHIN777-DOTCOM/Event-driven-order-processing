@@ -19,7 +19,9 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
   j) MODIFY            -> flipping an existing order's status back to PENDING (a MODIFY event) does NOT
                           re-enter the queue: the pipe only forwards INSERTs
 
-DemoPay: the shared test wallet is reset to ₹10,00,000 first, and each scenario checks the ledger
+Auth: every API call carries a Cognito ID token for test user A (or B), from auth_tokens.py.
+
+DemoPay: test user A's wallet is reset to ₹10,00,000 first, and each scenario checks the ledger
 (exactly one DEBIT for each paid order, none for failed ones).
 
 The poison order is placed FIRST, so its ~3 minutes of SQS retries overlap the other scenarios.
@@ -41,6 +43,7 @@ from pathlib import Path
 
 import boto3
 
+from auth_tokens import auth_header, test_user
 from tf_outputs import load_outputs
 
 OUT = load_outputs()
@@ -48,8 +51,8 @@ REGION = OUT["region"]
 API = OUT["api_url"].rstrip("/")
 EVIDENCE_FILE = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "e2e-failure-tests.md"
 DLQ_TIMEOUT_SECONDS = 300
-WALLET_EMAIL = "e2e.tester@example.com"
-LOW_BALANCE_EMAIL = "e2e.lowbalance@example.com"
+USER = "a"  # the main test user (see create_test_users.py)
+LOW_BALANCE_USER = "b"  # its wallet is set to ₹1,000 for the real-decline scenario
 
 ddb = boto3.resource("dynamodb", region_name=REGION)
 orders_table = ddb.Table(OUT["orders_table"])
@@ -109,39 +112,42 @@ def http_json(method: str, url: str, body: dict | None = None, headers: dict | N
 
 
 def place_order(
-    product_id: str, quantity: int, simulate: str, key: str | None = None, email: str = WALLET_EMAIL
+    product_id: str, quantity: int, simulate: str, key: str | None = None, user: str = USER
 ) -> tuple[int, dict]:
     payload = {
         "customerName": "E2E Tester",
-        "customerEmail": email,
+        "customerEmail": test_user(user)["email"],
         "items": [{"productId": product_id, "quantity": quantity}],
         "simulate": simulate,
     }
-    return http_json("POST", f"{API}/orders", payload, {"Idempotency-Key": key or str(uuid.uuid4())})
+    headers = {"Idempotency-Key": key or str(uuid.uuid4()), **auth_header(user)}
+    return http_json("POST", f"{API}/orders", payload, headers)
 
 
-def wallet(email: str = WALLET_EMAIL) -> dict:
-    return http_json("GET", f"{API}/wallet?email={email}")[1]
+def wallet(user: str = USER) -> dict:
+    return http_json("GET", f"{API}/wallet?email={test_user(user)['email']}", headers=auth_header(user))[1]
 
 
-def set_wallet(email: str, balance: float | None = None) -> dict:
-    body = {"email": email} if balance is None else {"email": email, "balance": balance}
-    return http_json("POST", f"{API}/wallet/reset", body)[1]
+def set_wallet(user: str = USER, balance: float | None = None) -> dict:
+    body: dict = {"email": test_user(user)["email"]}
+    if balance is not None:
+        body["balance"] = balance
+    return http_json("POST", f"{API}/wallet/reset", body, auth_header(user))[1]
 
 
-def debits_for(order_id: str, email: str = WALLET_EMAIL) -> int:
-    return sum(1 for t in wallet(email)["transactions"] if t.get("orderId") == order_id and t["type"] == "DEBIT")
+def debits_for(order_id: str, user: str = USER) -> int:
+    return sum(1 for t in wallet(user)["transactions"] if t.get("orderId") == order_id and t["type"] == "DEBIT")
 
 
-def get_order(order_id: str) -> dict:
-    return http_json("GET", f"{API}/orders/{order_id}")[1]
+def get_order(order_id: str, user: str = USER) -> dict:
+    return http_json("GET", f"{API}/orders/{order_id}", headers=auth_header(user))[1]
 
 
-def wait_for_terminal(order_id: str, timeout: int = 90) -> dict:
+def wait_for_terminal(order_id: str, timeout: int = 90, user: str = USER) -> dict:
     deadline = time.monotonic() + timeout
     order: dict = {}
     while time.monotonic() < deadline:
-        order = get_order(order_id)
+        order = get_order(order_id, user)
         if order.get("status") in ("COMPLETED", "FAILED"):
             return order
         time.sleep(2)
@@ -373,22 +379,22 @@ def scenario_duplicate_sqs_message() -> Scenario:
 
 def scenario_low_balance() -> Scenario:
     s = Scenario("h", "wallet balance too low -> REAL decline, stock released, nothing debited")
-    set_wallet(LOW_BALANCE_EMAIL, 1000)
+    set_wallet(LOW_BALANCE_USER, 1000)
     before = stock_of("USB-MIC")
-    code, body = place_order("USB-MIC", 1, "none", email=LOW_BALANCE_EMAIL)  # ₹5,999 > ₹1,000, no simulate flag
+    code, body = place_order("USB-MIC", 1, "none", user=LOW_BALANCE_USER)  # ₹5,999 > ₹1,000, no simulate flag
     s.check(code == 202, f"POST /orders returned {code} (expected 202)")
     s.order_id = body.get("orderId")
-    order = wait_for_terminal(s.order_id)
+    order = wait_for_terminal(s.order_id, user=LOW_BALANCE_USER)
     s.timeline = order.get("statusHistory", [])
     s.check(order.get("status") == "FAILED", f"order status {order.get('status')} (expected FAILED)")
     reason = str(order.get("failureReason", ""))
     s.check(reason.startswith("PaymentDeclined: Insufficient wallet balance"), f"failureReason '{reason}'")
     s.check(stock_of("USB-MIC") == before, f"USB-MIC (stock, reserved) {before} -> {stock_of('USB-MIC')} (expected unchanged)")
-    after = wallet(LOW_BALANCE_EMAIL)
+    after = wallet(LOW_BALANCE_USER)
     s.check(after["balance"] == 1000, f"DemoPay balance {after['balance']} (expected 1000, untouched)")
-    s.check(debits_for(s.order_id, LOW_BALANCE_EMAIL) == 0, "no DEBIT ledger entry")
+    s.check(debits_for(s.order_id, LOW_BALANCE_USER) == 0, "no DEBIT ledger entry")
     s.check("ReleaseInventory" in states_entered(s), "ReleaseInventory ran (compensation)")
-    set_wallet(LOW_BALANCE_EMAIL)  # leave the demo wallet back at ₹10,00,000
+    set_wallet(LOW_BALANCE_USER)  # leave the demo wallet back at ₹10,00,000
     return s
 
 
@@ -442,7 +448,7 @@ def scenario_crash_after_db_write() -> Scenario:
             "orderId": s.order_id,
             "idempotencyKey": f"e2e-crash-{uuid.uuid4().hex[:8]}",
             "customerName": "E2E Crash Simulation",
-            "customerEmail": WALLET_EMAIL,
+            "customerEmail": test_user(USER)["email"],
             "items": [
                 {"productId": "LOWPRO-KEYBOARD", "name": product["name"], "quantity": 1, "unitPrice": product["price"]}
             ],
@@ -539,7 +545,7 @@ def write_evidence(results: list[Scenario], duration: float) -> None:
 
 def main() -> int:
     started = time.monotonic()
-    set_wallet(WALLET_EMAIL)  # DemoPay: start every run from ₹10,00,000
+    set_wallet(USER)  # DemoPay: start every run from ₹10,00,000
     print("Placing poison order first (it needs ~3 min of SQS retries)...")
     poison, poison_started = start_poison()
     print(f"  poison order {poison.order_id}")

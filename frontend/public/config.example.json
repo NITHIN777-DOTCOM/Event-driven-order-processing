@@ -1,4 +1,10 @@
 {
   "apiUrl": "https://YOUR-API-ID.execute-api.ap-south-1.amazonaws.com",
-  "region": "ap-south-1"
+  "region": "ap-south-1",
+  "auth": {
+    "authority": "https://cognito-idp.ap-south-1.amazonaws.com/ap-south-1_YOURPOOL",
+    "userPoolId": "ap-south-1_YOURPOOL",
+    "clientId": "YOUR-SPA-CLIENT-ID",
+    "domain": "https://order-saga-YOUR-ACCOUNT-ID.auth.ap-south-1.amazoncognito.com"
+  }
 }

@@ -21,6 +21,7 @@ import urllib.request
 import uuid
 
 import seed_inventory
+from auth_tokens import LABELS, auth_header, test_user
 from tf_outputs import load_outputs
 
 MIX = {"none": 0.7, "payment_declined": 0.1, "payment_flaky": 0.1, "out_of_stock": 0.1}
@@ -50,12 +51,12 @@ def build_plan(total: int, rng: random.Random) -> list[str]:
     return plan
 
 
-def random_order(simulate: str, rng: random.Random) -> dict:
-    customer = rng.choice(CUSTOMERS)
+def random_order(simulate: str, rng: random.Random, user: str) -> dict:
+    customer = rng.choice(CUSTOMERS)  # the display name only; the account is the signed-in test user
     products = rng.sample(PRODUCTS, k=rng.randint(1, 2))
     return {
         "customerName": customer,
-        "customerEmail": f"{customer.split()[0].lower()}@example.com",
+        "customerEmail": test_user(user)["email"],
         "items": [{"productId": p, "quantity": rng.randint(1, 2)} for p in products],
         "simulate": simulate,
     }
@@ -77,12 +78,14 @@ def main() -> int:
     interval = args.minutes * 60 / args.orders
 
     print(f"\nSending {args.orders} orders over {args.minutes:g} min (one every {interval:.1f}s): {dict(collections.Counter(plan))}")
-    placed: list[tuple[str, str]] = []  # (orderId, simulate)
+    placed: list[tuple[str, str, str]] = []  # (orderId, simulate, test user)
     started = time.monotonic()
     for index, simulate in enumerate(plan, start=1):
-        code, body = http_json("POST", f"{api}/orders", random_order(simulate, rng), {"Idempotency-Key": str(uuid.uuid4())})
+        user = LABELS[index % len(LABELS)]  # alternate between the test users
+        headers = {"Idempotency-Key": str(uuid.uuid4()), **auth_header(user)}
+        code, body = http_json("POST", f"{api}/orders", random_order(simulate, rng, user), headers)
         if code == 202:
-            placed.append((body["orderId"], simulate))
+            placed.append((body["orderId"], simulate, user))
             print(f"  [{index:>3}/{args.orders}] {body['orderId']}  {simulate}")
         else:
             print(f"  [{index:>3}/{args.orders}] HTTP {code} {body}  {simulate}")
@@ -93,16 +96,16 @@ def main() -> int:
     final: dict[str, str] = {}
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline and len(final) < len(placed):
-        for order_id, _ in placed:
+        for order_id, _, user in placed:
             if order_id not in final:
-                status = http_json("GET", f"{api}/orders/{order_id}")[1].get("status")
+                status = http_json("GET", f"{api}/orders/{order_id}", headers=auth_header(user))[1].get("status")
                 if status in ("COMPLETED", "FAILED"):
                     final[order_id] = status
         if len(final) < len(placed):
             time.sleep(3)
 
-    summary = collections.Counter((simulate, final.get(order_id, "UNFINISHED")) for order_id, simulate in placed)
-    unexpected = [(o, s, final.get(o)) for o, s in placed if final.get(o) != EXPECTED_STATUS[s]]
+    summary = collections.Counter((simulate, final.get(order_id, "UNFINISHED")) for order_id, simulate, _ in placed)
+    unexpected = [(o, s, final.get(o)) for o, s, _ in placed if final.get(o) != EXPECTED_STATUS[s]]
     print("\nSummary (simulate -> final status: count)")
     for (simulate, status), count in sorted(summary.items()):
         print(f"  {simulate:<17} -> {status:<10} {count}")

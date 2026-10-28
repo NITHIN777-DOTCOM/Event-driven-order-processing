@@ -7,7 +7,7 @@ resource "aws_apigatewayv2_api" "orders" {
     # Only the storefront (CloudFront) and the local Vite dev server may call the API from a browser.
     allow_origins = ["https://${aws_cloudfront_distribution.frontend.domain_name}", "http://localhost:5173"]
     allow_methods = ["GET", "POST", "OPTIONS"]
-    allow_headers = ["content-type", "idempotency-key"]
+    allow_headers = ["authorization", "content-type", "idempotency-key"] # authorization: the Cognito ID token
     # Lets browser JavaScript read the idempotency response headers.
     expose_headers = ["idempotency-key", "idempotent-replayed"]
     max_age        = 300
