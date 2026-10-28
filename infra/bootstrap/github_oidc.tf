@@ -17,6 +17,8 @@ locals {
   github_sub_prefix = var.github_oidc_subject_prefix
   # Every resource infra/main manages is named order-saga-*; the deploy role is scoped to that prefix.
   p = var.project_prefix
+  # Must match the Project tag in the provider default_tags (versions.tf): Cognito access is gated on it.
+  project_tag = "aws-order-saga"
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -217,9 +219,98 @@ data "aws_iam_policy_document" "github_deploy" {
       "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole", "iam:UpdateAssumeRolePolicy",
       "iam:TagRole", "iam:UntagRole", "iam:ListRoleTags", "iam:PutRolePolicy", "iam:GetRolePolicy",
       "iam:DeleteRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies",
-      "iam:ListInstanceProfilesForRole", "iam:PassRole",
+      "iam:ListInstanceProfilesForRole",
     ]
     resources = ["arn:aws:iam::${local.account_id}:role/${local.p}-*"]
+  }
+  # PassRole only to the services that actually run with a project role: Lambda functions, the Step
+  # Functions state machine and (step 1.1) the EventBridge pipe. Nothing else can be handed a role.
+  statement {
+    sid       = "PassProjectRolesToProjectServices"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:aws:iam::${local.account_id}:role/${local.p}-*"]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["lambda.amazonaws.com", "states.amazonaws.com", "pipes.amazonaws.com"]
+    }
+  }
+
+  # EventBridge Pipes (transactional outbox: orders stream -> pipe -> SQS). Pipe names are chosen by
+  # us, so every action is scoped by ARN to order-saga-* pipes.
+  statement {
+    sid = "EventBridgePipes"
+    actions = [
+      "pipes:CreatePipe", "pipes:UpdatePipe", "pipes:DeletePipe", "pipes:DescribePipe",
+      "pipes:StartPipe", "pipes:StopPipe",
+      "pipes:TagResource", "pipes:UntagResource", "pipes:ListTagsForResource",
+    ]
+    resources = ["arn:aws:pipes:${var.region}:${local.account_id}:pipe/${local.p}-*"]
+  }
+  # DynamoDB Streams need nothing extra: the "DynamoDB" statement above already grants dynamodb:* on
+  # table/order-saga-*, and stream ARNs live under it (table/<name>/stream/<label>).
+
+  # Cognito user pools get a random ID (ap-south-1_AbC123), so they can't be scoped by name. Instead:
+  #   create:     only if the request tags the pool Project=aws-order-saga (provider default_tags do)
+  #   everything: only on pools that already carry that tag (so foreign pools are untouchable)
+  statement {
+    sid       = "CognitoCreateTaggedUserPool"
+    actions   = ["cognito-idp:CreateUserPool"]
+    resources = ["*"] # the pool doesn't exist yet, so there is no ARN to scope to
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/Project"
+      values   = [local.project_tag]
+    }
+  }
+  statement {
+    sid = "CognitoManageProjectUserPools"
+    actions = [
+      # pool
+      "cognito-idp:DescribeUserPool", "cognito-idp:UpdateUserPool", "cognito-idp:DeleteUserPool",
+      "cognito-idp:GetUserPoolMfaConfig", "cognito-idp:SetUserPoolMfaConfig", "cognito-idp:AddCustomAttributes",
+      "cognito-idp:TagResource", "cognito-idp:UntagResource", "cognito-idp:ListTagsForResource",
+      # app clients
+      "cognito-idp:CreateUserPoolClient", "cognito-idp:DescribeUserPoolClient",
+      "cognito-idp:UpdateUserPoolClient", "cognito-idp:DeleteUserPoolClient",
+      # hosted domain + managed login
+      "cognito-idp:CreateUserPoolDomain", "cognito-idp:UpdateUserPoolDomain", "cognito-idp:DeleteUserPoolDomain",
+      "cognito-idp:CreateManagedLoginBranding", "cognito-idp:DescribeManagedLoginBranding",
+      "cognito-idp:DescribeManagedLoginBrandingByClient", "cognito-idp:UpdateManagedLoginBranding",
+      "cognito-idp:DeleteManagedLoginBranding",
+      # the demo/CI test user (step 1.2)
+      "cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser", "cognito-idp:AdminDeleteUser",
+      "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminUpdateUserAttributes",
+    ]
+    resources = ["arn:aws:cognito-idp:${var.region}:${local.account_id}:userpool/*"]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = [local.project_tag]
+    }
+  }
+  statement {
+    sid = "CognitoReadOnlyUnscoped"
+    # DescribeUserPoolDomain is looked up by domain prefix, not pool ARN; ListUserPools is account-wide.
+    # Both are read-only and have no resource type, so they need "*".
+    actions   = ["cognito-idp:DescribeUserPoolDomain", "cognito-idp:ListUserPools"]
+    resources = ["*"]
+  }
+
+  # SSM Parameter Store under /order-saga/* (e.g. the test-user password as a SecureString). It uses the
+  # AWS-managed key aws/ssm, whose key policy already lets SSM use it for this account: no kms:* grant.
+  statement {
+    sid = "SsmProjectParameters"
+    actions = [
+      "ssm:PutParameter", "ssm:GetParameter", "ssm:GetParameters", "ssm:DeleteParameter",
+      "ssm:AddTagsToResource", "ssm:RemoveTagsFromResource", "ssm:ListTagsForResource",
+    ]
+    resources = ["arn:aws:ssm:${var.region}:${local.account_id}:parameter/${local.p}/*"]
+  }
+  statement {
+    sid       = "SsmDescribeParameters"
+    actions   = ["ssm:DescribeParameters"] # read-only, metadata only; the API has no resource type
+    resources = ["*"]
   }
   # Never let the pipeline edit its own trust or permissions (no privilege escalation).
   statement {

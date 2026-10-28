@@ -35,6 +35,7 @@ the repo root. Then do Phase 0.
 - If something fails, debug it yourself (terraform errors, CloudWatch logs) before asking me.
 - Commit with clear messages at the end of each phase and push to origin main.
 - Keep docs/progress.md updated (phase, done, next, blockers) so any new session can resume.
+- Every feature added or changed must also update docs/interview-prep.md in the same commit.
 
 ## Architecture (final target, built across phases)
 API Gateway HTTP API (CORS enabled): POST /orders → Lambda create_order; GET /orders/{id} → Lambda get_order.
@@ -72,6 +73,14 @@ frontend/, loadtest/, docs/ (architecture.md, progress.md, evidence/, demo-scrip
 ## Phase plan
 P0 Foundation & bootstrap | P1 Core workflow | P2 Failure engineering + tests | P3 Monitoring |
 P4 Frontend | P5 CI/CD | P6 Load test | P7 Docs, demo script, viva prep
+
+Upgrade plan (after P5; supersedes P6/P7 above):
+- Phase 1 Foundation: 1.0 prep (deploy-role permissions, CLI check, interview-prep doc) |
+  1.1 transactional outbox (DynamoDB Streams -> EventBridge Pipes -> SQS) | 1.2 Cognito + user-keyed wallets/orders
+- Phase 2 Saga features: 2.1 async payment (waitForTaskToken + HMAC webhook + timeout) |
+  2.2 reservation holds with TTL | 2.3 multi-item orders with partial compensation | 2.4 mid-saga cancellation
+- Phase 3 Proof + presentation: 3.1 oversell race test | 3.2 invariant/chaos checker | 3.3 k6 load test |
+  3.4 Standard vs Express comparison + cost per 1,000 orders | 3.5 README rewrite + demo video
 
 ## PHASE REPORT FORMAT (end EVERY phase with this, in one block, nothing secret)
 ### PHASE <n> REPORT

@@ -3,7 +3,30 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Phase 5 — CI/CD: DONE (2026-10-22).** Next: **Phase 6 — Load test (k6).**
+**Upgrade step 1.0 — Prep: DONE (2026-10-28).** Next: **1.1 transactional outbox.**
+(Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
+
+## Upgrade plan (toward a 9/10 resume project)
+- Phase 1 Foundation: 1.0 prep | 1.1 outbox (DynamoDB Streams -> EventBridge Pipes -> SQS) |
+  1.2 Cognito + user-keyed wallets/orders
+- Phase 2 Saga features: 2.1 async payment (waitForTaskToken + HMAC webhook + timeout) | 2.2 reservation holds
+  with TTL | 2.3 multi-item orders with partial compensation | 2.4 mid-saga cancellation
+- Phase 3 Proof + presentation: 3.1 oversell race test | 3.2 invariant/chaos checker | 3.3 k6 load test |
+  3.4 Standard vs Express + cost per 1,000 orders | 3.5 README rewrite + demo video
+
+### Step 1.0 (prep)
+- Deploy role (`infra/bootstrap/github_oidc.tf`): added Pipes (pipe/order-saga-*), Cognito (create only with
+  tag Project=aws-order-saga; manage only pools carrying that tag), SSM (parameter/order-saga/*), and PassRole
+  now limited by iam:PassedToService to lambda, states and pipes. DynamoDB streams were already covered by
+  dynamodb:* on table/order-saga-*. The plan role's ReadOnlyAccess already covers pipes/cognito-idp/ssm reads.
+- New `docs/interview-prep.md` (one section per feature; update it in the same commit as any feature change).
+- Bootstrap applied locally (1 changed); re-plan: no changes. Local AWS CLI upgraded 2.9.0 -> 2.39.0 (`aws pipes` works).
+
+### Decisions for step 1.2 (Cognito)
+- Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
+- GET /products stays public; checkout, orders and wallet require login.
+- Open self-sign-up with email verification.
+- Cognito managed login with authorization code + PKCE.
 
 ## Done
 ### Phase 0
@@ -33,7 +56,8 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - process_payment: simulate modes, paymentAttempts counter, PAYMENT_RETRY entries, no double charge.
 - Unit tests: 37 passed, 96% coverage. Live e2e: `scripts/e2e_test.py` 7/7 passed
   (see `docs/evidence/phase2-failure-tests.md`).
-- The DLQ intentionally still holds the poison message for ORD-20261022-7b1a4028 (for screenshots). Do NOT purge it.
+- The DLQ intentionally holds the poison messages from demo/e2e runs (7 as of the 2026-10-28 audit, incl.
+  ORD-20261022-7b1a4028), so `order-saga-dlq-not-empty` is in ALARM. Do NOT purge or redrive it.
 
 ### Phase 3
 - `infra/main/monitoring.tf`: dashboard `order-saga-dashboard` (7 rows); 6 alarms (8 alarm metrics, free tier)
@@ -78,8 +102,9 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   Evidence: docs/evidence/phase5-cicd.md.
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
-## Next (Phase 6)
-- k6 load test against the API; watch the dashboard and alarms under load.
+## Next (upgrade step 1.1)
+- Transactional outbox: enable a stream on order-saga-orders, EventBridge Pipe (filter INSERT, emit {orderId})
+  -> order-saga-orders-queue, remove the direct SendMessage from create_order.
 
 ## Known limitations / ideas (good viva points)
 - DemoPay has no authentication: wallets are keyed by email, so anyone who knows an email can view or reset it (demo only).
