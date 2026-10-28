@@ -18,8 +18,14 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
                           the outbox (stream -> pipe -> queue)
   j) MODIFY            -> flipping an existing order's status back to PENDING (a MODIFY event) does NOT
                           re-enter the queue: the pipe only forwards INSERTs
+  k) auth gate         -> no token / tampered token -> 401 from API Gateway; an access token (no email)
+                          -> 403; GET /products works signed out
+  l) order isolation   -> A can't read B's order (404, same as a missing one); each list shows only its owner's
+  m) wallet isolation  -> A resetting "B's" wallet (B's ids in the body) only changes A's wallet
+  n) per-user idempotency -> B reusing A's Idempotency-Key gets B's OWN new order; A's replay still works
 
-Auth: every API call carries a Cognito ID token for test user A (or B), from auth_tokens.py.
+Auth: every API call carries a Cognito ID token for test user A (or B), from auth_tokens.py. The API
+takes identity only from that token, so no request below sends an email or user id.
 
 DemoPay: test user A's wallet is reset to ₹10,00,000 first, and each scenario checks the ledger
 (exactly one DEBIT for each paid order, none for failed ones).
@@ -31,6 +37,7 @@ Results are printed and written to docs/evidence/e2e-failure-tests.md. Exit code
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import time
@@ -116,7 +123,6 @@ def place_order(
 ) -> tuple[int, dict]:
     payload = {
         "customerName": "E2E Tester",
-        "customerEmail": test_user(user)["email"],
         "items": [{"productId": product_id, "quantity": quantity}],
         "simulate": simulate,
     }
@@ -125,13 +131,11 @@ def place_order(
 
 
 def wallet(user: str = USER) -> dict:
-    return http_json("GET", f"{API}/wallet?email={test_user(user)['email']}", headers=auth_header(user))[1]
+    return http_json("GET", f"{API}/wallet", headers=auth_header(user))[1]
 
 
 def set_wallet(user: str = USER, balance: float | None = None) -> dict:
-    body: dict = {"email": test_user(user)["email"]}
-    if balance is not None:
-        body["balance"] = balance
+    body = {} if balance is None else {"balance": balance}
     return http_json("POST", f"{API}/wallet/reset", body, auth_header(user))[1]
 
 
@@ -443,12 +447,15 @@ def scenario_crash_after_db_write() -> Scenario:
     now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     s.order_id = f"ORD-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:8]}"
     # The same shape create_order writes (see build_order), but nothing is ever sent to SQS.
+    owner = test_user(USER)
     orders_table.put_item(
         Item={
             "orderId": s.order_id,
-            "idempotencyKey": f"e2e-crash-{uuid.uuid4().hex[:8]}",
+            "idempotencyKey": f"{owner['sub']}#e2e-crash-{uuid.uuid4().hex[:8]}",
+            "userId": owner["sub"],
+            "walletId": owner["sub"],
             "customerName": "E2E Crash Simulation",
-            "customerEmail": test_user(USER)["email"],
+            "customerEmail": owner["email"],
             "items": [
                 {"productId": "LOWPRO-KEYBOARD", "name": product["name"], "quantity": 1, "unitPrice": product["price"]}
             ],
@@ -465,8 +472,8 @@ def scenario_crash_after_db_write() -> Scenario:
             "simulate": "none",
             "createdAt": now,
             "updatedAt": now,
-            "gsi1pk": "ORDER",
-            "gsi1sk": now,
+            "gsi1pk": f"USER#{owner['sub']}",
+            "gsi1sk": f"{now}#{s.order_id}",
         },
         ConditionExpression="attribute_not_exists(orderId)",
     )
@@ -528,11 +535,11 @@ def write_evidence(results: list[Scenario], duration: float) -> None:
         "|---|----------|--------|---------|---------------------|",
     ]
     for r in results:
-        link = f"[open]({r.console_link})" if r.key != "g" else "none started (by design)"
+        link = f"[open]({r.console_link})" if r.order_id and r.key != "g" else "none started (by design)"
         lines.append(f"| {r.key} | {r.title} | {'PASS' if r.passed else 'FAIL'} | `{r.order_id}` | {link} |")
     for r in results:
         lines += ["", f"## {r.key}) {r.title} - {'PASS' if r.passed else 'FAIL'}", "", f"orderId: `{r.order_id}`"]
-        if r.key != "g":
+        if r.order_id and r.key != "g":
             lines.append(f"Execution ARN: `{r.execution_arn}`")
         lines += ["", "Checks:"]
         lines += [f"- {'PASS' if ok else 'FAIL'}: {text}" for ok, text in r.checks]
@@ -541,6 +548,107 @@ def write_evidence(results: list[Scenario], duration: float) -> None:
             lines += [f"{e['timestamp']}  {e['status']:<19} {e['detail']}" for e in r.timeline]
             lines.append("```")
     EVIDENCE_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
+# --------------------------------------------------------------------------------------------
+# Step 1.2: authentication and row-level isolation
+# --------------------------------------------------------------------------------------------
+def tampered(token: str) -> str:
+    """Same header and payload, one character of the signature changed."""
+    head, payload, signature = token.split(".")
+    flipped = ("A" if signature[10] != "A" else "B")
+    return f"{head}.{payload}.{signature[:10]}{flipped}{signature[11:]}"
+
+
+def forged_as(token: str, sub: str) -> str:
+    """A's token with the payload's sub swapped for someone else's (signature left as it was)."""
+    head, payload, signature = token.split(".")
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    claims["sub"] = sub
+    new_payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"{head}.{new_payload}.{signature}"
+
+
+def scenario_auth_gate() -> Scenario:
+    s = Scenario("k", "auth gate: no/tampered/forged token -> 401, access token -> 403, /products public")
+    code, body = http_json("GET", f"{API}/products")
+    s.check(code == 200 and len(body.get("products", [])) > 0, f"GET /products without a token -> {code} (expected 200)")
+    for method, path in (("POST", "/orders"), ("GET", "/orders"), ("GET", "/orders/ORD-20261028-00000000"),
+                         ("GET", "/wallet"), ("POST", "/wallet/reset")):
+        code, _ = http_json(method, f"{API}{path}", {} if method == "POST" else None)
+        s.check(code == 401, f"{method} {path} without a token -> {code} (expected 401)")
+    token = test_user(USER)["id_token"]
+    for label, bad in (("tampered signature", tampered(token)), ("payload forged as user B", forged_as(token, test_user(LOW_BALANCE_USER)["sub"]))):
+        code, _ = http_json("GET", f"{API}/wallet", headers={"Authorization": bad})
+        s.check(code == 401, f"GET /wallet with a {label} -> {code} (expected 401)")
+    code, body = http_json("GET", f"{API}/wallet", headers={"Authorization": test_user(USER)["access_token"]})
+    s.check(code == 403, f"GET /wallet with an ACCESS token (no email claim) -> {code} (expected 403: {body.get('error')})")
+    return s
+
+
+def scenario_order_isolation() -> Scenario:
+    s = Scenario("l", "order isolation: A can't read B's order (404), each list shows only its owner's orders")
+    code, body = place_order("DESK-MAT", 1, "none", user=LOW_BALANCE_USER)
+    s.check(code == 202, f"B: POST /orders -> {code} (expected 202)")
+    s.order_id = body.get("orderId")
+    order = wait_for_terminal(s.order_id, user=LOW_BALANCE_USER)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "COMPLETED", f"B reads B's own order: {order.get('status')} (expected COMPLETED)")
+
+    code_other, body_other = http_json("GET", f"{API}/orders/{s.order_id}", headers=auth_header(USER))
+    missing = f"ORD-{datetime.now(timezone.utc):%Y%m%d}-00000000"
+    code_missing, body_missing = http_json("GET", f"{API}/orders/{missing}", headers=auth_header(USER))
+    s.check(code_other == 404, f"A: GET /orders/<B's order> -> {code_other} (expected 404, not 403)")
+    s.check(
+        code_missing == 404 and body_other.get("error", "").replace(s.order_id, "X") == body_missing.get("error", "").replace(missing, "X"),
+        "the 404 for B's order is worded exactly like the 404 for an order that doesn't exist",
+    )
+    a_list = [o["orderId"] for o in http_json("GET", f"{API}/orders?limit=50", headers=auth_header(USER))[1]["orders"]]
+    b_list = [o["orderId"] for o in http_json("GET", f"{API}/orders?limit=50", headers=auth_header(LOW_BALANCE_USER))[1]["orders"]]
+    s.check(s.order_id not in a_list, f"A's GET /orders ({len(a_list)} orders) doesn't contain B's order")
+    s.check(s.order_id in b_list, f"B's GET /orders ({len(b_list)} orders) contains B's order")
+    s.check(not set(a_list) & set(b_list), "A's and B's order lists share no orderId")
+    owners = {orders_table.get_item(Key={"orderId": oid})["Item"].get("userId") for oid in a_list}
+    s.check(owners == {test_user(USER)["sub"]}, f"every order in A's list is owned by A's sub (owners seen: {len(owners)})")
+    return s
+
+
+def scenario_wallet_isolation() -> Scenario:
+    s = Scenario("m", "wallet isolation: A's reset (with B's ids in the body) changes only A's wallet")
+    b_before = wallet(LOW_BALANCE_USER)
+    body = {"balance": 4321, "email": test_user(LOW_BALANCE_USER)["email"], "walletId": test_user(LOW_BALANCE_USER)["sub"]}
+    code, result = http_json("POST", f"{API}/wallet/reset?email={test_user(LOW_BALANCE_USER)['email']}", body, auth_header(USER))
+    s.check(code == 200 and result.get("walletId") == test_user(USER)["sub"], f"POST /wallet/reset as A -> {code}, walletId = A's sub")
+    s.check(wallet(USER)["balance"] == 4321, f"A's balance is now {wallet(USER)['balance']} (expected 4321)")
+    b_after = wallet(LOW_BALANCE_USER)
+    s.check(
+        b_after["balance"] == b_before["balance"] and len(b_after["transactions"]) == len(b_before["transactions"]),
+        f"B's wallet unchanged: balance {b_before['balance']} -> {b_after['balance']}, "
+        f"{len(b_before['transactions'])} -> {len(b_after['transactions'])} ledger entries",
+    )
+    set_wallet(USER)  # back to ₹10,00,000
+    return s
+
+
+def scenario_per_user_idempotency() -> Scenario:
+    s = Scenario("n", "per-user idempotency: B reusing A's Idempotency-Key gets B's own order")
+    key = f"e2e-shared-{uuid.uuid4().hex[:8]}"
+    code_a, body_a = place_order("LAPTOP-STAND", 1, "none", key=key, user=USER)
+    code_b, body_b = place_order("LAPTOP-STAND", 1, "none", key=key, user=LOW_BALANCE_USER)
+    code_a2, body_a2 = place_order("LAPTOP-STAND", 1, "none", key=key, user=USER)
+    s.order_id = body_b.get("orderId")
+    s.check(code_a == 202 and code_b == 202, f"A -> {code_a}, then B with the SAME key -> {code_b} (both 202 = new orders)")
+    s.check(body_a.get("orderId") != body_b.get("orderId"), f"different orders: A {body_a.get('orderId')}, B {body_b.get('orderId')}")
+    s.check(code_a2 == 200 and body_a2.get("duplicate") is True and body_a2.get("orderId") == body_a.get("orderId"),
+            f"A again with the key -> {code_a2}, duplicate={body_a2.get('duplicate')}, the original order")
+    owner = orders_table.get_item(Key={"orderId": s.order_id}, ConsistentRead=True)["Item"].get("userId")
+    s.check(owner == test_user(LOW_BALANCE_USER)["sub"], "B's order is owned by B's sub")
+    code, _ = http_json("GET", f"{API}/orders/{s.order_id}", headers=auth_header(USER))
+    s.check(code == 404, f"A can't read the order B made with A's key -> {code} (expected 404)")
+    for oid, user in ((body_a.get("orderId"), USER), (s.order_id, LOW_BALANCE_USER)):
+        s.check(wait_for_terminal(oid, user=user).get("status") == "COMPLETED", f"{oid} COMPLETED")
+    s.timeline = get_order(s.order_id, LOW_BALANCE_USER).get("statusHistory", [])
+    return s
 
 
 def main() -> int:
@@ -560,6 +668,10 @@ def main() -> int:
         scenario_duplicate_sqs_message,
         scenario_low_balance,
         scenario_crash_after_db_write,
+        scenario_auth_gate,
+        scenario_order_isolation,
+        scenario_wallet_isolation,
+        scenario_per_user_idempotency,
     ):
         result = run()
         print(f"[{'PASS' if result.passed else 'FAIL'}] {result.key}) {result.title}  {result.order_id}")
@@ -584,7 +696,7 @@ def main() -> int:
         print(f"{r.key:<3}{'PASS' if r.passed else 'FAIL':<8}{r.order_id or '-':<24}{r.title}")
     print("=" * 100)
     for r in results:
-        if r.key != "g":
+        if r.order_id and r.key != "g":
             print(f"{r.key}) {r.console_link}")
     write_evidence(results, duration)
     print(f"\nEvidence written to {EVIDENCE_FILE}")

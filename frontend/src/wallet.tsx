@@ -41,19 +41,20 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const session = useSession();
   const [contact, setContact] = useState<Contact>(loadContact);
   const [wallet, setWallet] = useState<Wallet | null>(null);
-  const email = session.isSignedIn ? session.email : "";
+  // Re-fetch when the signed-in user changes (sign-in, sign-out, another account).
+  const userId = session.isSignedIn ? String(session.user?.profile.sub ?? "") : "";
 
   const refresh = useCallback(async () => {
-    if (!email) {
+    if (!userId) {
       setWallet(null);
       return;
     }
     try {
-      setWallet(await getWallet(email));
+      setWallet(await getWallet());
     } catch {
       /* keep the last known balance; the wallet page shows errors explicitly */
     }
-  }, [email]);
+  }, [userId]);
 
   useEffect(() => {
     refresh();

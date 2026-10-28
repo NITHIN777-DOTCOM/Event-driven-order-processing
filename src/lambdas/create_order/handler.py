@@ -15,6 +15,11 @@ That keeps this API fast, and the queue absorbs traffic spikes.
 Idempotency: when a client retries (a network timeout, a double-click, a load balancer retry)
 with the same Idempotency-Key, it gets the ORIGINAL order back (200, duplicate=true). A second
 order is never created (so no second stream INSERT), so it can never be charged twice.
+Keys are scoped per user (stored as "<sub>#<key>"): two users who happen to send the same key get
+their own orders, and nobody can replay (or probe) someone else's order by guessing a key.
+
+Identity: the customer is the signed-in caller (userId = JWT "sub", email = the verified "email"
+claim), never a field in the body. Any customerEmail the client sends is ignored.
 """
 
 from __future__ import annotations
@@ -32,11 +37,13 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common.auth import Caller, Forbidden, Unauthorized, caller_from
 from common.http import BadRequest, get_header, parse_json_body, response
 from common.logger import StructuredLogger, get_logger
 from common.orders import PENDING, cancellation_codes, history_entry
 from common.timeutil import utc_now_iso
 from common.tracing import instrument_aws_sdk
+from common.wallet import wallet_id_for
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
@@ -53,10 +60,8 @@ idempotency_table = dynamodb.Table(IDEMPOTENCY_TABLE)
 logger = get_logger("create_order")
 
 CURRENCY = "INR"
-ORDER_LIST_PARTITION = "ORDER"  # every order shares this GSI partition key (fine at demo scale)
 MAX_ITEMS = 20  # well under the DynamoDB transaction limit used by reserve_inventory
 MAX_QUANTITY = 50
-EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
 IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60  # DynamoDB TTL deletes the record after 24 h
@@ -67,6 +72,13 @@ SIMULATE_MODES = ("none", "payment_declined", "payment_flaky", "out_of_stock", "
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     log = logger.bind(requestId=event.get("requestContext", {}).get("requestId"))
     try:
+        caller = caller_from(event)
+    except Unauthorized as err:
+        return response(401, {"error": str(err)})
+    except Forbidden as err:
+        return response(403, {"error": str(err)})
+    log = log.bind(userId=caller.user_id)
+    try:
         key = idempotency_key_from(event)
         request = validate_request(parse_json_body(event))
     except BadRequest as err:
@@ -75,23 +87,24 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     log = log.bind(idempotencyKey=key)
     fingerprint = request_fingerprint(request)
+    scoped = scoped_key(caller, key)
 
     # Fast path: a replayed key returns the original order without touching inventory or the orders table.
-    record = idempotency_table.get_item(Key={"idempotencyKey": key}, ConsistentRead=True).get("Item")
+    record = idempotency_table.get_item(Key={"idempotencyKey": scoped}, ConsistentRead=True).get("Item")
     if record:
         return replay(record, fingerprint, key, log)
 
     try:
-        order = build_order(request, key)
+        order = build_order(request, scoped, caller)
     except BadRequest as err:
         log.warning("Rejected order request", reason=str(err))
         return response(400, {"error": str(err)})
 
     log = log.bind(orderId=order["orderId"])
     try:
-        if not save_order_once(order, key, fingerprint):
+        if not save_order_once(order, scoped, fingerprint):
             # Lost a race with a concurrent request that used the same key: replay the winner.
-            record = idempotency_table.get_item(Key={"idempotencyKey": key}, ConsistentRead=True)["Item"]
+            record = idempotency_table.get_item(Key={"idempotencyKey": scoped}, ConsistentRead=True)["Item"]
             return replay(record, fingerprint, key, log)
         # No SQS call here: the committed order row reaches the queue via the stream + outbox pipe.
     except Exception:
@@ -121,6 +134,11 @@ def idempotency_key_from(event: dict[str, Any]) -> str:
     return key
 
 
+def scoped_key(caller: Caller, key: str) -> str:
+    """The idempotency record's real key: per user, so users can't collide with (or replay) each other."""
+    return f"{caller.user_id}#{key}"
+
+
 def request_fingerprint(request: dict[str, Any]) -> str:
     """Hash of the normalised request, so a reused key with a DIFFERENT body can be detected."""
     return hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
@@ -143,14 +161,14 @@ def replay(record: dict[str, Any], fingerprint: str, key: str, log: StructuredLo
 
 
 def validate_request(body: dict[str, Any]) -> dict[str, Any]:
-    """Check the request shape and return a normalised copy. Raises BadRequest."""
+    """Check the request shape and return a normalised copy. Raises BadRequest.
+
+    customerName is only the delivery name shown on the order. Identity fields (customerEmail, userId,
+    walletId) are NOT read from the body: they come from the caller's token in build_order.
+    """
     name = body.get("customerName")
     if not isinstance(name, str) or not name.strip() or len(name) > 100:
         raise BadRequest("customerName is required (1-100 characters)")
-
-    email = body.get("customerEmail")
-    if not isinstance(email, str) or not EMAIL_PATTERN.match(email) or len(email) > 254:
-        raise BadRequest("customerEmail must be a valid email address")
 
     items = body.get("items")
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_ITEMS:
@@ -180,7 +198,6 @@ def validate_request(body: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "customerName": name.strip(),
-        "customerEmail": email.strip().lower(),
         "items": normalised_items,
         "simulate": simulate,
     }
@@ -216,15 +233,19 @@ def new_order_id() -> str:
     return f"ORD-{datetime.now(timezone.utc):%Y%m%d}-{uuid.uuid4().hex[:8]}"
 
 
-def build_order(request: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
+def build_order(request: dict[str, Any], idempotency_key: str, caller: Caller) -> dict[str, Any]:
     items = price_items(request["items"])
     total = sum((Decimal(i["quantity"]) * i["unitPrice"] for i in items), Decimal("0"))
     now = utc_now_iso()
+    order_id = new_order_id()
     return {
-        "orderId": new_order_id(),
+        "orderId": order_id,
         "idempotencyKey": idempotency_key,
+        # Owner, from the verified token only. process_payment/refund_payment use walletId, never the email.
+        "userId": caller.user_id,
+        "walletId": wallet_id_for(caller.user_id),
         "customerName": request["customerName"],
-        "customerEmail": request["customerEmail"],
+        "customerEmail": caller.email,  # where the SNS confirmation is addressed (verified by Cognito)
         "items": items,
         "totalAmount": total.quantize(Decimal("0.01")),
         "currency": CURRENCY,
@@ -233,9 +254,10 @@ def build_order(request: dict[str, Any], idempotency_key: str) -> dict[str, Any]
         "simulate": request["simulate"],
         "createdAt": now,
         "updatedAt": now,
-        # GSI "gsi1" lists orders newest-first for GET /orders without a table scan.
-        "gsi1pk": ORDER_LIST_PARTITION,
-        "gsi1sk": now,
+        # GSI "gsi1": one partition per user, newest first, for GET /orders (no scan, no shared hot key).
+        # The orderId suffix keeps two orders in the same millisecond distinct and in a stable order.
+        "gsi1pk": f"USER#{caller.user_id}",
+        "gsi1sk": f"{now}#{order_id}",
     }
 
 

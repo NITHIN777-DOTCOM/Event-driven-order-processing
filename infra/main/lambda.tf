@@ -13,7 +13,7 @@ locals {
   # `timeout` is optional (default 30 s).
   lambda_functions = {
     create_order = {
-      description = "POST /orders - idempotent (Idempotency-Key): validates and prices the order and saves it as PENDING; the outbox pipe enqueues it"
+      description = "POST /orders (JWT) - idempotent per user (Idempotency-Key): prices the order and saves it as PENDING; the outbox pipe enqueues it"
       environment = {
         ORDERS_TABLE      = aws_dynamodb_table.orders.name
         INVENTORY_TABLE   = aws_dynamodb_table.inventory.name
@@ -21,14 +21,14 @@ locals {
       }
     }
     get_order = {
-      description = "GET /orders/{id} - returns an order, its statusHistory, a plain-English live feed and AWS Console links"
+      description = "GET /orders/{id} (JWT) - the caller's own order (404 for anyone else's), its statusHistory, a live feed and AWS Console links"
       environment = {
         ORDERS_TABLE       = aws_dynamodb_table.orders.name
         WORKFLOW_LOG_GROUP = "/aws/vendedlogs/states/${local.state_machine_name}"
       }
     }
     list_orders = {
-      description = "GET /orders?limit=N - newest orders first via the gsi1 index (Query, no scan)"
+      description = "GET /orders?limit=N (JWT) - the caller's newest orders via gsi1, partition USER#<sub> (Query, no scan)"
       environment = {
         ORDERS_TABLE = aws_dynamodb_table.orders.name
         ORDERS_INDEX = "gsi1"
@@ -74,7 +74,7 @@ locals {
       }
     }
     wallet_api = {
-      description = "GET /wallet and POST /wallet/reset - DemoPay balance, recent transactions and demo balance changes"
+      description = "GET /wallet and POST /wallet/reset (JWT) - the caller's own DemoPay wallet (keyed by Cognito sub)"
       environment = {
         WALLETS_TABLE     = aws_dynamodb_table.wallets.name
         WALLET_TXNS_TABLE = aws_dynamodb_table.wallet_txns.name

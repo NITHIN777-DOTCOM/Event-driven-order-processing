@@ -4,9 +4,9 @@ from decimal import Decimal
 
 import pytest
 
-from conftest import seed_order, wallet_of
+from conftest import USER_A, seed_order, wallet_of
 
-EMAIL = "asha@example.com"  # seed_order's customerEmail
+WALLET = USER_A  # seed_order's walletId (the owner's Cognito sub)
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def test_debits_wallet_records_ledger_and_marks_order_paid(aws, handler):
     result = pay(handler, order)
 
     assert result["status"] == "CAPTURED" and result["paymentId"].startswith("PAY-")
-    balance, ledger = wallet_of(aws, EMAIL)
+    balance, ledger = wallet_of(aws, WALLET)
     assert balance == Decimal("1000000") - Decimal("5097.00")  # wallet created lazily with ₹10,00,000
     assert ledger == ["DEBIT"]
     saved = load(aws, order["orderId"])
@@ -38,13 +38,13 @@ def test_debits_wallet_records_ledger_and_marks_order_paid(aws, handler):
 
 
 def test_insufficient_balance_is_a_natural_decline_with_no_debit(aws, handler):
-    aws.wallets.put_item(Item={"walletId": EMAIL, "balance": Decimal("1000"), "currency": "INR"})
+    aws.wallets.put_item(Item={"walletId": WALLET, "balance": Decimal("1000"), "currency": "INR"})
     order = seed_order(aws.orders)
 
     with pytest.raises(handler.PaymentDeclined, match="Insufficient wallet balance"):
         pay(handler, order)
 
-    assert wallet_of(aws, EMAIL) == (Decimal("1000"), [])  # untouched, no ledger entry
+    assert wallet_of(aws, WALLET) == (Decimal("1000"), [])  # untouched, no ledger entry
     saved = load(aws, order["orderId"])
     assert saved["status"] == "PAYMENT_DECLINED" and "paymentId" not in saved
     assert "₹1,000 available, ₹5,097 needed" in saved["statusHistory"][-1]["detail"]
@@ -56,7 +56,7 @@ def test_simulated_card_decline_moves_no_money(aws, handler):
     with pytest.raises(handler.PaymentDeclined, match="declined"):
         pay(handler, order, "payment_declined")
 
-    assert wallet_of(aws, EMAIL) == (None, [])  # the wallet was never even touched
+    assert wallet_of(aws, WALLET) == (None, [])  # the wallet was never even touched
     assert load(aws, order["orderId"])["statusHistory"][-1]["detail"] == "Attempt 1: Card declined by issuer (simulated)"
 
 
@@ -71,7 +71,7 @@ def test_flaky_payment_retries_and_debits_exactly_once(aws, handler):
     saved = load(aws, order["orderId"])
     assert saved["paymentAttempts"] == 3
     assert [h["status"] for h in saved["statusHistory"]] == ["PENDING", "PAYMENT_RETRY", "PAYMENT_RETRY", "PAYMENT_CAPTURED"]
-    assert wallet_of(aws, EMAIL)[1] == ["DEBIT"]
+    assert wallet_of(aws, WALLET)[1] == ["DEBIT"]
 
 
 def test_already_paid_order_is_never_debited_again(aws, handler):
@@ -81,7 +81,7 @@ def test_already_paid_order_is_never_debited_again(aws, handler):
     second = pay(handler, order)  # e.g. a Lambda retry after a lost response
 
     assert second == first
-    balance, ledger = wallet_of(aws, EMAIL)
+    balance, ledger = wallet_of(aws, WALLET)
     assert ledger == ["DEBIT"] and balance == Decimal("994903")
 
 
@@ -94,4 +94,23 @@ def test_concurrent_attempt_that_paid_first_wins(aws, handler):
     result = handler.debit_wallet(stale_copy, 2, handler.logger)
 
     assert result["paymentId"] == first["paymentId"]
-    assert wallet_of(aws, EMAIL)[1] == ["DEBIT"]  # still exactly one debit
+    assert wallet_of(aws, WALLET)[1] == ["DEBIT"]  # still exactly one debit
+
+
+def test_payment_uses_the_orders_wallet_not_its_email(aws, handler):
+    """The wallet is the order's walletId (from the token at checkout); the email is only contact info."""
+    aws.wallets.put_item(Item={"walletId": "asha@example.com", "balance": Decimal("1000000"), "currency": "INR"})  # legacy row
+    order = seed_order(aws.orders)
+
+    handler.lambda_handler({"orderId": order["orderId"], "simulate": "none"}, None)
+
+    assert wallet_of(aws, WALLET)[1] == ["DEBIT"]
+    assert wallet_of(aws, "asha@example.com") == (Decimal("1000000"), [])  # the email-keyed legacy wallet is untouched
+
+
+def test_legacy_order_without_wallet_is_declined(aws, handler):
+    order = seed_order(aws.orders)
+    aws.orders.update_item(Key={"orderId": order["orderId"]}, UpdateExpression="REMOVE walletId")
+
+    with pytest.raises(handler.PaymentDeclined, match="no wallet"):
+        handler.lambda_handler({"orderId": order["orderId"], "simulate": "none"}, None)

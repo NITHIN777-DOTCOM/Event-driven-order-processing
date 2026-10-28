@@ -21,7 +21,7 @@ import urllib.request
 import uuid
 
 import seed_inventory
-from auth_tokens import LABELS, auth_header, test_user
+from auth_tokens import LABELS, auth_header
 from tf_outputs import load_outputs
 
 MIX = {"none": 0.7, "payment_declined": 0.1, "payment_flaky": 0.1, "out_of_stock": 0.1}
@@ -51,12 +51,11 @@ def build_plan(total: int, rng: random.Random) -> list[str]:
     return plan
 
 
-def random_order(simulate: str, rng: random.Random, user: str) -> dict:
+def random_order(simulate: str, rng: random.Random) -> dict:
     customer = rng.choice(CUSTOMERS)  # the display name only; the account is the signed-in test user
     products = rng.sample(PRODUCTS, k=rng.randint(1, 2))
     return {
         "customerName": customer,
-        "customerEmail": test_user(user)["email"],
         "items": [{"productId": p, "quantity": rng.randint(1, 2)} for p in products],
         "simulate": simulate,
     }
@@ -83,7 +82,7 @@ def main() -> int:
     for index, simulate in enumerate(plan, start=1):
         user = LABELS[index % len(LABELS)]  # alternate between the test users
         headers = {"Idempotency-Key": str(uuid.uuid4()), **auth_header(user)}
-        code, body = http_json("POST", f"{api}/orders", random_order(simulate, rng, user), headers)
+        code, body = http_json("POST", f"{api}/orders", random_order(simulate, rng), headers)
         if code == 202:
             placed.append((body["orderId"], simulate, user))
             print(f"  [{index:>3}/{args.orders}] {body['orderId']}  {simulate}")

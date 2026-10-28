@@ -49,15 +49,12 @@ class Run:
         with urllib.request.urlopen(request, timeout=15) as resp:
             return json.loads(resp.read())
 
-    def wallet_path(self) -> str:
-        return f"/wallet?email={credentials(USER)['email']}"
-
     def debits(self, order_id: str) -> int:
-        txns = self.api_json("GET", self.wallet_path())["transactions"]
+        txns = self.api_json("GET", "/wallet")["transactions"]
         return sum(1 for t in txns if t.get("orderId") == order_id and t["type"] == "DEBIT")
 
     def balance(self) -> float:
-        return self.api_json("GET", self.wallet_path())["balance"]
+        return self.api_json("GET", "/wallet")["balance"]
 
     def sign_in(self, page: Page, shot_name: str | None = None) -> None:
         """Header "Sign in" -> Cognito managed login -> back on the storefront, signed in.
@@ -126,7 +123,7 @@ class Run:
     # ---------------------------------------------------------------- scenarios
     def desktop(self, page: Page) -> None:
         base = self.base
-        self.api_json("POST", "/wallet/reset", {"email": credentials(USER)["email"]})  # start from ₹10,00,000
+        self.api_json("POST", "/wallet/reset", {})  # start from ₹10,00,000
 
         # Signed out, the shop still works; the header offers "Sign in".
         page.goto(base + "/")

@@ -476,9 +476,6 @@ with no time window at all, because a clock-dependent window there could hide a 
 
 ## 9. Authentication and row-level isolation (Cognito + JWT authorizer)
 
-Status: commit A of step 1.2 (sign-in for the storefront and scripts). The API doesn't enforce it yet; that is
-commit B (JWT authorizer, identity from token claims, user-keyed orders and wallets).
-
 ### What
 - Cognito user pool `order-saga-users` (Essentials plan): email is the username, open self-sign-up with an emailed
   verification code, `PreventUserExistenceErrors` on, MFA off. Managed login (v2) on the free prefix domain
@@ -493,6 +490,12 @@ commit B (JWT authorizer, identity from token claims, user-keyed orders and wall
   API-calling script and the CI smoke test uses it.
 - Storefront: browsing is public; checkout, wallet, orders and the tracker send signed-out visitors to managed login
   and back. Every API call carries the ID token. Checkout no longer asks for an email: it's the account's.
+- API: a **JWT authorizer** (`order-saga-cognito-jwt`) on every route except `GET /products`. The Lambdas take the
+  caller **only from the verified claims**: `userId = sub`, `email = email` (required to be `email_verified`).
+- **Row-level isolation:** orders store `userId` + `walletId`; `GET /orders` queries only the caller's partition
+  (`gsi1pk = USER#<sub>`); `GET /orders/{id}` answers **404, not 403**, for someone else's order; `GET /wallet` and
+  `POST /wallet/reset` act only on the caller's wallet (keyed by `sub`) and have no email/user parameter.
+- **Idempotency keys are scoped per user** (stored as `<sub>#<Idempotency-Key>`).
 
 ### Why (the problem it solves)
 Before this, DemoPay wallets were keyed by an email the client typed, so anyone could open or reset anyone's wallet,
@@ -514,7 +517,21 @@ behind Cognito), carried as a signed token the API can verify without calling ba
 - The **ID token** is sent as `Authorization`: the API needs the user's id (`sub`) and *verified* email, and Cognito
   puts the email only in the ID token. API Gateway's JWT authorizer can validate it (its `aud` is the app client).
 - CI: the deploy job runs `create_test_users.py` (idempotent) before the smoke test. The deploy role got
-  `cognito-idp:AdminInitiateAuth`, scoped to pools tagged `Project=aws-order-saga`.
+  `cognito-idp:AdminInitiateAuth` and `cognito-idp:ListUserPoolClients`, scoped to pools tagged `Project=aws-order-saga`.
+- `aws_apigatewayv2_authorizer.cognito` (`infra/main/api.tf`): type JWT, identity source `$request.header.Authorization`,
+  issuer `https://cognito-idp.ap-south-1.amazonaws.com/<pool id>`, audience = both app clients. API Gateway fetches and
+  caches the pool's public keys and checks signature, issuer, audience and expiry; a bad token is a 401 before any
+  Lambda runs (and before any Lambda cost). Each route in `local.api_routes` has an `auth` flag.
+- `src/common/auth.py` `caller_from(event)`: reads `requestContext.authorizer.jwt.claims`; no `sub` → 401 (fails
+  closed if a route ever lost its authorizer); no `email` claim (an access token) or `email_verified != "true"` → 403.
+  Body fields like `customerEmail`, `userId`, `walletId` and `?email=` are ignored everywhere.
+- `create_order`: `userId`, `walletId = sub`, `customerEmail` = the verified claim; `gsi1pk = USER#<sub>`,
+  `gsi1sk = <createdAt>#<orderId>` (the suffix keeps two orders in the same millisecond distinct and stably ordered);
+  idempotency record key `<sub>#<key>` (the response still echoes the client's own key).
+- `process_payment` charges `order.walletId` (set at checkout from the token), never `wallet_id(customerEmail)`.
+  `refund_payment` already used `walletId`. An order without one (pre-1.2 rows) is declined, not guessed.
+- Legacy rows (email-keyed wallets, orders with `gsi1pk = "ORDER"` and no `userId`) are left untouched; the API can't
+  reach them any more (404 / not listed).
 
 ### Trade-offs / alternatives considered
 - **Authorization code + PKCE vs implicit flow:** implicit returns tokens in the URL fragment (browser history,
@@ -539,10 +556,30 @@ behind Cognito), carried as a signed token the API can verify without calling ba
   user* anyway, to prove per-user isolation.
 - **Email sender:** Cognito's default sender is free but limited to a few dozen emails per day per account
   (verification codes, password resets). Enough for a demo; production would use SES.
+- **`sub` vs email as the key:** an email can change (`attributes_require_verification_before_update`) or be deleted
+  and re-registered by someone else; `sub` is immutable and never reused. Keying wallets by email would hand a new
+  account the old owner's money and history.
+- **404 vs 403 for another user's order:** 403 says "this exists, but not for you", which lets a caller enumerate
+  valid orderIds. 404 with the same wording as a missing order reveals nothing. Same principle as
+  `PreventUserExistenceErrors` on sign-in.
+- **Per-user idempotency scope:** a global key space lets user B replay user A's order (and read its id) just by
+  sending A's key, and lets one user's key "block" another's. Scoping by `sub` makes keys private, and two clients
+  that happen to pick the same key (e.g. a naive `checkout-1`) can't collide.
+- **JWT authorizer vs Lambda authorizer:** the JWT authorizer is configuration, verifies Cognito tokens natively and
+  costs nothing extra. A Lambda authorizer is needed only for custom logic (API keys, external IdPs, per-request
+  policy) and adds a cold-startable hop plus code to own. Ownership checks stay in the handlers either way, because
+  "is this row yours?" needs the data.
+- **Per-user GSI partition vs one `ORDER` partition:** one constant key makes every order write and every list read
+  hit a single GSI partition (a hot key at scale). `USER#<sub>` spreads them and makes "my orders" a direct Query.
+  What's lost: an admin "all orders" view now needs a scan or a separate index (not needed here).
 
 ### Numbers
 - Frontend bundle with the OIDC libraries: 302.99 kB (90.13 kB gzipped), up from 227.16 kB (70.74 kB gzipped).
-- Live sign-in, isolation and 401 checks: recorded in `docs/evidence/upgrade-1.2-auth.md` once commit B is deployed.
+- `spa` client live: `InitiateAuth` USER_SRP_AUTH → "USER_SRP_AUTH is not enabled for the client";
+  USER_PASSWORD_AUTH → "flow not enabled for this client"; CUSTOM_AUTH → "Custom auth lambda trigger is not configured".
+- Unit tests: 81 passed, 94% coverage (adds claims-only identity, 404 for others' orders, wallet isolation,
+  per-user idempotency).
+- Live E2E isolation and 401 checks: see `docs/evidence/upgrade-1.2-auth.md`.
 
 ### Likely interview questions
 1. *Why PKCE if there's no client secret?* Exactly because there's none: anyone can see a public client's ID, so
@@ -554,6 +591,17 @@ behind Cognito), carried as a signed token the API can verify without calling ba
    damage is limited by 60-minute tokens and refresh-token rotation; the real fix is a BFF with HttpOnly cookies.
 4. *How does CI sign in without a browser?* As a real test user, via `AdminInitiateAuth` on a separate client. That
    call is IAM-signed, so the password flow isn't exposed publicly, and the password comes from an SSM SecureString.
+5. *Why 404 and not 403 for someone else's order?* So the response can't be used to discover which orderIds exist.
+6. *Why key by `sub` and not email?* Emails change and get re-registered; `sub` is immutable and unique per user.
+7. *What stops a user from putting someone else's email in the order body?* The handlers never read identity from
+   the body: owner, wallet and email all come from the verified token claims. A unit test sends spoofed fields and
+   asserts they're ignored.
+8. *If the JWT authorizer already checked the token, why check ownership in the Lambda?* The authorizer answers
+   "who are you"; only the data can answer "is this order yours". Authentication at the edge, authorization next to
+   the data.
+9. *What happens to tokens when the user signs out?* The refresh token is revoked at Cognito (token revocation is
+   on), local tokens are cleared, and the managed-login session cookie is ended via `/logout`. An already-issued ID
+   token stays valid until it expires (≤ 60 min): JWT validation is stateless; that's the trade-off.
 
 ### Debugging story
 **"No auth flows" turned out to mean "the default auth flows".** The `spa` client was first deployed with
@@ -565,6 +613,13 @@ treats "not set" as its defaults (SRP + custom + refresh). Listing `ALLOW_REFRES
 rejects it when refresh-token rotation is on. The fix was to list only `ALLOW_CUSTOM_AUTH`, which replaces the
 defaults and can't complete because the pool has no custom-auth Lambda triggers. The re-test is in
 `docs/evidence/upgrade-1.2-auth.md`. Lesson: verify a deny with a real call; an empty list in IaC isn't proof.
+
+**The fix's own deploy then failed with `AccessDenied` on `cognito-idp:ListUserPoolClients`.** Creating the clients in
+commit A never needed it; *updating* one does, because the AWS provider lists the pool's clients first. CloudTrail
+showed it as the deploy role's only denied Cognito call (run 40734477999, 17:19:30Z). The plan had passed and the apply
+stopped at that call, so nothing had changed. The fix was one action added to the bootstrap policy, scoped like the
+others to project-tagged pools, then the deploy re-ran green. Lesson: least-privilege policies written from the
+"create" path miss what the "update" path needs; CloudTrail names the exact action.
 
 ---
 
@@ -583,13 +638,12 @@ claiming there are no gaps.
   pipe is stopped or broken for over a day, or a record's details in the outbox DLQ are never acted on). The order row
   stays PENDING and nothing re-sends it. Fix: a scheduled sweeper that queries PENDING orders older than N minutes
   (the `gsi1` index already projects `status`) and re-sends `{"orderId": ...}`. That's safe because start_workflow is idempotent.
-- **Email-keyed wallets with no authentication** (fixed in step 1.2): `GET /wallet?email=` and
-  `POST /wallet/reset` accept any email, and `customerEmail` on orders comes from the client
-  (`src/lambdas/wallet_api/handler.py`, `src/common/wallet.py`). Fix: Cognito with a JWT authorizer;
-  key wallets and orders by the token's `sub`.
-- **Constant `gsi1pk` hot partition** (fixed in step 1.2): every order uses `gsi1pk = "ORDER"`, so all
-  "recent orders" writes and reads hit one GSI partition (`infra/main/dynamodb.tf`). Fix: per-user partition
-  keys once orders are user-keyed.
+- ~~Email-keyed wallets, no authentication~~ and ~~constant `gsi1pk` hot partition~~ **fixed in step 1.2**: see section 9.
+- **No Content-Security-Policy header** on the storefront. Tokens are in sessionStorage, so XSS is the main token-theft
+  risk. Fix: a CloudFront response-headers policy with a strict CSP (`script-src 'self'`, `connect-src` = the API and
+  the Cognito domains).
+- **ID token used as the API credential** (section 9). Fix if needed: access token + a pre-token-generation trigger
+  that adds the verified email.
 - Compensation failures are recorded in the execution (`refundError`/`releaseError`) but not alerted on.
 - HTTP API has no X-Ray; the SFN segment is missing from the map (section 7).
 

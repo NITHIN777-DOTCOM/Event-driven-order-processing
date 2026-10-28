@@ -1,7 +1,7 @@
-"""DemoPay: a demo wallet per customer email, debited and refunded atomically with the order.
+"""DemoPay: a demo wallet per signed-in user, debited and refunded atomically with the order.
 
 Data model: two tables.
-  order-saga-wallets       PK walletId (lower-cased email)   -> balance, currency, createdAt, updatedAt
+  order-saga-wallets       PK walletId (the user's Cognito sub) -> balance, currency, createdAt, updatedAt
   order-saga-wallet-txns   PK walletId, SK txnId ("<ts>#<id>") -> type, amount, balanceAfter, orderId, note
 
 Why a separate transactions table instead of a list on the wallet item: history grows without
@@ -11,11 +11,14 @@ order), so a debit and its ledger entry can never get out of sync.
 
 Concurrency: every balance change is conditional on the balance it read ("balance = :before").
 That makes balanceAfter exact. If another write got there first, the caller re-reads and tries again.
+
+Ownership: the walletId is the Cognito "sub" from the verified JWT (common/auth.py), never an email
+from the request. Before step 1.2, wallets were keyed by a client-supplied email; those legacy rows
+(walletId = an email address) are left untouched and can no longer be reached through the API.
 """
 
 from __future__ import annotations
 
-import re
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -27,14 +30,13 @@ from common.timeutil import utc_now_iso
 INITIAL_BALANCE = Decimal("1000000")  # ₹10,00,000 for every new wallet
 CURRENCY = "INR"
 MAX_DEMO_BALANCE = Decimal("10000000")  # cap for the "set balance" demo helper
-EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 DEBIT, CREDIT, ADJUST = "DEBIT", "CREDIT", "ADJUST"
 
 
-def wallet_id(email: str) -> str:
-    """Wallets are keyed by the customer's email, case-insensitively."""
-    return email.strip().lower()
+def wallet_id_for(user_id: str) -> str:
+    """A user's wallet is keyed by their Cognito sub (immutable, unlike an email)."""
+    return user_id
 
 
 def ensure_wallet(wallets_table: Any, wid: str) -> dict[str, Any]:

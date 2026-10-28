@@ -61,8 +61,7 @@ export function Checkout() {
   const after = balance === null ? null : balance - cart.total;
 
   const buildOrder = (): NewOrder => ({
-    customerName: form.name.trim(),
-    customerEmail: session.email, // the verified email from the ID token, not user input
+    customerName: form.name.trim(), // the delivery name only; the account comes from the ID token
     items: cart.lines.map((line) => ({ productId: line.productId, quantity: line.quantity })),
     simulate,
   });

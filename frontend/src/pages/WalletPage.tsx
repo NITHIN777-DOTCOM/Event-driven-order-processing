@@ -33,7 +33,7 @@ export function WalletPage() {
     setBusy(true);
     setError(null);
     try {
-      setWallet(await setWalletBalance(email, balance));
+      setWallet(await setWalletBalance(balance));
     } catch (err) {
       setError((err as Error).message);
     } finally {

@@ -136,15 +136,36 @@ def load_handler(aws):
     return _load
 
 
-def api_event(body=None, path_parameters=None, headers=None) -> dict:
-    """Return a minimal API Gateway HTTP API (payload v2.0) event."""
-    return {
+# Two signed-in users. In production the ids are Cognito "sub" values from the verified JWT.
+USER_A, EMAIL_A = "11111111-aaaa-4aaa-8aaa-111111111111", "asha@example.com"
+USER_B, EMAIL_B = "22222222-bbbb-4bbb-8bbb-222222222222", "bilal@example.com"
+
+
+def jwt_claims(user_id=USER_A, email=EMAIL_A, verified="true") -> dict:
+    """What API Gateway's JWT authorizer puts in the event after verifying a Cognito ID token."""
+    claims = {"sub": user_id, "email_verified": verified, "token_use": "id"}
+    if email is not None:
+        claims["email"] = email
+    return claims
+
+
+def api_event(body=None, path_parameters=None, headers=None, claims="default", route_key=None, query=None) -> dict:
+    """Return a minimal API Gateway HTTP API (payload v2.0) event, signed in as user A by default.
+    claims=None builds an event with no authorizer context (a route deployed without the authorizer)."""
+    context = {"requestId": "test-request"}
+    if claims is not None:
+        context["authorizer"] = {"jwt": {"claims": jwt_claims() if claims == "default" else claims}}
+    event = {
         "headers": headers or {},
         "body": json.dumps(body) if isinstance(body, (dict, list)) else body,
         "isBase64Encoded": False,
         "pathParameters": path_parameters,
-        "requestContext": {"requestId": "test-request"},
+        "queryStringParameters": query,
+        "requestContext": context,
     }
+    if route_key:
+        event["routeKey"] = route_key
+    return event
 
 
 def stock_of(aws, product_id) -> tuple[int, int]:
@@ -153,10 +174,10 @@ def stock_of(aws, product_id) -> tuple[int, int]:
     return int(item["stock"]), int(item["reserved"])
 
 
-def wallet_of(aws, email="asha@example.com") -> tuple:
+def wallet_of(aws, wallet_id=USER_A) -> tuple:
     """(balance, [ledger entry types, oldest first]) of a wallet; (None, []) if it doesn't exist."""
-    wallet = aws.wallets.get_item(Key={"walletId": email}).get("Item")
-    txns = aws.wallet_txns.query(KeyConditionExpression="walletId = :w", ExpressionAttributeValues={":w": email})["Items"]
+    wallet = aws.wallets.get_item(Key={"walletId": wallet_id}).get("Item")
+    txns = aws.wallet_txns.query(KeyConditionExpression="walletId = :w", ExpressionAttributeValues={":w": wallet_id})["Items"]
     return (wallet["balance"] if wallet else None), [t["type"] for t in txns]
 
 
@@ -164,8 +185,10 @@ def seed_order(orders_table, **overrides) -> dict:
     """Write a PENDING order (2 mice + 1 keyboard) straight into the orders table."""
     order = {
         "orderId": "ORD-20261022-abcdef12",
+        "userId": USER_A,
+        "walletId": USER_A,
         "customerName": "Asha Rao",
-        "customerEmail": "asha@example.com",
+        "customerEmail": EMAIL_A,
         "items": [
             {"productId": "WIRELESS-MOUSE", "name": "Wireless Mouse", "quantity": 2, "unitPrice": Decimal("799.00")},
             {"productId": "MECH-KEYBOARD", "name": "Mechanical Keyboard", "quantity": 1, "unitPrice": Decimal("3499.00")},

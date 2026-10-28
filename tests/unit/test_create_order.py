@@ -4,11 +4,10 @@ from decimal import Decimal
 
 import pytest
 
-from conftest import api_event
+from conftest import EMAIL_A, EMAIL_B, USER_A, USER_B, api_event, jwt_claims
 
 VALID_BODY = {
     "customerName": "Asha Rao",
-    "customerEmail": "Asha@Example.com",
     "items": [
         {"productId": "WIRELESS-MOUSE", "quantity": 2},
         {"productId": "MECH-KEYBOARD", "quantity": 1},
@@ -32,11 +31,42 @@ def test_valid_order_is_saved_pending(aws, handler):
     order = aws.orders.get_item(Key={"orderId": body["orderId"]})["Item"]
     assert order["totalAmount"] == Decimal("5097.00")  # 2 x 799 + 1 x 3499, priced server-side
     assert order["currency"] == "INR"
-    assert order["customerEmail"] == "asha@example.com"
     assert order["simulate"] == "none"
     assert [h["status"] for h in order["statusHistory"]] == ["PENDING"]
     assert order["items"][0]["name"] == "Wireless Mouse"
-    assert order["gsi1pk"] == "ORDER" and order["gsi1sk"] == order["createdAt"]
+    # Owner and wallet come from the token; the GSI partition is per user, newest first.
+    assert order["userId"] == USER_A and order["walletId"] == USER_A and order["customerEmail"] == EMAIL_A
+    assert order["gsi1pk"] == f"USER#{USER_A}"
+    assert order["gsi1sk"] == f"{order['createdAt']}#{order['orderId']}"
+
+
+# --- Identity comes ONLY from the verified JWT claims ------------------------------------------
+
+
+def test_identity_fields_in_the_body_are_ignored(aws, handler):
+    spoofed = {**VALID_BODY, "customerEmail": "victim@example.com", "userId": USER_B, "walletId": USER_B}
+
+    result = handler.lambda_handler(api_event(spoofed), None)
+
+    assert result["statusCode"] == 202
+    order = aws.orders.get_item(Key={"orderId": json.loads(result["body"])["orderId"]})["Item"]
+    assert (order["userId"], order["walletId"], order["customerEmail"]) == (USER_A, USER_A, EMAIL_A)
+
+
+@pytest.mark.parametrize(
+    "claims, status",
+    [
+        (None, 401),  # no authorizer context at all: fail closed
+        ({"email": EMAIL_A, "email_verified": "true"}, 401),  # no sub
+        (jwt_claims(email=None), 403),  # an access token: no email claim
+        (jwt_claims(verified="false"), 403),  # email not verified
+    ],
+)
+def test_missing_or_unusable_identity_is_rejected(aws, handler, claims, status):
+    result = handler.lambda_handler(api_event(VALID_BODY, claims=claims), None)
+
+    assert result["statusCode"] == status
+    assert aws.orders.scan()["Count"] == 0
 
 
 
@@ -68,7 +98,6 @@ def test_handler_needs_no_queue_configuration(aws, load_handler, monkeypatch):
     [
         ("not json", "valid JSON"),
         ({**VALID_BODY, "customerName": ""}, "customerName"),
-        ({**VALID_BODY, "customerEmail": "nope"}, "customerEmail"),
         ({**VALID_BODY, "items": []}, "items"),
         ({**VALID_BODY, "items": [{"productId": "WIRELESS-MOUSE", "quantity": 0}]}, "quantity"),
         ({**VALID_BODY, "items": [{"productId": "WIRELESS-MOUSE", "quantity": True}]}, "quantity"),
@@ -104,7 +133,7 @@ def test_missing_idempotency_key_is_generated_and_returned(aws, handler):
     body = json.loads(result["body"])
     assert body["duplicate"] is False
     assert result["headers"]["Idempotency-Key"] == body["idempotencyKey"]
-    record = aws.idempotency.get_item(Key={"idempotencyKey": body["idempotencyKey"]})["Item"]
+    record = aws.idempotency.get_item(Key={"idempotencyKey": f"{USER_A}#{body['idempotencyKey']}"})["Item"]
     assert record["orderId"] == body["orderId"]
     assert record["expiresAt"] > 0
 
@@ -140,12 +169,27 @@ def test_same_key_with_different_body_is_rejected(aws, handler):
     assert aws.orders.scan()["Count"] == 1
 
 
+def test_same_key_from_another_user_creates_their_own_order(aws, handler):
+    """Idempotency keys are scoped per user: B reusing A's key gets B's own new order, not A's."""
+    headers = {"Idempotency-Key": "checkout-44"}
+    a = handler.lambda_handler(api_event(VALID_BODY, headers=headers), None)
+    b = handler.lambda_handler(api_event(VALID_BODY, headers=headers, claims=jwt_claims(USER_B, EMAIL_B)), None)
+
+    assert a["statusCode"] == b["statusCode"] == 202  # both are NEW orders, no replay across users
+    a_id, b_id = json.loads(a["body"])["orderId"], json.loads(b["body"])["orderId"]
+    assert a_id != b_id
+    assert aws.orders.get_item(Key={"orderId": b_id})["Item"]["userId"] == USER_B
+    stored = {item["idempotencyKey"] for item in aws.idempotency.scan()["Items"]}
+    assert stored == {f"{USER_A}#checkout-44", f"{USER_B}#checkout-44"}
+
+
 def test_lost_race_on_key_replays_the_winner(aws, handler):
     """Two identical requests pass the fast-path check at once; the transaction lets only one win."""
     request = handler.validate_request(VALID_BODY)
     fingerprint = handler.request_fingerprint(request)
-    winner = handler.build_order(request, "race-key")
-    loser = handler.build_order(request, "race-key")
+    caller = handler.caller_from(api_event(VALID_BODY))
+    winner = handler.build_order(request, "race-key", caller)
+    loser = handler.build_order(request, "race-key", caller)
 
     assert handler.save_order_once(winner, "race-key", fingerprint) is True
     assert handler.save_order_once(loser, "race-key", fingerprint) is False

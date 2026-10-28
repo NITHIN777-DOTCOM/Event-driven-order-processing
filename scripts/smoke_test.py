@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from auth_tokens import auth_header, test_user
+from auth_tokens import auth_header
 from tf_outputs import load_outputs
 
 PRODUCT = "WIRELESS-MOUSE"
@@ -52,13 +52,14 @@ def main() -> int:
 
     checks.append((bool(config.get("auth", {}).get("clientId")), "config.json has the Cognito settings (auth.clientId)"))
     auth = auth_header("a")
-    email = test_user("a")["email"]
+    status, _ = http_json("GET", f"{api}/wallet")
+    checks.append((status == 401, f"GET /wallet without a token -> HTTP {status} (expected 401: the JWT authorizer)"))
 
-    http_json("POST", f"{api}/wallet/reset", {"email": email}, auth)
+    http_json("POST", f"{api}/wallet/reset", {}, auth)
     status, body = http_json(
         "POST",
         f"{api}/orders",
-        {"customerName": "CI Smoke Test", "customerEmail": email, "items": [{"productId": PRODUCT, "quantity": 1}], "simulate": "none"},
+        {"customerName": "CI Smoke Test", "items": [{"productId": PRODUCT, "quantity": 1}], "simulate": "none"},
         {"Idempotency-Key": f"ci-smoke-{uuid.uuid4()}", **auth},
     )
     checks.append((status == 202, f"POST /orders -> HTTP {status}"))
@@ -75,7 +76,7 @@ def main() -> int:
     elapsed = time.monotonic() - started
     checks.append((order.get("status") == "COMPLETED", f"order {order_id} is {order.get('status')} after {elapsed:.1f}s (expected COMPLETED within {TIMEOUT_S}s)"))
 
-    txns = http_json("GET", f"{api}/wallet?email={email}", headers=auth)[1].get("transactions", [])
+    txns = http_json("GET", f"{api}/wallet", headers=auth)[1].get("transactions", [])
     debits = sum(1 for t in txns if t.get("orderId") == order_id and t["type"] == "DEBIT")
     checks.append((debits == 1, f"DemoPay ledger: {debits} DEBIT for the order (expected exactly 1)"))
 

@@ -62,9 +62,9 @@ export async function listOrders(limit = 20): Promise<OrderSummary[]> {
   return (await request<{ orders: OrderSummary[] }>(`/orders?limit=${limit}`)).body.orders;
 }
 
+/** No email or user id: the API takes the customer's identity from the ID token only. */
 export interface NewOrder {
   customerName: string;
-  customerEmail: string;
   items: { productId: string; quantity: number }[];
   simulate: Simulate;
 }
@@ -79,16 +79,16 @@ export async function createOrder(order: NewOrder, idempotencyKey: string): Prom
   return body;
 }
 
-/** DemoPay: balance + 20 most recent transactions. The wallet is created with ₹10,00,000 on first use. */
-export async function getWallet(email: string): Promise<Wallet> {
-  return (await request<Wallet>(`/wallet?email=${encodeURIComponent(email)}`)).body;
+/** DemoPay: the signed-in user's balance + 20 most recent transactions (₹10,00,000 on first use). */
+export async function getWallet(): Promise<Wallet> {
+  return (await request<Wallet>("/wallet")).body;
 }
 
-/** Demo helper: set the wallet balance (omit `balance` to reset to ₹10,00,000). */
-export async function setWalletBalance(email: string, balance?: number): Promise<Wallet> {
+/** Demo helper: set the signed-in user's balance (omit `balance` to reset to ₹10,00,000). */
+export async function setWalletBalance(balance?: number): Promise<Wallet> {
   const { body } = await request<Wallet>("/wallet/reset", {
     method: "POST",
-    body: JSON.stringify(balance === undefined ? { email } : { email, balance }),
+    body: JSON.stringify(balance === undefined ? {} : { balance }),
   });
   return body;
 }

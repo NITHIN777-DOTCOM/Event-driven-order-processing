@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from auth_tokens import LABELS, auth_header, test_user
+from auth_tokens import LABELS, auth_header
 from tf_outputs import load_outputs
 
 TERMINAL_STATUSES = {"COMPLETED", "FAILED"}
@@ -76,7 +76,6 @@ def main() -> int:
     key = args.idempotency_key or str(uuid.uuid4())
     payload = {
         "customerName": args.name,
-        "customerEmail": test_user(args.user)["email"],
         "items": [parse_item(spec) for spec in (args.item or DEFAULT_ITEMS)],
         "simulate": args.simulate,
     }

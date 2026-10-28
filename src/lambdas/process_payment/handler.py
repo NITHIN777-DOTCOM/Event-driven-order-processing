@@ -15,6 +15,9 @@ Step Functions retries PaymentTransientError and catches PaymentDeclined; it the
 
 No double charge: an order that already has a paymentId returns that payment, and the order
 condition in the transaction blocks a concurrent second debit.
+
+Whose wallet: the order's walletId, set by create_order from the caller's verified token (the Cognito
+sub). Never the order's email: emails are contact details, not identity.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from common.logger import StructuredLogger, get_logger
 from common.money import format_inr
 from common.orders import PAYMENT_CAPTURED, PAYMENT_DECLINED, PAYMENT_RETRY, cancellation_codes, status_update
 from common.tracing import instrument_aws_sdk
-from common.wallet import DEBIT, balance_update, ensure_wallet, txn_put, wallet_id
+from common.wallet import DEBIT, balance_update, ensure_wallet, txn_put
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
@@ -125,7 +128,10 @@ def debit_wallet(order: dict[str, Any], attempt: int, log: StructuredLogger) -> 
     """Move the order total out of the customer's wallet: atomically, exactly once."""
     order_id = order["orderId"]
     amount = Decimal(order["totalAmount"])
-    wid = wallet_id(order["customerEmail"])
+    wid = order.get("walletId")
+    if not wid:
+        # Only orders created before step 1.2 (email-keyed) lack it; there's no safe wallet to charge.
+        raise PaymentDeclined("Order has no wallet (created before sign-in was required)")
 
     for _ in range(MAX_BALANCE_CONFLICTS):
         before = Decimal(ensure_wallet(wallets_table, wid)["balance"])
@@ -148,7 +154,7 @@ def debit_wallet(order: dict[str, Any], attempt: int, log: StructuredLogger) -> 
                             **status_update(
                                 PAYMENT_CAPTURED,
                                 detail,
-                                {"paymentId": payment_id, "paidAmount": amount, "walletId": wid},
+                                {"paymentId": payment_id, "paidAmount": amount},
                                 condition="attribute_not_exists(paymentId)",
                             ),
                         }

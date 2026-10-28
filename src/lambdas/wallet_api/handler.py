@@ -1,11 +1,11 @@
-"""DemoPay wallet API.
+"""DemoPay wallet API: always the CALLER's own wallet.
 
-  GET  /wallet?email=...                  -> balance + the 20 most recent transactions (newest first)
-  POST /wallet/reset {email, balance?}    -> set the balance (default ₹10,00,000; demo helper)
+  GET  /wallet                    -> balance + the 20 most recent transactions (newest first)
+  POST /wallet/reset {balance?}   -> set the balance (default ₹10,00,000; demo helper)
 
-A wallet is created with ₹10,00,000 the first time it's seen. This is DEMO money with no
-authentication: anyone who knows an email can view or reset that wallet. That's acceptable for a
-course demo and is documented. The API's stage throttling caps abuse.
+The wallet is the signed-in user's (walletId = the JWT "sub", see common/auth.py). There is no email
+or user parameter: an ?email= or a body "email" is ignored, so nobody can view or reset another
+user's wallet. A wallet is created with ₹10,00,000 the first time it's seen.
 """
 
 from __future__ import annotations
@@ -17,19 +17,19 @@ from typing import Any
 import boto3
 from boto3.dynamodb.conditions import Key
 
+from common.auth import Forbidden, Unauthorized, caller_from
 from common.http import BadRequest, parse_json_body, response
 from common.logger import get_logger
 from common.money import format_inr
 from common.tracing import instrument_aws_sdk
 from common.wallet import (
     ADJUST,
-    EMAIL_PATTERN,
     INITIAL_BALANCE,
     MAX_DEMO_BALANCE,
     balance_update,
     ensure_wallet,
     txn_put,
-    wallet_id,
+    wallet_id_for,
 )
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
@@ -49,21 +49,19 @@ MAX_SET_ATTEMPTS = 3
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     route = event.get("routeKey", "")
     try:
+        wid = wallet_id_for(caller_from(event).user_id)
         if route == "GET /wallet":
-            email = (event.get("queryStringParameters") or {}).get("email", "")
-            return response(200, wallet_view(valid_email(email)))
+            return response(200, wallet_view(wid))
         if route == "POST /wallet/reset":
-            body = parse_json_body(event)
-            return response(200, set_balance(valid_email(body.get("email", "")), parse_balance(body.get("balance"))))
+            body = parse_json_body(event) if event.get("body") else {}
+            return response(200, set_balance(wid, parse_balance(body.get("balance"))))
         return response(404, {"error": f"Unknown route {route}"})
+    except Unauthorized as err:
+        return response(401, {"error": str(err)})
+    except Forbidden as err:
+        return response(403, {"error": str(err)})
     except BadRequest as err:
         return response(400, {"error": str(err)})
-
-
-def valid_email(email: Any) -> str:
-    if not isinstance(email, str) or not EMAIL_PATTERN.match(email.strip()):
-        raise BadRequest("A valid email is required")
-    return wallet_id(email)
 
 
 def parse_balance(raw: Any) -> Decimal:

@@ -45,7 +45,11 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   passwords in SSM `/order-saga/test-users/a|b`), `scripts/auth_tokens.py`; every API script sends the ID token;
   deploy.yml ensures the test users before the smoke test; frontend login (oidc-client-ts 3.5.0 + react-oidc-context
   3.3.1). API still has NO authorizer; backend unchanged.
-- Commit B (next): JWT authorizer, identity from claims, user-keyed orders/wallets/GSI, per-user idempotency.
+- Commit A `ceebe0e` green. Fixes: `e48fbf6` spa client `explicit_auth_flows = ["ALLOW_CUSTOM_AUTH"]` (an empty list
+  left SRP password auth open); `bcff9c8` deploy role + `cognito-idp:ListUserPoolClients` (bootstrap, applied after "APPLY").
+- Commit B: JWT authorizer `order-saga-cognito-jwt` (all routes but GET /products), `src/common/auth.py` (identity only
+  from claims), orders carry userId/walletId, gsi1pk = USER#<sub>, gsi1sk = <createdAt>#<orderId>, GET /orders/{id}
+  404 for others' orders, wallets keyed by sub, idempotency keys stored as <sub>#<key>. e2e adds k-n (auth + isolation).
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
