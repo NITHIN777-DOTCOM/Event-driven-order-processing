@@ -401,7 +401,7 @@ died). The fix is to make the database write the only write and derive the messa
 
   | | EventBridge Pipe (chosen) | Lambda on the stream |
   |---|---|---|
-  | Idle polling cost | Pipes' stream reads aren't on AWS's free list. Estimated ≈ $1.57/month (4 polls/s × 30 days ≈ 10.4M reads, minus the 2.5M free tier, at $0.02/100K). Measured: see Numbers | $0: GetRecords made by Lambda triggers aren't charged |
+  | Idle polling cost | Pipes' stream reads aren't on AWS's free list. **Estimated, not measured:** ≈ $1.57/month (4 polls/s × 30 days ≈ 10.4M reads, minus the 2.5M free tier, at $0.02/100K) | $0: GetRecords made by Lambda triggers aren't charged |
   | Per-order cost | $0.40 per million pipe requests, counted after filtering | one Lambda invocation + one SendMessage |
   | Code to own | none: filter + input template are configuration | ~30 lines + tests + its own role, log group and alarms |
   | Retries / DLQ | `MaximumRetryAttempts`, `MaximumRecordAgeInSeconds`, SQS/SNS DLQ on the pipe | the same knobs on the event source mapping, plus `BisectBatchOnFunctionError` and an on-failure destination |
@@ -428,7 +428,16 @@ died). The fix is to make the database write the only write and derive the messa
   1 DEBIT** (`docs/evidence/upgrade-1.1/before.md`).
 - Before (direct send), median of 10: PENDING→PROCESSING **72 ms**, PENDING→COMPLETED **366 ms**, client
   POST→COMPLETED **688 ms** (`before.md`).
-- After (pipe only): see `docs/evidence/upgrade-1.1/after.md` (filled in after commit B deploys).
+- After (pipe only), median of 10: PENDING→PROCESSING **346 ms** (+274), PENDING→COMPLETED **645 ms** (+279),
+  client POST→COMPLETED **1125 ms** (+437); p95 delivery 542 ms (`after.md`). The extra ~0.3 s is stream polling
+  (4/s per shard) plus the pipe hop.
+- Crash simulation: a row written straight into DynamoDB (no API, no SQS send) → COMPLETED, 1 execution, 1 DEBIT,
+  1 stream INSERT (`e2e-failure-tests.md` scenario i, `ORD-20261028-74eb8439`).
+- MODIFY that sets status back to PENDING → 0 new deliveries in 45 s (scenario j). Same Idempotency-Key ×3 → 1 stream INSERT (scenario e).
+- create_order role: every `sqs:*` action → `implicitDeny` (`iam simulate-principal-policy`); the Terraform
+  precondition failed a plan that re-added `sqs:SendMessage` (`docs/evidence/upgrade-1.1-outbox.md`).
+- Idle cost: **not measured**. The ≈ $1.6/month figure is an estimate from AWS's documented polling rate and pricing
+  (`docs/evidence/upgrade-1.1-outbox.md`); `scripts/outbox_check.py cost` can measure it.
 
 ### Likely interview questions
 1. *What if the pipe delivers twice?* start_workflow is idempotent: the PENDING→PROCESSING update is conditional, and
@@ -444,7 +453,12 @@ died). The fix is to make the database write the only write and derive the messa
    database transaction as the state, then relay it.
 4. *Why not send to SQS first, then write the order?* Then a crash leaves a message pointing at an order that doesn't
    exist (start_workflow would dead-letter it), and the client's retry creates the order without a message.
-5. *Why filter on INSERT if new orders are always PENDING anyway?* Because every saga step modifies the row, and a
+5. *What does the outbox DLQ receive?* AWS doesn't document the body for stream sources, and I couldn't trigger a real
+   one without breaking the live pipe. My probe (an orderId SQS should reject) was JSON-escaped and delivered, so it
+   failed later in start_workflow instead. So I designed recovery not to depend on it: the DLQ message gives either the
+   orderId or a shard + sequence range (read it from the stream within the remaining ~23 h); either way, re-send
+   `{orderId}` to the queue, and the order row stays PENDING as the source of truth.
+6. *Why filter on INSERT if new orders are always PENDING anyway?* Because every saga step modifies the row, and a
    status that goes back to PENDING (a bug or a manual edit) must not restart a saga. Insert-only means only a new order
    can trigger a saga.
 

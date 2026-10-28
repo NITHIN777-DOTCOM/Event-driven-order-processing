@@ -26,7 +26,8 @@ the repo root. Then do Phase 0.
 - COST GUARDRAILS: everything stays serverless and pay-per-use. Do NOT use: NAT Gateway, VPC/subnets,
   EC2, RDS, ElastiCache, OpenSearch, customer-managed KMS keys, Secrets Manager, provisioned
   concurrency. Use AWS-managed/default encryption. Warn me and wait before anything that could
-  cost more than $1.
+  cost more than $10 in total (I have $100+ in AWS credits expiring around 2026-11-27; the $5/month
+  budget alert stays as it is).
 - NEVER run `terraform destroy`, or delete data or buckets, unless I reply exactly "DESTROY".
 - .gitignore: .terraform/, *.tfstate, *.tfstate.*, .terraform.lock.hcl is COMMITTED (not ignored),
   *.tfvars (but keep *.tfvars.example), .env, build/, dist/, *.zip, __pycache__/, .venv/, node_modules/

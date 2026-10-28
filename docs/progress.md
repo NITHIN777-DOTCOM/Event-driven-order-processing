@@ -3,8 +3,7 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 1.1 — Transactional outbox: IN PROGRESS (2026-10-28).** Commit A deployed and verified
-(every order delivered twice, 1 execution + 1 DEBIT each); commit B (remove the direct send) pushed.
+**Upgrade step 1.1 — Transactional outbox: DONE (2026-10-28).** Next: **1.2 Cognito + user-keyed wallets/orders.**
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)
@@ -22,6 +21,18 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   dynamodb:* on table/order-saga-*. The plan role's ReadOnlyAccess already covers pipes/cognito-idp/ssm reads.
 - New `docs/interview-prep.md` (one section per feature; update it in the same commit as any feature change).
 - Bootstrap applied locally (1 changed); re-plan: no changes. Local AWS CLI upgraded 2.9.0 -> 2.39.0 (`aws pipes` works).
+
+### Step 1.1 (transactional outbox)
+- Orders table stream (NEW_IMAGE) -> pipe `order-saga-orders-outbox` (INSERT + status=PENDING filter, `{"orderId"}`
+  template, batch 1, TRIM_HORIZON, 5 retries / 1 h max age) -> `order-saga-orders-queue`; DLQ `order-saga-outbox-dlq`.
+  Pipe role: stream read on this stream + SendMessage on the queue/outbox DLQ only.
+- create_order: no SQS code, env var or permission (Terraform precondition enforces it).
+- Alarms `order-saga-outbox-dlq-not-empty`, `order-saga-outbox-pipe-failures` (8 alarms = 10 alarm metrics, the free tier);
+  dashboard row 3 = outbox.
+- Rollout: commit A `4814f7d` (dual delivery, 10/10 orders 1 execution + 1 DEBIT), commit B `a6c2848` (dual write removed).
+  Median delivery 72 ms -> 346 ms. e2e 10/10 (adds crash simulation + MODIFY scenarios). Unit tests 67, 95%.
+- Idle cost: the pipe polls the stream ~4x/s, ESTIMATED ~$1.6/month (not measured; approved). Evidence: docs/evidence/upgrade-1.1-outbox.md.
+- Test row `OUTBOX-DLQ-TEST-68c7af7e<U+0001>` (status PROCESSING) is a labelled DLQ probe; leave it.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
@@ -57,8 +68,8 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - process_payment: simulate modes, paymentAttempts counter, PAYMENT_RETRY entries, no double charge.
 - Unit tests: 37 passed, 96% coverage. Live e2e: `scripts/e2e_test.py` 7/7 passed
   (see `docs/evidence/phase2-failure-tests.md`).
-- The DLQ intentionally holds the poison messages from demo/e2e runs (7 as of the 2026-10-28 audit, incl.
-  ORD-20261022-7b1a4028), so `order-saga-dlq-not-empty` is in ALARM. Do NOT purge or redrive it.
+- The orders DLQ intentionally holds the poison messages from demo/e2e runs (9 after step 1.1, incl.
+  ORD-20261022-7b1a4028 and the outbox DLQ probe), so `order-saga-dlq-not-empty` is in ALARM. Do NOT purge or redrive it.
 
 ### Phase 3
 - `infra/main/monitoring.tf`: dashboard `order-saga-dashboard` (7 rows); 6 alarms (8 alarm metrics, free tier)
@@ -103,14 +114,14 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   Evidence: docs/evidence/phase5-cicd.md.
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
-## Next (upgrade step 1.1)
-- Transactional outbox: enable a stream on order-saga-orders, EventBridge Pipe (filter INSERT, emit {orderId})
-  -> order-saga-orders-queue, remove the direct SendMessage from create_order.
+## Next (upgrade step 1.2)
+- Cognito user pool + managed login (code + PKCE, self sign-up with email verification); JWT authorizer on checkout,
+  orders and wallet routes (GET /products stays public); wallets/orders keyed by the token `sub`; scripts get a test user.
 
 ## Known limitations / ideas (good viva points)
 - DemoPay has no authentication: wallets are keyed by email, so anyone who knows an email can view or reset it (demo only).
-- If create_order crashes after the DynamoDB transaction but before SQS SendMessage, the order stays PENDING,
-  and a client retry only replays it. Fix: a transactional outbox (DynamoDB Streams -> Pipes -> SQS).
+- (Fixed in 1.1) The create_order dual write is gone: transactional outbox via DynamoDB Streams -> Pipes -> SQS.
+- No sweeper for orders stuck in PENDING if delivery fails beyond the stream's 24 h retention.
 - HTTP APIs (API Gateway v2) don't support X-Ray tracing; only REST APIs do.
 
 ## Blockers / notes

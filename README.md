@@ -20,10 +20,11 @@
 - **Idempotent at three layers.** An `Idempotency-Key` on `POST /orders` stops duplicate orders. The execution name equals the `orderId`, so a duplicate SQS delivery can't start a second saga. Payment and refund are conditional on `paymentId` / `refunded`, so a customer is **never charged or refunded twice**.
 - **Atomic money movement.** A payment is one DynamoDB `TransactWriteItems` across three tables (wallet balance, ledger entry, order), conditional on enough balance and no prior payment. A low balance is a **real** decline, not a simulated one.
 - **Retries where they help, not where they hurt.** Transient payment errors are retried with exponential backoff (2 s → 4 s → 8 s). A permanent decline goes straight to compensation.
+- **Transactional outbox, no dual write.** `create_order` makes exactly one write: the DynamoDB transaction. The new order row *is* the outbox record. A **DynamoDB stream → EventBridge Pipe** (INSERT-only filter) delivers it to SQS, so a crash right after the write can't lose the order.
 - **Poison messages are isolated.** After 3 failed receives, SQS moves the message to a dead-letter queue, and a CloudWatch alarm emails the operator.
 - **100% infrastructure as code.** 94 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
 - **CI/CD with no stored keys.** GitHub Actions assumes AWS roles through **OIDC**, scoped to this repo's `main` branch (deploy) or its pull requests (read-only plan). Every merge is applied, published and smoke-tested.
-- **About $0 when idle.** Everything is pay-per-use: Lambda, Step Functions, on-demand DynamoDB, SQS, SNS, CloudFront and S3. There's no VPC, NAT gateway or server. A $5/month budget alert is the backstop.
+- **Close to $0 when idle.** Everything is pay-per-use: Lambda, Step Functions, on-demand DynamoDB, SQS, SNS, CloudFront and S3. There's no VPC, NAT gateway or server. The one fixed cost is the outbox pipe polling the stream, estimated at about $1.6/month (an estimate from AWS's documented polling rate, not measured; see [the evidence](docs/evidence/upgrade-1.1-outbox.md)). A $5/month budget alert is the backstop.
 
 ---
 
@@ -37,7 +38,9 @@ flowchart LR
   api --> reads["get_order · list_orders<br/>list_products · wallet_api"]
   co -->|"order + idempotency key<br/>in one transaction"| ddb[("DynamoDB<br/>orders · inventory · idempotency<br/>wallets · wallet-txns")]
   reads --> ddb
-  co -->|"orderId"| q["SQS<br/>orders-queue"]
+  ddb -->|"stream: new order rows"| pipe["EventBridge Pipe<br/>orders-outbox<br/>INSERT only"]
+  pipe -->|"{orderId}"| q["SQS<br/>orders-queue"]
+  pipe -.->|"undeliverable"| odlq["SQS outbox DLQ"]
   q -->|"batches of 10"| sw["start_workflow"]
   q -.->|"after 3 failed receives"| dlq["SQS DLQ"]
   sw -->|"StartExecution<br/>name = orderId"| sfn["Step Functions<br/>order-saga-workflow"]
@@ -46,12 +49,13 @@ flowchart LR
   sfn -->|"direct UpdateItem"| ddb
   sfn -->|"direct Publish"| sns["SNS<br/>notifications"] --> mail["Customer email"]
   dlq -.-> cw["CloudWatch alarms"] -.-> ops["SNS ops-alerts"]
+  odlq -.-> cw
 ```
 
 **Life of an order**
 
-1. The storefront calls `POST /orders` with an `Idempotency-Key`. `create_order` validates the order, prices it from inventory on the server, and writes the order plus the idempotency record in **one transaction**. It replies `202 Accepted` right away, without waiting for the saga.
-2. The `orderId` goes onto **SQS**, which absorbs spikes and decouples the API from the workflow.
+1. The storefront calls `POST /orders` with an `Idempotency-Key`. `create_order` validates the order, prices it from inventory on the server, and writes the order plus the idempotency record in **one transaction**. That's its only write. It replies `202 Accepted` right away, without waiting for the saga.
+2. **Transactional outbox:** the new order row appears on the table's **DynamoDB stream**. The **EventBridge Pipe** `order-saga-orders-outbox` forwards only INSERTs with status PENDING, as `{"orderId": ...}`, onto **SQS**, which absorbs spikes and decouples the API from the workflow. Delivery is at least once; duplicates are harmless (next step).
 3. `start_workflow` consumes batches of 10 messages. It marks the order PROCESSING and starts a **Step Functions** execution named after the order (`ReportBatchItemFailures`: only failed messages are retried).
 4. **ReserveInventory** decrements stock for every item in one DynamoDB transaction, so stock is never partly reserved.
 5. **ProcessPayment** debits the DemoPay wallet: balance, ledger entry and order are updated atomically, exactly once.
@@ -96,6 +100,8 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | Out of stock | Order FAILED; no compensation needed | Reservation is one all-or-nothing transaction; `Catch OutOfStock` skips release |
 | Duplicate click or retry | Same order returned (`200`, `duplicate: true`); no second order | `Idempotency-Key` record written in the same transaction as the order (24 h TTL) |
 | Duplicate SQS delivery | Ignored; exactly one execution | Conditional PENDING → PROCESSING update; execution name = `orderId` |
+| `create_order` crashes right after its write | The order is still delivered and processed | Transactional outbox: the stream INSERT is delivered by the pipe; there's no second write to lose |
+| Outbox pipe can't deliver | Retried 5×, then the record's details go to `order-saga-outbox-dlq`; ops alarm emails | Pipe retry policy (5 attempts / 1 h max age); alarms `order-saga-outbox-pipe-failures`, `order-saga-outbox-dlq-not-empty` |
 | Poison message | Retried 3× (60 s apart), then dead-lettered; ops alarm emails | SQS redrive `maxReceiveCount 3` → DLQ; CloudWatch alarm `order-saga-dlq-not-empty` |
 
 ---
@@ -105,6 +111,7 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | Decision | Why | Trade-off |
 |---|---|---|
 | **SQS in front of the workflow** | The API answers without waiting for the saga; spikes queue up instead of failing; poison messages are isolated in a DLQ | Status is eventually consistent, so clients must poll, and there's a short delay before the saga starts |
+| **Transactional outbox via Streams + Pipes** | No dual write: the order and its "message" are the same DynamoDB write; no relay code to own | An estimated ~$1.6/month of idle stream polling (a Lambda relay on the stream would be free at idle but is code to own) |
 | **Step Functions instead of Lambdas calling Lambdas** | Retries, catches and compensation are declared in one place and visible as a graph; full execution history | ASL is verbose; there's a per-transition cost |
 | **Standard workflow, not Express** | Exactly-once step execution and a 90-day execution history in the console, which matter for payments | Costs more per transition than Express at high volume |
 | **Reserve stock before charging** | Never take money for something that can't ship; out-of-stock needs no refund | Stock is held briefly for orders whose payment then fails (released by compensation) |
@@ -118,7 +125,7 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 
 | Layer | Technology |
 |---|---|
-| AWS | API Gateway (HTTP API), Lambda (Python 3.12, arm64), SQS + DLQ, Step Functions (Standard), DynamoDB, SNS, S3, CloudFront (OAC), CloudWatch, X-Ray, IAM, Budgets |
+| AWS | API Gateway (HTTP API), Lambda (Python 3.12, arm64), DynamoDB Streams, EventBridge Pipes, SQS + DLQ, Step Functions (Standard), DynamoDB, SNS, S3, CloudFront (OAC), CloudWatch, X-Ray, IAM, Budgets |
 | Infrastructure as code | Terraform ≥ 1.10, S3 remote state with native locking; separate bootstrap stack |
 | Backend | Python, boto3, structured JSON logging, aws-xray-sdk (via the AWS Powertools layer) |
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, React Router |
@@ -129,8 +136,8 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 
 ## Testing & evidence
 
-- **65 unit tests, 95% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
-- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **8/8 scenarios passed** against the deployed system, including DemoPay ledger checks.
+- **67 unit tests, 95% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
+- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **10/10 scenarios passed** against the deployed system, including DemoPay ledger checks and the transactional outbox.
 
 | # | Scenario | Result |
 |---|---|---|
@@ -138,10 +145,12 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | b | Payment declined → FAILED, stock restored, RefundPayment no-op | PASS |
 | c | Payment glitch → 2 retries → COMPLETED, exactly 1 debit | PASS |
 | d | Out of stock → FAILED, nothing reserved, no release step | PASS |
-| e | Same Idempotency-Key ×3 → 1 order, 1 execution, 1 debit | PASS |
+| e | Same Idempotency-Key ×3 → 1 order, 1 stream INSERT, 1 execution, 1 debit | PASS |
 | f | Same SQS message delivered 3× → 1 execution | PASS |
-| g | Poison message → in the DLQ within ~3 min, order stays PENDING | PASS |
+| g | Poison message → in the orders DLQ within ~3 min (not the outbox DLQ), order stays PENDING | PASS |
 | h | Wallet balance too low → real decline, nothing debited, stock released | PASS |
+| i | Crash simulation: order row written straight into DynamoDB, no SQS send → COMPLETED via the outbox | PASS |
+| j | MODIFY on an existing order (status back to PENDING) → not re-delivered | PASS |
 
 - **UI suite** ([`scripts/capture_ui.py`](scripts/capture_ui.py)): every scenario driven through the deployed storefront in Chromium. **6/6**, with ledger checks.
 - **Every deploy** runs a smoke test: one real order must reach COMPLETED within 60 s with exactly one wallet debit.
@@ -236,7 +245,7 @@ docs/              progress log, evidence, images, resume bullets
 
 - **No end-user authentication yet.** Orders are looked up by ID, and DemoPay wallets are keyed by email, so anyone who knows an email can view or reset that demo wallet. Cognito is on the roadmap.
 - **Notification emails go to the SNS topic's subscriber** (the operator's inbox), not to the address typed at checkout. A production system would use SES or per-customer SNS endpoints.
-- **Order creation isn't a full outbox.** If `create_order` crashed between the DynamoDB write and SQS `SendMessage`, the order would stay PENDING. The fix is DynamoDB Streams → EventBridge Pipes → SQS.
+- **No sweeper for stuck PENDING orders.** The outbox fixed the dual write. But if delivery failed for longer than the stream's 24 h retention, nothing would re-send the order. The fix is a scheduled sweeper that re-sends `{orderId}` for old PENDING orders (safe, because `start_workflow` is idempotent).
 - **Tracing gap:** HTTP APIs don't support X-Ray, and the state machine's own segment doesn't appear in the service map (trace propagation to its Lambdas works).
 - **Least privilege:** each Lambda has its own IAM role scoped to the exact tables and queues it uses. The CI deploy role is limited to `order-saga-*` resources and can't modify itself.
 - **Edge security:** the API uses stage-level throttling, CORS is restricted to the storefront and localhost, the S3 bucket is private behind OAC, and the bucket policy is TLS-only.
@@ -250,7 +259,7 @@ docs/              progress log, evidence, images, resume bullets
 - [ ] Publish order events to EventBridge (analytics, a shipping service)
 - [ ] Shipping step in the saga, with a cancellation window
 - [ ] Per-customer emails with Amazon SES (SNS topic currently notifies a single subscribed inbox)
-- [ ] Transactional outbox (DynamoDB Streams → Pipes) for create_order
+- [x] Transactional outbox (DynamoDB Streams → Pipes) for create_order
 - [ ] AWS WAF on CloudFront, and a custom domain with ACM
 
 ---
