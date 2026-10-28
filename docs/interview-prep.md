@@ -485,7 +485,8 @@ commit B (JWT authorizer, identity from token claims, user-keyed orders and wall
   `order-saga-<account id>.auth.ap-south-1.amazoncognito.com`.
 - App client **`spa`** (the storefront): public, no secret, **authorization code + PKCE only**, scopes
   openid/email/profile, callback `<origin>/auth/callback` for the CloudFront URL and `http://localhost:5173`,
-  60-minute ID/access tokens, 7-day refresh token with **rotation**, and no password API flows at all.
+  60-minute ID/access tokens, 7-day refresh token with **rotation**, and no usable password API flow
+  (`explicit_auth_flows = ["ALLOW_CUSTOM_AUTH"]`, with no custom-auth triggers; see the debugging story).
 - App client **`automation`** (scripts and CI only): `ADMIN_USER_PASSWORD_AUTH`, which is an IAM-signed admin call.
 - Two test users (A and B) created by `scripts/create_test_users.py`; their passwords are random and live only in
   SSM SecureStrings (`/order-saga/test-users/a|b`). `scripts/auth_tokens.py` signs in and caches the tokens; every
@@ -555,7 +556,15 @@ behind Cognito), carried as a signed token the API can verify without calling ba
    call is IAM-signed, so the password flow isn't exposed publicly, and the password comes from an SSM SecureString.
 
 ### Debugging story
-None recorded yet.
+**"No auth flows" turned out to mean "the default auth flows".** The `spa` client was first deployed with
+`explicit_auth_flows = []`, meant as "browser sign-in only". The live checks after commit A (`ceebe0e`) showed
+`InitiateAuth USER_PASSWORD_AUTH` correctly refused ("USER_PASSWORD_AUTH flow not enabled for this client"), but
+`InitiateAuth USER_SRP_AUTH` with the test user's email answered with a `PASSWORD_VERIFIER` challenge. So the SRP
+password flow was open on the public client: `describe-user-pool-client` showed `ExplicitAuthFlows: null`, and Cognito
+treats "not set" as its defaults (SRP + custom + refresh). Listing `ALLOW_REFRESH_TOKEN_AUTH` wasn't an option: Cognito
+rejects it when refresh-token rotation is on. The fix was to list only `ALLOW_CUSTOM_AUTH`, which replaces the
+defaults and can't complete because the pool has no custom-auth Lambda triggers. The re-test is in
+`docs/evidence/upgrade-1.2-auth.md`. Lesson: verify a deny with a real call; an empty list in IaC isn't proof.
 
 ---
 

@@ -87,9 +87,13 @@ resource "aws_cognito_user_pool_client" "spa" {
   callback_urls                        = [for o in local.auth_origins : "${o}/auth/callback"]
   logout_urls                          = [for o in local.auth_origins : "${o}/"]
 
-  # No InitiateAuth flows at all (no USER_PASSWORD_AUTH, no SRP). Token refresh goes through the OAuth
-  # token endpoint, which works with refresh-token rotation (REFRESH_TOKEN_AUTH doesn't, so it's left out).
-  explicit_auth_flows = []
+  # No usable password API flow: users can only sign in through the managed login page.
+  # An EMPTY list doesn't work: Cognito then applies its defaults, and USER_SRP_AUTH (password) answered with a
+  # PASSWORD_VERIFIER challenge on this client (found in the step 1.2 checks). Listing only ALLOW_CUSTOM_AUTH
+  # replaces the defaults, and custom auth can't complete because the pool has no custom-auth Lambda triggers.
+  # REFRESH_TOKEN_AUTH is left out because refresh-token rotation forbids it; the browser refreshes through
+  # the OAuth token endpoint instead, which supports rotation.
+  explicit_auth_flows = ["ALLOW_CUSTOM_AUTH"]
 
   access_token_validity  = 60
   id_token_validity      = 60
