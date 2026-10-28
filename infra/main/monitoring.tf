@@ -5,7 +5,7 @@
 # and process_payment raises on declines. So "ExecutionsFailed > 0" and "process_payment Errors > 0"
 # are normal BUSINESS outcomes, not system faults. We alarm on:
 #   - system faults:   DLQ not empty, start_workflow crashes, API 5xx, executions timed out/aborted,
-#                      queue backlog
+#                      queue backlog, outbox pipe failures / outbox DLQ not empty
 #   - business health: the failure RATE (only with enough traffic to be meaningful)
 # =============================================================================
 
@@ -14,6 +14,8 @@ locals {
   api_id        = aws_apigatewayv2_api.orders.id
   orders_queue  = aws_sqs_queue.orders.name
   dlq           = aws_sqs_queue.orders_dlq.name
+  outbox_dlq    = aws_sqs_queue.outbox_dlq.name
+  outbox_pipe   = aws_pipes_pipe.outbox.name
   dynamo_tables = [aws_dynamodb_table.orders.name, aws_dynamodb_table.inventory.name]
 
   # Log groups the saved queries search across.
@@ -24,8 +26,44 @@ locals {
 }
 
 # -----------------------------------------------------------------------------
-# Alarms (6 alarms = 8 alarm metrics, inside the 10-metric free tier)
+# Alarms (8 alarms = 10 alarm metrics, exactly the 10-metric free tier)
 # -----------------------------------------------------------------------------
+resource "aws_cloudwatch_metric_alarm" "outbox_dlq_not_empty" {
+  alarm_name        = "${var.project_prefix}-outbox-dlq-not-empty"
+  alarm_description = "CRITICAL: the outbox pipe gave up on a new-order stream record (5 retries or 1 h old) and put its details in ${local.outbox_dlq}. That order is stuck in PENDING. Read the DLQ message, find the order(s), fix the cause, then send {\"orderId\": ...} to ${local.orders_queue} (start_workflow is idempotent)."
+
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  dimensions          = { QueueName = local.outbox_dlq }
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "outbox_pipe_failures" {
+  alarm_name        = "${var.project_prefix}-outbox-pipe-failures"
+  alarm_description = "The outbox pipe ${local.outbox_pipe} failed to deliver new orders to ${local.orders_queue} (a permission, throttling or target error). It retries; persistent failures end in ${local.outbox_dlq}. Check the pipe's state and StateReason in the EventBridge Pipes console."
+
+  namespace           = "AWS/EventBridge/Pipes"
+  metric_name         = "ExecutionFailed"
+  dimensions          = { PipeName = local.outbox_pipe }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}
+
 resource "aws_cloudwatch_metric_alarm" "dlq_not_empty" {
   alarm_name        = "${var.project_prefix}-dlq-not-empty"
   alarm_description = "CRITICAL: an order message is in ${local.dlq}. It failed 3 times and its order is stuck in PENDING. Inspect the message in the SQS console, fix the cause, then redrive it to ${local.orders_queue}."
@@ -193,11 +231,13 @@ locals {
     aws_cloudwatch_metric_alarm.high_order_failure_rate.arn,
     aws_cloudwatch_metric_alarm.sfn_timeouts_aborts.arn,
     aws_cloudwatch_metric_alarm.queue_backlog.arn,
+    aws_cloudwatch_metric_alarm.outbox_pipe_failures.arn,
+    aws_cloudwatch_metric_alarm.outbox_dlq_not_empty.arn,
   ]
 }
 
 # -----------------------------------------------------------------------------
-# Dashboard: 7 rows on a 24-column grid, top to bottom following the order's path
+# Dashboard: 8 rows on a 24-column grid, top to bottom following the order's path
 # -----------------------------------------------------------------------------
 locals {
   # One Lambda graph per metric, with every function on it.
@@ -210,7 +250,7 @@ locals {
       ] : {
       type   = "metric"
       x      = index * 6
-      y      = 23
+      y      = 29
       width  = 6
       height = 6
       properties = {
@@ -231,7 +271,7 @@ locals {
       ] : {
       type   = "metric"
       x      = index * 8
-      y      = 29
+      y      = 35
       width  = 8
       height = 6
       properties = {
@@ -257,9 +297,9 @@ locals {
         properties = {
           markdown = join("\n", [
             "# Event-Driven Order Processing — Live Dashboard",
-            "**API Gateway -> Lambda -> SQS (+DLQ) -> Step Functions saga** (reserve inventory -> payment with retries -> complete, or compensate) **-> SNS email**. Region `${var.region}`.",
+            "**API Gateway -> Lambda -> DynamoDB (outbox) -> Stream -> EventBridge Pipe -> SQS (+DLQ) -> Step Functions saga** (reserve inventory -> payment with retries -> complete, or compensate) **-> SNS email**. Region `${var.region}`.",
             "",
-            "[State machine](${local.console}/states/home?region=${var.region}#/statemachines/view/${local.sfn_arn}) · [Orders queue](${local.console}/sqs/v3/home?region=${var.region}#/queues/${urlencode(aws_sqs_queue.orders.url)}) · [DLQ](${local.console}/sqs/v3/home?region=${var.region}#/queues/${urlencode(aws_sqs_queue.orders_dlq.url)}) · [Orders table](${local.console}/dynamodbv2/home?region=${var.region}#table?name=${aws_dynamodb_table.orders.name}) · [X-Ray service map](${local.console}/cloudwatch/home?region=${var.region}#xray:service-map/map)",
+            "[State machine](${local.console}/states/home?region=${var.region}#/statemachines/view/${local.sfn_arn}) · [Outbox pipe](${local.console}/events/home?region=${var.region}#/pipes/${local.outbox_pipe}) · [Orders queue](${local.console}/sqs/v3/home?region=${var.region}#/queues/${urlencode(aws_sqs_queue.orders.url)}) · [DLQ](${local.console}/sqs/v3/home?region=${var.region}#/queues/${urlencode(aws_sqs_queue.orders_dlq.url)}) · [Orders table](${local.console}/dynamodbv2/home?region=${var.region}#table?name=${aws_dynamodb_table.orders.name}) · [X-Ray service map](${local.console}/cloudwatch/home?region=${var.region}#xray:service-map/map)",
           ])
         }
       },
@@ -385,11 +425,89 @@ locals {
         }
       },
 
-      # ---- Row 3: queue ----
+      # ---- Row 3: transactional outbox (orders stream -> pipe -> queue) ----
       {
         type   = "metric"
         x      = 0
         y      = 17
+        width  = 6
+        height = 6
+        properties = {
+          title  = "Outbox pipe: new orders delivered / failed"
+          region = var.region
+          view   = "timeSeries"
+          stat   = "Sum"
+          period = 60
+          metrics = [
+            ["AWS/EventBridge/Pipes", "Invocations", "PipeName", local.outbox_pipe, { label = "Invocations (1 per new order)", color = "#2ca02c" }],
+            ["AWS/EventBridge/Pipes", "ExecutionFailed", "PipeName", local.outbox_pipe, { label = "Failed (retried)", color = "#d62728" }],
+            ["AWS/EventBridge/Pipes", "TargetStageFailed", "PipeName", local.outbox_pipe, { label = "SQS send failed", color = "#ff7f0e" }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 6
+        y      = 17
+        width  = 6
+        height = 6
+        properties = {
+          title  = "Outbox pipe: execution duration p50 / p95 (ms)"
+          region = var.region
+          view   = "timeSeries"
+          period = 60
+          metrics = [
+            ["AWS/EventBridge/Pipes", "Duration", "PipeName", local.outbox_pipe, { stat = "p50", label = "p50" }],
+            ["AWS/EventBridge/Pipes", "Duration", "PipeName", local.outbox_pipe, { stat = "p95", label = "p95" }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 17
+        width  = 6
+        height = 6
+        properties = {
+          title  = "Orders stream: GetRecords calls by the pipe (billed stream reads)"
+          region = var.region
+          view   = "timeSeries"
+          period = 300
+          # Stream metrics are published per (Operation, StreamLabel, TableName); SampleCount = number of calls.
+          metrics = [[{
+            expression = "SEARCH('{AWS/DynamoDB,Operation,StreamLabel,TableName} MetricName=\"SuccessfulRequestLatency\" Operation=\"GetRecords\" TableName=\"${aws_dynamodb_table.orders.name}\"', 'SampleCount', 300)"
+            id         = "getrecords"
+            label      = "GetRecords calls / 5 min"
+          }]]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 18
+        y      = 17
+        width  = 6
+        height = 6
+        properties = {
+          title  = "OUTBOX DLQ: undeliverable new orders (should be 0)"
+          region = var.region
+          view   = "timeSeries"
+          stat   = "Maximum"
+          period = 60
+          metrics = [
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", local.outbox_dlq, { label = "Messages in outbox DLQ", color = "#d62728" }],
+          ]
+          annotations = {
+            horizontal = [{ value = 0, label = "Healthy = 0", color = "#d62728" }]
+          }
+          yAxis = { left = { min = 0 } }
+        }
+      },
+
+      # ---- Row 4: queue ----
+      {
+        type   = "metric"
+        x      = 0
+        y      = 23
         width  = 8
         height = 6
         properties = {
@@ -406,7 +524,7 @@ locals {
       {
         type   = "metric"
         x      = 8
-        y      = 17
+        y      = 23
         width  = 8
         height = 6
         properties = {
@@ -416,7 +534,7 @@ locals {
           stat   = "Sum"
           period = 60
           metrics = [
-            ["AWS/SQS", "NumberOfMessagesSent", "QueueName", local.orders_queue, { label = "Sent (by create_order)" }],
+            ["AWS/SQS", "NumberOfMessagesSent", "QueueName", local.orders_queue, { label = "Sent (create_order + outbox pipe)" }],
             ["AWS/SQS", "NumberOfMessagesDeleted", "QueueName", local.orders_queue, { label = "Deleted (by start_workflow)" }],
           ]
         }
@@ -424,7 +542,7 @@ locals {
       {
         type   = "metric"
         x      = 16
-        y      = 17
+        y      = 23
         width  = 8
         height = 6
         properties = {
@@ -444,16 +562,16 @@ locals {
       },
     ],
 
-    # ---- Row 4: Lambdas ----
+    # ---- Row 5: Lambdas ----
     local.lambda_widgets,
 
-    # ---- Row 5: DynamoDB ----
+    # ---- Row 6: DynamoDB ----
     local.dynamodb_widgets,
     [
       {
         type   = "metric"
         x      = 16
-        y      = 29
+        y      = 35
         width  = 8
         height = 6
         properties = {
@@ -471,11 +589,11 @@ locals {
         }
       },
 
-      # ---- Row 6: latest failed orders (Logs Insights) ----
+      # ---- Row 7: latest failed orders (Logs Insights) ----
       {
         type   = "log"
         x      = 0
-        y      = 35
+        y      = 41
         width  = 24
         height = 6
         properties = {

@@ -79,3 +79,16 @@ output "console_links" {
     saved_queries   = "${local.console}/cloudwatch/home?region=${var.region}#logsV2:logs-insights"
   }
 }
+
+output "orders_stream_arn" {
+  description = "DynamoDB stream of the orders table (source of the outbox pipe)."
+  value       = aws_dynamodb_table.orders.stream_arn
+}
+
+output "outbox_pipe_name" {
+  value = aws_pipes_pipe.outbox.name
+}
+
+output "outbox_dlq_url" {
+  value = aws_sqs_queue.outbox_dlq.url
+}

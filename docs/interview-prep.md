@@ -371,7 +371,8 @@ Being able to say what's wrong with your own design, and how you'd fix it, is a 
 claiming there are no gaps.
 
 ### How
-- **Outbox gap** (fixed in step 1.1): `create_order` commits the DynamoDB transaction, *then* calls
+- **Outbox gap** (being fixed in step 1.1; commit A adds the stream + pipe NEXT TO the direct send,
+  commit B removes the direct send): `create_order` commits the DynamoDB transaction, *then* calls
   `sqs.send_message` (`enqueue_order`). A crash in between leaves the order PENDING forever, and a client retry
   only replays it. Fix: DynamoDB Streams on `order-saga-orders` → EventBridge Pipe (filter `INSERT`) → SQS,
   so the write to the table *is* the publish.

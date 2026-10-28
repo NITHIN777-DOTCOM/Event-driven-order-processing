@@ -9,6 +9,12 @@ resource "aws_dynamodb_table" "orders" {
 
   deletion_protection_enabled = false
 
+  # Transactional outbox source (see outbox.tf): every new order row reaches the queue via this stream.
+  # NEW_IMAGE is enough: the pipe only needs the new row. Never disable it: a re-enabled stream gets a
+  # new ARN, and the pipe would have to be re-created.
+  stream_enabled   = true
+  stream_view_type = "NEW_IMAGE"
+
   attribute {
     name = "orderId"
     type = "S"

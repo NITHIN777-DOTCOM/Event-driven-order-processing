@@ -3,7 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 1.0 — Prep: DONE (2026-10-28).** Next: **1.1 transactional outbox.**
+**Upgrade step 1.1 — Transactional outbox: IN PROGRESS (2026-10-28).** Commit A (stream + pipe added,
+direct SQS send kept) pushed; commit B (remove the direct send) next.
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)
