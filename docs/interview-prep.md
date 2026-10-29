@@ -854,6 +854,46 @@ error was caught by `States.ALL`, compensation ran, nothing was charged. The fix
 a "remove the old thing" change is safest when the removal can only happen after the switch, so the next removal
 of this kind goes in a separate commit after the switch is live.
 
+#### Postmortem: payment step pointed at a deleted function (2026-10-29, ~3.5 min, blameless)
+**Summary.** Commit B of step 2.1 (`47fac57`) replaced `process_payment` with `request_payment` and deleted the old
+function in the same apply. The apply failed half-way, leaving the live state machine on the old definition with
+its payment function already gone.
+
+**Timeline (UTC).**
+| Time | Event |
+|---|---|
+| 10:20:03 | Deploy `40856722473` starts `terraform apply` for commit B (4 add, 29 change, 3 destroy). |
+| ~10:22:30 | `order-saga-process-payment` is destroyed (it had no dependents left in the new configuration, so Terraform was free to delete it early). |
+| 10:22:31 | First affected order: ProcessPayment fails with `Lambda.ResourceNotFoundException`. |
+| 10:22:45 | The state machine update fails: `TagResource ... InvalidParameterValueException` (a `(` in the Description tag). The apply stops; the definition is still the old one. |
+| ~10:23 | Detected by the rollout probe and the Deploy watcher; the live definition and the missing function confirmed with the CLI. |
+| ~10:24 | Fix `108e8a9` (tag without parentheses) pushed, CI green. |
+| ~10:26 | Deploy `40857370694` switches the definition; the next orders complete on RequestPayment. |
+
+**Impact.** 32 orders were created in the window, all by the rollout probe (no customer orders). Every one failed
+**safely**: the Lambda error was caught by `States.ALL`, compensation ran (refund no-op, stock released), and each
+ended FAILED with **0 ledger entries, net ₹0**. No money moved and no stock leaked; the invariants I1–I4 held.
+
+**Root cause.** `terraform apply` is not atomic. It applies independent changes in dependency order and stops at
+the first error without rolling back what already happened. The destroy of the old function did not depend on the
+state machine update, so it ran first; the update then failed on a tag value that only the AWS API (not `plan`)
+checked, and each AWS service has its own tag character set. Two things combined: a removal in the same apply as
+the switch, and a validation that only existed at apply time.
+
+**What went well.** The saga's own failure handling contained the damage (compensation on every error); the probe
+and the money-invariant checks made the impact measurable in minutes.
+
+**Fix.** Remove the parentheses (`108e8a9`), redeploy.
+
+**Prevention.**
+1. **Expand → migrate → contract (parallel change).** Add the new thing next to the old (expand), switch traffic
+   to it and verify live (migrate), and remove the old thing only in a later commit (contract). A failed migrate
+   then leaves the old path fully working. Now a CLAUDE.md rule: no removal in the same apply as its switch.
+2. **Validate at plan time.** Every Description tag now comes from `module.tags` (`infra/modules/tag_values`),
+   whose input validation enforces the strictest set across our services (letters, digits, spaces,
+   `_ . : = + - @`, ≤ 256). A bad value fails `terraform plan` before any resource changes. Proven by `terraform
+   test` in CI (including this exact value) and by a unit test that fails if a tag is written inline.
+
 ## 11. Known gaps (and where they get fixed)
 
 ### What

@@ -23,7 +23,7 @@ resource "aws_sqs_queue" "outbox_dlq" {
 
   tags = {
     Name        = "${var.project_prefix}-outbox-dlq"
-    Description = "Stream records the outbox pipe could not deliver to the orders queue - their orders are stuck in PENDING"
+    Description = module.tags.description["outbox_dlq"]
   }
 }
 
@@ -129,7 +129,7 @@ resource "aws_pipes_pipe" "outbox" {
 
   tags = {
     Name        = local.outbox_pipe_name
-    Description = "Transactional outbox - orders table stream to orders queue"
+    Description = module.tags.description["outbox_pipe"]
   }
 
   depends_on = [aws_iam_role_policy.outbox_pipe]

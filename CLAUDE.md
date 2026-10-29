@@ -32,6 +32,11 @@ the repo root. Then do Phase 0.
 - .gitignore: .terraform/, *.tfstate, *.tfstate.*, .terraform.lock.hcl is COMMITTED (not ignored),
   *.tfvars (but keep *.tfvars.example), .env, build/, dist/, *.zip, __pycache__/, .venv/, node_modules/
 - Least-privilege IAM: each Lambda gets its own role scoped to exactly the resources it uses.
+- Removals follow expand -> migrate -> contract (parallel change): any step that removes a resource (function,
+  table, queue, route, permission) does it in a LATER commit than the switch to its replacement, and only after the
+  switch is deployed and verified live. Never switch and remove in the same apply.
+- Description tag values come from module.tags (infra/main/tags.tf), which validates them at plan time (letters,
+  digits, spaces and _ . : = + - @ only); never write a Description tag inline.
 - Code must be clean and commented. Interviewers will read it.
 - If something fails, debug it yourself (terraform errors, CloudWatch logs) before asking me.
 - Commit with clear messages at the end of each phase and push to origin main.

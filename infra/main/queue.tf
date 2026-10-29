@@ -6,7 +6,7 @@ resource "aws_sqs_queue" "orders_dlq" {
 
   tags = {
     Name        = "${var.project_prefix}-orders-dlq"
-    Description = "Dead-letter queue for orders that failed to start the workflow 3 times"
+    Description = module.tags.description["orders_dlq"]
   }
 }
 
@@ -27,7 +27,7 @@ resource "aws_sqs_queue" "orders" {
 
   tags = {
     Name        = "${var.project_prefix}-orders-queue"
-    Description = "New orders waiting for the saga workflow to start - DLQ after 3 receives"
+    Description = module.tags.description["orders_queue"]
   }
 }
 

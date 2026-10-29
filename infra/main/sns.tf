@@ -5,7 +5,7 @@ resource "aws_sns_topic" "notifications" {
 
   tags = {
     Name        = "${var.project_prefix}-notifications"
-    Description = "Customer order status emails published by the saga workflow"
+    Description = module.tags.description["notifications_topic"]
   }
 }
 
@@ -16,7 +16,7 @@ resource "aws_sns_topic" "ops_alerts" {
 
   tags = {
     Name        = "${var.project_prefix}-ops-alerts"
-    Description = "Operational alarms for the order saga - DLQ depth - errors - failed executions"
+    Description = module.tags.description["ops_alerts_topic"]
   }
 }
 

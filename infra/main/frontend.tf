@@ -9,7 +9,7 @@ resource "aws_s3_bucket" "frontend" {
 
   tags = {
     Name        = "${var.project_prefix}-frontend-${local.account_id}"
-    Description = "Storefront static files - React build - served only through CloudFront"
+    Description = module.tags.description["frontend_bucket"]
   }
 }
 
@@ -102,7 +102,7 @@ resource "aws_cloudfront_distribution" "frontend" {
 
   tags = {
     Name        = "${var.project_prefix}-storefront"
-    Description = "CDN for the order-saga storefront - HTTPS only - OAC to a private S3 bucket"
+    Description = module.tags.description["cdn"]
   }
 }
 

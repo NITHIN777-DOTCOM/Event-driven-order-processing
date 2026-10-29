@@ -32,7 +32,7 @@ resource "aws_sfn_state_machine" "order_saga" {
 
   tags = {
     Name        = local.state_machine_name
-    Description = "Order saga - reserve inventory - request payment and wait up to 120 s for the signed webhook - complete or compensate - notify customer"
+    Description = module.tags.description["state_machine"]
   }
 
   depends_on = [aws_iam_role_policy.sfn]

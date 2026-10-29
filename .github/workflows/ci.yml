@@ -1,6 +1,6 @@
 # CI: runs on every push and pull request.
 #   test       Python unit tests (moto, no AWS) with a coverage gate
-#   terraform  fmt + validate for both stacks (no AWS access needed)
+#   terraform  fmt + validate for both stacks + `terraform test` of the tag-value rule (no AWS access needed)
 #   frontend   npm ci, typecheck, production build
 #   plan       PULL REQUESTS ONLY: read-only `terraform plan` via OIDC, posted as a PR comment
 # A green CI run on main triggers deploy.yml.
@@ -47,6 +47,8 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
       - run: terraform fmt -check -recursive infra
+      - name: tag values are validated at plan time (terraform test, no AWS)
+        run: terraform -chdir=infra/modules/tag_values init -input=false && terraform -chdir=infra/modules/tag_values test
       - name: validate infra/main
         run: terraform -chdir=infra/main init -backend=false -input=false && terraform -chdir=infra/main validate
       - name: validate infra/bootstrap

@@ -46,7 +46,7 @@ resource "aws_dynamodb_table" "orders" {
 
   tags = {
     Name        = "${var.project_prefix}-orders"
-    Description = "Customer orders with current status and full statusHistory timeline"
+    Description = module.tags.description["orders_table"]
   }
 }
 
@@ -75,7 +75,7 @@ resource "aws_dynamodb_table" "idempotency" {
 
   tags = {
     Name        = "${var.project_prefix}-idempotency"
-    Description = "Idempotency-Key to orderId map that prevents duplicate orders - expires after 24h via TTL"
+    Description = module.tags.description["idempotency_table"]
   }
 }
 
@@ -98,7 +98,7 @@ resource "aws_dynamodb_table" "inventory" {
 
   tags = {
     Name        = "${var.project_prefix}-inventory"
-    Description = "Product catalogue with price - available stock - reserved quantity"
+    Description = module.tags.description["inventory_table"]
   }
 }
 
@@ -122,7 +122,7 @@ resource "aws_dynamodb_table" "wallets" {
 
   tags = {
     Name        = "${var.project_prefix}-wallets"
-    Description = "DemoPay wallet balances - one per customer email - demo money only"
+    Description = module.tags.description["wallets_table"]
   }
 }
 
@@ -152,6 +152,6 @@ resource "aws_dynamodb_table" "wallet_txns" {
 
   tags = {
     Name        = "${var.project_prefix}-wallet-txns"
-    Description = "DemoPay ledger - DEBIT for payments - CREDIT for refunds - ADJUST for demo balance changes"
+    Description = module.tags.description["wallet_txns_table"]
   }
 }

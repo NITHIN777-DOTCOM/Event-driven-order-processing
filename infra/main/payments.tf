@@ -50,7 +50,7 @@ resource "aws_dynamodb_table" "payments" {
   # Tag values allow only letters, digits, spaces and _ . : / = + - @ (no parentheses: found in the step 2.1 deploy).
   tags = {
     Name        = "${var.project_prefix}-payments"
-    Description = "Payment intents - one per order - id PI-orderId - REQUESTED then SUCCEEDED or FAILED or TIMED_OUT then maybe REFUNDED"
+    Description = module.tags.description["payments_table"]
   }
 }
 
@@ -74,7 +74,7 @@ resource "aws_dynamodb_table" "psp_transactions" {
 
   tags = {
     Name        = "${var.project_prefix}-psp-transactions"
-    Description = "Mock provider DemoPay - its charge and refund records - one CHARGE and at most one REFUND per payment intent"
+    Description = module.tags.description["psp_transactions_table"]
   }
 }
 
@@ -86,7 +86,7 @@ resource "aws_sqs_queue" "psp_dlq" {
 
   tags = {
     Name        = "${var.project_prefix}-psp-dlq"
-    Description = "Payment requests DemoPay gave up on - webhook unreachable or rejecting - money may have moved - investigate"
+    Description = module.tags.description["psp_dlq"]
   }
 }
 
@@ -105,7 +105,7 @@ resource "aws_sqs_queue" "psp_requests" {
 
   tags = {
     Name        = "${var.project_prefix}-psp-requests"
-    Description = "Payment requests to the mock provider DemoPay - DLQ after 5 receives"
+    Description = module.tags.description["psp_requests_queue"]
   }
 }
 
