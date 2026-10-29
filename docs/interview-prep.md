@@ -991,7 +991,16 @@ acceptable (they were asking to replace it), and it keeps the transaction simple
 in one DynamoDB transaction).
 
 ### Numbers
-Filled from `docs/evidence/upgrade-2.2-holds.md` after the live runs.
+From `docs/evidence/upgrade-2.2-holds.md` (2026-10-29, ap-south-1):
+- Live e2e **26/26**: a–s unchanged plus t–z (lifecycle, schedule expiry, race, ownership, I5, order consumes the
+  hold, order after expiry).
+- Race for the last unit: HTTP codes **[201, 409]**, the 409 names the product, (stock, held) = (0, 1).
+- Order with a hold: LAPTOP-STAND (98, 0, 2) → (97, 0, 3): stock taken **once** (at hold time), held → reserved.
+- Schedule lag after `expiresAt`: **11.8 s, 20.1 s, 45.9 s** (n = 3, median 20.1 s). Within about a minute, not to
+  the second.
+- I5 held for all 16 products after the run. Unit tests 217, coverage 94% (41 of them on holds).
+- Rollout: commit A 22 added / 17 changed / 0 destroyed; commit B 1 added / 5 changed / 0 destroyed.
+- Added idle cost: $0 (Scheduler: 14 M invocations/month free).
 
 ### Likely interview questions
 1. *Why not just use TTL?* TTL deletion can lag by days, it deletes rather than returning stock, and it can't run
@@ -1014,7 +1023,19 @@ Filled from `docs/evidence/upgrade-2.2-holds.md` after the live runs.
    (a schedule without a hold) is harmless: the expiry Lambda finds nothing and stops.
 
 ### Debugging story
-To be filled after the live runs.
+**"Precise" expiry wasn't precise to the second.** The design promised release "at the expiry second". The first
+live run measured the schedule firing 45.9 s after `expiresAt`, and the next ones 20.1 s and 11.8 s. With
+`FlexibleTimeWindow OFF` and an `at(yyyy-mm-ddThh:mm:ss)` time, Scheduler fired within about a minute, not at the
+exact second. Nothing broke, because expiry had been built as a logical rule rather than an event: past
+`expiresAt` the consume condition refuses the hold, any read expires it, and the countdown hits 0:00 from server
+time. The only effect is that other shoppers get the units back up to about a minute late. Lessons: measure the
+timer instead of trusting its name (the expiry Lambda logs `expiryLagMs` and the dashboard graphs it), and never let
+correctness depend on a timer firing on time.
+
+**A test that owned shared state it didn't own.** Commit A's first e2e run was 23/24: u expected DESK-MAT to return
+to exactly (100, 0, 0) but found (99, 0, 1). The stock invariant check (x) passed in the same run, so nothing was
+lost. Scenario l had ordered a desk mat during u's 30 s window. The fix was in the test: compare what the hold
+controls (held back to its earlier value; stock + reserved unchanged), not the whole counter.
 
 ## 12. Known gaps (and where they get fixed)
 

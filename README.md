@@ -25,6 +25,12 @@ At checkout, open **Test scenario** and try *Payment glitch*, *Payment declined*
   the timeout is **refunded automatically**, and four money invariants (one net debit per completed order, zero net
   charge per failed one, no double charge or refund, every intent final) are checked for every e2e scenario.
 - **Atomic money movement.** A payment is one DynamoDB `TransactWriteItems` across three tables (wallet balance, ledger entry, order), conditional on enough balance and no prior payment. A low balance is a **real** decline, not a simulated one.
+- **Checkout holds with timed release.** Opening checkout holds the cart for **10 minutes** (one DynamoDB transaction:
+  stock → held, one ACTIVE hold per user, 409 naming the product that's short). A one-time **EventBridge Scheduler**
+  schedule per hold releases it on its own; paying consumes it (held → reserved, stock taken once). Consume, expire
+  and release race safely: every transition is one transaction led by a status condition, so exactly one wins.
+  Expiry is also enforced logically, because the schedule fires within about a minute, not to the second (measured).
+  Stock conservation (I5) is checked for every product.
 - **Retries where they help, not where they hurt.** Transient payment errors are retried with exponential backoff (2 s → 4 s → 8 s). A permanent decline goes straight to compensation.
 - **Transactional outbox, no dual write.** `create_order` makes exactly one write: the DynamoDB transaction. The new order row *is* the outbox record. A **DynamoDB stream → EventBridge Pipe** (INSERT-only filter) delivers it to SQS, so a crash right after the write can't lose the order.
 - **Sign-in and row-level isolation.** Cognito managed login (authorization code + PKCE). API Gateway's **JWT authorizer**
@@ -33,7 +39,7 @@ At checkout, open **Test scenario** and try *Payment glitch*, *Payment declined*
   verified claims** (`sub`). Orders and wallets are keyed by the user; someone else's order is a **404**, not a 403; idempotency keys
   are scoped per user.
 - **Poison messages are isolated.** After 3 failed receives, SQS moves the message to a dead-letter queue, and a CloudWatch alarm emails the operator.
-- **100% infrastructure as code.** 133 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
+- **100% infrastructure as code.** 156 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
 - **CI/CD with no stored keys.** GitHub Actions assumes AWS roles through **OIDC**, scoped to this repo's `main` branch (deploy) or its pull requests (read-only plan). Every merge is applied, published and smoke-tested.
 - **Close to $0 when idle.** Everything is pay-per-use: Lambda, Step Functions, on-demand DynamoDB, SQS, SNS, CloudFront and S3. There's no VPC, NAT gateway or server. The one fixed cost is the outbox pipe polling the stream, estimated at about $1.6/month (an estimate from AWS's documented polling rate, not measured; see [the evidence](docs/evidence/upgrade-1.1-outbox.md)). A $5/month budget alert is the backstop.
 
@@ -50,7 +56,11 @@ flowchart LR
   cog -.->|"signing keys (JWKS)"| api
   api --> co["create_order"]
   api --> reads["get_order · list_orders<br/>list_products · wallet_api"]
-  co -->|"order + idempotency key<br/>in one transaction"| ddb[("DynamoDB<br/>orders · inventory · idempotency<br/>wallets · wallet-txns")]
+  api --> holds["holds_api<br/>POST/GET/DELETE /holds"]
+  holds -->|"stock → held<br/>one transaction"| ddb
+  holds -->|"one at() schedule per hold"| sched["EventBridge Scheduler<br/>group order-saga-holds"]
+  sched -->|"at expiresAt"| hexp["hold_expiry"] -->|"held → stock"| ddb
+  co -->|"order + idempotency key<br/>in one transaction"| ddb[("DynamoDB<br/>orders · inventory · idempotency<br/>wallets · wallet-txns · holds")]
   reads --> ddb
   ddb -->|"stream: new order rows"| pipe["EventBridge Pipe<br/>orders-outbox<br/>INSERT only"]
   pipe -->|"{orderId}"| q["SQS<br/>orders-queue"]
@@ -81,18 +91,24 @@ flowchart LR
    **access token**, into which the `order-saga-pre-token` trigger has copied the verified email. API Gateway's **JWT
    authorizer** checks its signature, issuer, audience (`client_id`) and expiry; the Lambdas accept only
    `token_use = access` and read the user's id (`sub`) and verified email from the claims, never from the request body.
-1. The storefront calls `POST /orders` with an `Idempotency-Key` (scoped to the user). `create_order` validates the order, prices it from inventory on the server, and writes the order plus the idempotency record in **one transaction**. That's its only write. It replies `202 Accepted` right away, without waiting for the saga.
-2. **Transactional outbox:** the new order row appears on the table's **DynamoDB stream**. The **EventBridge Pipe** `order-saga-orders-outbox` forwards only INSERTs with status PENDING, as `{"orderId": ...}`, onto **SQS**, which absorbs spikes and decouples the API from the workflow. Delivery is at least once; duplicates are harmless (next step).
-3. `start_workflow` consumes batches of 10 messages. It marks the order PROCESSING and starts a **Step Functions** execution named after the order (`ReportBatchItemFailures`: only failed messages are retried).
-4. **ReserveInventory** decrements stock for every item in one DynamoDB transaction, so stock is never partly reserved.
-5. **RequestPayment** (`waitForTaskToken`) creates payment intent `PI-<orderId>`, stores the task token on it, marks
+1. **Checkout hold:** entering checkout calls `POST /holds`. The cart's units move from `stock` to `held` in one
+   transaction (or 409 names the product that's short), and a one-time EventBridge Scheduler schedule is set for
+   `expiresAt` (+10 min). The page counts down from the server's clock; leaving releases the hold, and if nobody
+   pays, the schedule invokes `order-saga-hold-expiry`, which gives the units back.
+2. The storefront calls `POST /orders` (with the `holdId`) and an `Idempotency-Key` (scoped to the user). `create_order` validates the order, prices it from inventory on the server, and writes the order plus the idempotency record in **one transaction**. That's its only write. It replies `202 Accepted` right away, without waiting for the saga.
+3. **Transactional outbox:** the new order row appears on the table's **DynamoDB stream**. The **EventBridge Pipe** `order-saga-orders-outbox` forwards only INSERTs with status PENDING, as `{"orderId": ...}`, onto **SQS**, which absorbs spikes and decouples the API from the workflow. Delivery is at least once; duplicates are harmless (next step).
+4. `start_workflow` consumes batches of 10 messages. It marks the order PROCESSING and starts a **Step Functions** execution named after the order (`ReportBatchItemFailures`: only failed messages are retried).
+5. **ReserveInventory** consumes the checkout hold (hold → CONSUMED, held → reserved, order → RESERVED, one
+   transaction). Without a usable hold (none, expired, or lost a race with the expiry) it decrements stock for every
+   item in one DynamoDB transaction, so stock is never partly reserved.
+6. **RequestPayment** (`waitForTaskToken`) creates payment intent `PI-<orderId>`, stores the task token on it, marks
    the order PAYMENT_PENDING ("Awaiting payment confirmation") and queues the request to **DemoPay**. The saga pauses,
    at no cost. DemoPay debits the wallet once per intent (one transaction: balance, ledger, provider record) and
    POSTs a signed callback to `POST /webhooks/payment`. `payment_webhook` verifies the HMAC, moves the intent to
    SUCCEEDED and the order to PAYMENT_CAPTURED, and calls `SendTaskSuccess` (or `SendTaskFailure("PaymentDeclined")`).
    No callback within 120 s → `MarkPaymentTimedOut` → compensation → FAILED "payment timeout".
-6. **MarkOrderCompleted** and **NotifyCustomer** call DynamoDB and SNS **directly from the state machine**, with no Lambda in between.
-7. Every step appends `{status, timestamp, detail}` to the order's `statusHistory`. The tracker polls `GET /orders/{id}` every 1.5 s and turns that history into the live feed.
+7. **MarkOrderCompleted** and **NotifyCustomer** call DynamoDB and SNS **directly from the state machine**, with no Lambda in between.
+8. Every step appends `{status, timestamp, detail}` to the order's `statusHistory`. The tracker polls `GET /orders/{id}` every 1.5 s and turns that history into the live feed.
 
 ---
 
@@ -175,8 +191,8 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 
 ## Testing & evidence
 
-- **81 unit tests, 94% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
-- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **14/14 scenarios passed** against the deployed system, signed in as two Cognito test users, including DemoPay ledger checks, the transactional outbox and per-user isolation.
+- **217 unit tests, 94% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
+- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **26/26 scenarios passed** against the deployed system, signed in as two Cognito test users, including DemoPay ledger checks and money invariants, the transactional outbox, per-user isolation, the payment webhook and checkout holds.
 
 | # | Scenario | Result |
 |---|---|---|
@@ -194,15 +210,27 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | l | User A reading B's order → 404 (worded like a missing order); each order list holds only its owner's orders | PASS |
 | m | A's wallet reset with B's ids in the body → only A's wallet changes | PASS |
 | n | B reusing A's Idempotency-Key → B's own new order; A's replay still returns A's | PASS |
+| o | Payment webhook: unsigned / forged / stale / future signature → 401; valid signature, unknown intent → 404 no-op | PASS |
+| p | No payment callback within 120 s → compensated, FAILED, nothing charged | PASS |
+| q | Payment confirmed after the timeout → refunded automatically, order stays FAILED | PASS |
+| r | Webhook delivered twice → COMPLETED, debited once | PASS |
+| s | Forged callback rejected (401); the genuine one completes the order | PASS |
+| t | Checkout hold: stock → held + schedule; a 2nd hold releases the 1st; 400 over the cap; 409 naming the short product; DELETE releases | PASS |
+| u | 30 s hold released by its EventBridge Scheduler schedule (lag 11.8–45.9 s measured); schedule deletes itself | PASS |
+| v | Two users race for the last unit → exactly one 201, one 409 | PASS |
+| w | B can't see or release A's hold (404) | PASS |
+| x | I5 stock conservation for all 16 products: seeded = stock + held + reserved | PASS |
+| y | Order with its hold → hold CONSUMED, stock taken once; B can't use A's hold (400) | PASS |
+| z | Order after its hold expired → reserved afresh, hold stays EXPIRED | PASS |
 
-- **UI suite** ([`scripts/capture_ui.py`](scripts/capture_ui.py)): every scenario driven through the deployed storefront in Chromium, signing in through Cognito managed login. **6/6**, with ledger checks.
+- **UI suite** ([`scripts/capture_ui.py`](scripts/capture_ui.py)): every scenario driven through the deployed storefront in Chromium, signing in through Cognito managed login. **8/8**, with ledger checks, the checkout-hold countdown, and a fake-clock run that shows "Your hold expired".
 - **Every deploy** runs a smoke test: one real order must reach COMPLETED within 60 s with exactly one wallet debit.
-- Evidence: [`docs/evidence/`](docs/evidence/). The e2e results are in [`e2e-failure-tests.md`](docs/evidence/e2e-failure-tests.md), UI screenshots in [`ui/`](docs/evidence/ui/), monitoring in [`phase3-monitoring.md`](docs/evidence/phase3-monitoring.md), CI/CD runs in [`phase5-cicd.md`](docs/evidence/phase5-cicd.md) sign-in/isolation in [`upgrade-1.2-auth.md`](docs/evidence/upgrade-1.2-auth.md) and access tokens in [`upgrade-2.0-access-tokens.md`](docs/evidence/upgrade-2.0-access-tokens.md).
+- Evidence: [`docs/evidence/`](docs/evidence/). The e2e results are in [`e2e-failure-tests.md`](docs/evidence/e2e-failure-tests.md), UI screenshots in [`ui/`](docs/evidence/ui/), monitoring in [`phase3-monitoring.md`](docs/evidence/phase3-monitoring.md), CI/CD runs in [`phase5-cicd.md`](docs/evidence/phase5-cicd.md) sign-in/isolation in [`upgrade-1.2-auth.md`](docs/evidence/upgrade-1.2-auth.md) access tokens in [`upgrade-2.0-access-tokens.md`](docs/evidence/upgrade-2.0-access-tokens.md) and checkout holds in [`upgrade-2.2-holds.md`](docs/evidence/upgrade-2.2-holds.md).
 
 ### Observability
 
-- **Dashboard** `order-saga-dashboard`: orders started, succeeded and failed with success rate, API traffic, queue and DLQ depth, the Lambdas, DynamoDB, and a table of the latest failed orders.
-- **6 alarms → SNS `order-saga-ops-alerts`**. System faults (DLQ not empty, consumer errors, API 5xx, stuck executions, queue backlog) are separate from a business alarm: failure rate > 50%, evaluated only when at least 5 orders have started. A declined payment is a normal outcome, not an incident.
+- **Dashboard** `order-saga-dashboard`: orders started, succeeded and failed with success rate, API traffic, queue and DLQ depth, the Lambdas, DynamoDB, a table of the latest failed orders, and checkout holds (active holds, transitions, expiry lag).
+- **11 alarms → SNS `order-saga-ops-alerts`**. System faults (DLQ not empty, consumer errors, API 5xx, stuck executions, queue backlog, outbox and payment DLQs, forged webhooks, hold-expiry errors) are separate from a business alarm: failure rate > 50%, evaluated only when at least 5 orders have started. A declined payment is a normal outcome, not an incident.
 - **Saved Logs Insights queries**, such as *Trace one order*, which follows one `orderId` across every Lambda and the Step Functions log.
 - **X-Ray**: one trace follows an order from `create_order` through SQS and Step Functions to DynamoDB.
 

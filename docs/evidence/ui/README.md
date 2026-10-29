@@ -6,13 +6,14 @@ After each order the DemoPay ledger was checked through `GET /wallet`.
 
 | Scenario | orderId | Tracker result | Wallet DEBITs (expected) |
 |---|---|---|---|
-| Normal | `ORD-20261029-99c3557f` | Order completed; balance 1,000,000 -> 996,501 | 1 (1) ✓ |
-| Payment glitch (retries) | `ORD-20261029-92eee1a7` | Order completed | 1 (1) ✓ |
-| Payment declined | `ORD-20261029-9ebc95b0` | Order failed | 0 (0) ✓ |
-| Low balance (real decline) | `ORD-20261029-bec1403b` | Order failed | 0 (0) ✓ |
-| Duplicate test (3 requests) | `ORD-20261029-75080e1a` | Order completed · 1 order | 1 (1) ✓ |
-| Late payment (auto-refund) | `ORD-20261029-5d34022a` | Order failed; refund row shown: True | 1 (1) ✓ |
-| Poison message (to DLQ) | `ORD-20261029-002670fe` | Stuck in the dead-letter queue | 0 (0) ✓ |
+| Normal | `ORD-20261029-2f17d17b` | Order completed; balance 1,000,000 -> 996,501; hold consumed: True | 1 (1) ✓ |
+| Payment glitch (retries) | `ORD-20261029-8a6401a7` | Order completed | 1 (1) ✓ |
+| Payment declined | `ORD-20261029-a05ba44a` | Order failed | 0 (0) ✓ |
+| Low balance (real decline) | `ORD-20261029-1865e300` | Order failed | 0 (0) ✓ |
+| Duplicate test (3 requests) | `ORD-20261029-c12707f2` | Order completed · 1 order | 1 (1) ✓ |
+| Late payment (auto-refund) | `ORD-20261029-f297fcba` | Order failed; refund row shown: True | 1 (1) ✓ |
+| Poison message (to DLQ) | `ORD-20261029-ac51f44a` | Stuck in the dead-letter queue | 0 (0) ✓ |
+| Checkout hold: expired, held again, released on leaving | `-` | HOLD-20261029-2f5d6591e4 -> HOLD-20261029-0b69b40bc8; released: True | 0 (0) ✓ |
 
 Browser console errors during the run: 0
 
@@ -61,6 +62,14 @@ Browser console errors during the run: 0
 ### desktop-07b-tracker-late-payment-refunded
 
 ![desktop-07b-tracker-late-payment-refunded](desktop-07b-tracker-late-payment-refunded.png)
+
+### desktop-07c-checkout-hold-last-minute
+
+![desktop-07c-checkout-hold-last-minute](desktop-07c-checkout-hold-last-minute.png)
+
+### desktop-07d-checkout-hold-expired
+
+![desktop-07d-checkout-hold-expired](desktop-07d-checkout-hold-expired.png)
 
 ### desktop-08-tracker-completed
 

@@ -3,8 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.2 — checkout holds (10-min reservation, EventBridge Scheduler expiry): IN PROGRESS (2026-10-29).** Part 0 `b6ed9e3` done (postmortem, plan-time tag validation, expand->migrate->contract rule). Bootstrap applied (Scheduler permissions on schedule-group/order-saga-*, state-bucket tag without '/'). Commit A (holds table, API, scheduler, expiry Lambda; saga + frontend untouched) pushed next; then commit B (saga consume + frontend), docs, report.
-(Step-by-step notes for 2.1 are in the "Step 2.1" section below.)
+**Upgrade step 2.2 — checkout holds: DONE (2026-10-29).** Next: **step 2.3, multi-item orders with partial compensation.** Report: docs/evidence/upgrade-2.2-report.md.
+(Step-by-step notes for 2.1 and 2.2 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)
@@ -80,6 +80,22 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   report: docs/evidence/upgrade-2.1-report.md.
 - Known gap (interview-prep §11): no reconciliation job for intents stuck REQUESTED if a saga dies outside its timeout.
 - Orders DLQ: 2 more poison orders today (e2e + UI run). Do NOT purge or redrive.
+
+### Step 2.2 (checkout holds: 10-min reservation, EventBridge Scheduler expiry)
+- Part 0 `b6ed9e3`: 2.1 postmortem (interview-prep §10), `infra/modules/tag_values` validates every Description tag
+  at plan time (+ `terraform test` in CI), CLAUDE.md rules: expand -> migrate -> contract; Description tags only via module.tags.
+- Bootstrap (applied locally after "APPLY", 2 changed): deploy role may manage schedule-group/order-saga-*; state
+  bucket Description "Terraform remote state ... stack infra main" (no "/").
+- A `08e8460`: table order-saga-holds (TTL purgeAt, clean-up only), holds_api (POST /holds, GET /holds/current,
+  DELETE /holds/{holdId}), schedule group order-saga-holds + order-saga-holds-scheduler-role, hold_expiry Lambda,
+  SSM String /order-saga/auth/client-ids (automation client may pick 30-600 s; spa always 600 s), alarm
+  hold-expiry-errors (11 alarms), dashboard row 9. Deploy: 22 added, 17 changed, 0 destroyed. Live e2e 23/24 (u's test
+  compared a shared counter exactly; fixed in B).
+- B `e2a90b8`: create_order validates holdId; ReserveInventory consumes the hold (one transaction) or falls back;
+  storefront countdown (frontend/src/hold.ts). Deploy: 1 added, 5 changed, 0 destroyed.
+- Live e2e 26/26 (t-z), UI suite 8/8 (0 console errors; fake-clock expiry shots). Unit tests 217, 94%. Schedule lag 11.8 / 20.1 / 45.9 s (not
+  second-precise; expiry is also logical). App stack 156 resources. Evidence: docs/evidence/upgrade-2.2-holds.md.
+- inventory items now carry `held`; seed_inventory.py resets it to 0. I5: seeded = stock + held + reserved.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
@@ -161,8 +177,8 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   Evidence: docs/evidence/phase5-cicd.md.
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
-## Next (upgrade step 2.2)
-- Reservation holds with TTL: reserved stock expires if the saga never finishes (pairs with the 120 s payment timeout).
+## Next (upgrade step 2.3)
+- Multi-item orders with partial compensation.
 
 ## Known limitations / ideas (good viva points)
 - (Fixed in 1.2) Wallets/orders are keyed by the Cognito `sub`; the API has a JWT authorizer.
