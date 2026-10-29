@@ -894,7 +894,114 @@ and the money-invariant checks made the impact measurable in minutes.
    `_ . : = + - @`, ≤ 256). A bad value fails `terraform plan` before any resource changes. Proven by `terraform
    test` in CI (including this exact value) and by a unit test that fails if a tag is written inline.
 
-## 11. Known gaps (and where they get fixed)
+## 11. Checkout holds (10-minute reservation with precise expiry)
+
+### What
+When a signed-in user opens checkout, their cart is **held for 10 minutes**: the units are set aside so nobody else can
+buy them, and a countdown shows the time left. Paying in time consumes the hold; otherwise it is released
+automatically, at the expiry second, by a one-time **EventBridge Scheduler** schedule.
+- Table `order-saga-holds`: `HOLD-<date>-<random>` items (userId, items, status ACTIVE → CONSUMED / RELEASED /
+  EXPIRED, expiresAt, orderId once consumed) plus one pointer item `USER#<sub>` per user with an ACTIVE hold.
+- API (JWT, own holds only; someone else's is a 404): `POST /holds`, `GET /holds/current`, `DELETE /holds/{holdId}`
+  (Lambda `order-saga-holds-api`).
+- Expiry: schedule group `order-saga-holds`, one `at(expiresAt)` schedule per hold, `ActionAfterCompletion: DELETE`,
+  invoking `order-saga-hold-expiry` through the role `order-saga-holds-scheduler-role` (may invoke that one function).
+- Inventory counters per product: `stock` (available), `held` (in ACTIVE holds), `reserved` (in orders).
+- Saga (commit B): `POST /orders` takes an optional `holdId`; ReserveInventory consumes the hold (held → reserved)
+  instead of decrementing stock again. Orders without a hold use the old path unchanged.
+
+### Why (the problem it solves)
+Without a hold, two shoppers can both see "1 left", both pay, and one of them gets "out of stock" after paying (or
+the shop oversells). Holding stock at checkout moves that disappointment to the moment before payment, and the
+countdown makes the deal explicit. The hard parts are the edges: releasing on time when the user just walks away,
+and never counting a unit twice when "pay", "expire" and "leave" happen at the same moment.
+
+### How
+**Creating a hold** (`POST /holds`): validate (≤ 10 products, ≤ 5 units each), price from inventory, release the
+caller's previous hold, create the **schedule first**, then ONE `TransactWriteItems`:
+1. Put pointer `USER#<sub>` with `attribute_not_exists` (one ACTIVE hold per user, enforced atomically),
+2. Put the hold (ACTIVE),
+3. per product: `stock = stock - q, held = held + q` with `stock >= q`.
+
+If any product is short, the whole transaction is cancelled (nothing held) and the answer is **409 naming that
+product**; the schedule is deleted again. Schedule-first means a crash in between leaves a schedule that fires on a
+hold that doesn't exist (a no-op), never a hold without a schedule.
+
+**Every transition out of ACTIVE is one transaction whose first item is the conditional status update**
+(`#s = ACTIVE`), together with deleting the pointer and moving the stock:
+
+| Transition | Stock movement | Extra condition |
+|---|---|---|
+| ACTIVE → CONSUMED (order) | held → reserved (stock NOT decremented again) | `expiresAtEpoch > now` |
+| ACTIVE → RELEASED (user/new hold) | held → stock | |
+| ACTIVE → EXPIRED (schedule or lazy read) | held → stock | |
+
+**Races:** consume, expire and release can fire at the same moment. DynamoDB transactions are serializable, so
+exactly one commits; the others are cancelled *as a whole* (their stock updates never apply) and turn into no-ops
+(`lost_the_race` = cancellation code on item 0). New invariant, checked by the e2e run for every product:
+
+> **I5 stock conservation:** seeded stock = `stock` + `held` + `reserved`, and `held` = the units in ACTIVE holds.
+
+**Precise expiry, and the TTL trap.** DynamoDB TTL looks like the obvious tool, but TTL deletes items "typically
+within a few days" of expiry; it is a garbage collector, not a timer. A hold "released" by TTL could keep stock
+locked for days. Here TTL (`purgeAt` = expiry + 7 days) only cleans up finished records. The release is a one-time
+schedule at the exact second. And because a schedule can still be late (or fail), **expiry is also enforced
+logically**: an ACTIVE hold past `expiresAt` can't be consumed (the consume condition checks the time), and the
+next read of it expires it on the spot ("lazy expiry"). The schedule's job is only to give the stock back promptly.
+
+**Anti-hoarding:** one ACTIVE hold per user (a new hold releases the old one), at most 5 units per product, 10
+minutes max. A bot can still create many accounts; per-account limits plus Cognito sign-up verification are the
+cheap first line (rate limits per IP via WAF would be next).
+
+**Duration by client:** the storefront (spa app client) always gets 600 s. Only the automation client may ask for
+30–600 s, so the e2e suite tests real expiry without waiting 10 minutes. The client is the access token's verified
+`client_id` claim, compared with the two client ids stored in SSM by Terraform.
+
+**Countdown from server time (commit B):** the API returns `expiresAt` and `serverTime`. The browser computes the
+offset `serverTime - Date.now()` once and counts down to `expiresAt` in server time, so a phone whose clock is 3
+minutes off still shows the right mm:ss.
+
+### Trade-offs / alternatives considered
+| Option | Why not (here) |
+|---|---|
+| **DynamoDB TTL** as the release | Deletion lags by hours to days; deletes the record instead of returning stock; no hook to run logic. Kept for clean-up only. |
+| **SQS delay queue** | `DelaySeconds` max is 15 minutes (fine for 10, but no headroom), no per-message cancel, and a consumer has to poll forever. |
+| **Step Functions Wait state** per hold | Works and is precise, but costs ~4 state transitions per hold and an execution per checkout visit; cancelling needs StopExecution. Scheduler is one API call to create and one to delete. |
+| **Periodic sweeper** (every minute) | Simple, but release is up to 1 min late, and it scans or queries all holds every minute even when idle. |
+| **EventBridge Scheduler one-time schedule** (chosen) | Exact-time `at()`, built-in retries, deletes itself after firing, free tier 14M invocations/month; the trade-off is one more service and IAM role. |
+| Reserve stock in the saga only (no holds) | The pre-step-2.2 behaviour: fine for most shops, but a user can lose the item after paying. |
+
+Releasing the old hold before creating the new one means a refused new hold (409) leaves the user with no hold:
+acceptable (they were asking to replace it), and it keeps the transaction simple (the same product can't appear twice
+in one DynamoDB transaction).
+
+### Numbers
+Filled from `docs/evidence/upgrade-2.2-holds.md` after the live runs.
+
+### Likely interview questions
+1. *Why not just use TTL?* TTL deletion can lag by days, it deletes rather than returning stock, and it can't run
+   logic. It is a clean-up tool; the release is a schedule plus logical expiry.
+2. *What if the schedule fires late (or not at all)?* Nothing breaks, the stock just comes back later. The hold is
+   logically expired at `expiresAt`: consuming it fails (`expiresAtEpoch > now` in the condition) and reading it
+   expires it on the spot. Failed invocations are retried by Lambda and Scheduler, and the
+   `order-saga-hold-expiry-errors` alarm fires.
+3. *What if two users want the last item?* Both `POST /holds` run the conditional decrement `stock >= 1`; DynamoDB
+   serializes them, one commits (201), the other's whole transaction is cancelled (409 naming the product). Proven
+   live with two concurrent requests.
+4. *What if the user pays at 9:59 and the schedule fires at 10:00?* Whichever transaction commits first wins. If the
+   consume wins, the expiry finds CONSUMED and does nothing. If the expiry wins, the consume is cancelled and
+   ReserveInventory falls back to a normal reservation (or OutOfStock). Stock is never counted twice (I5).
+5. *How do you stop hoarding?* One ACTIVE hold per user (pointer item in the same transaction), ≤ 5 units per
+   product, 10 minutes max.
+6. *Why compute the countdown from server time?* Client clocks are wrong surprisingly often; a countdown from the
+   browser clock could show 7 minutes left on an expired hold. The server's `expiresAt` and `serverTime` define it.
+7. *Why is the schedule created before the hold?* So there is never a hold without a schedule. The reverse failure
+   (a schedule without a hold) is harmless: the expiry Lambda finds nothing and stops.
+
+### Debugging story
+To be filled after the live runs.
+
+## 12. Known gaps (and where they get fixed)
 
 ### What
 Design limits found and documented, each with a planned fix.

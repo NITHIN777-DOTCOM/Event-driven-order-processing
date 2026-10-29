@@ -235,7 +235,61 @@ locals {
     aws_cloudwatch_metric_alarm.outbox_dlq_not_empty.arn,
     aws_cloudwatch_metric_alarm.psp_dlq_not_empty.arn,
     aws_cloudwatch_metric_alarm.webhook_signature_failures.arn,
+    aws_cloudwatch_metric_alarm.hold_expiry_errors.arn,
   ]
+}
+
+# -----------------------------------------------------------------------------
+# Checkout holds (step 2.2)
+# -----------------------------------------------------------------------------
+# If expiry fails, held stock is not returned until the next read of that hold (lazy expiry) or a retry.
+resource "aws_cloudwatch_metric_alarm" "hold_expiry_errors" {
+  alarm_name        = "${var.project_prefix}-hold-expiry-errors"
+  alarm_description = "Lambda ${local.hold_expiry_function_name} failed: a checkout hold may still be holding stock after its expiry. Check its logs (holdId on every line); Lambda retries twice and Scheduler retries delivery for up to 1 h. The hold is also expired lazily the next time it is read."
+
+  namespace           = "AWS/Lambda"
+  metric_name         = "Errors"
+  dimensions          = { FunctionName = local.hold_expiry_function_name }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}
+
+# One count per hold transition (holdEvent = created / released / expired; consumed is logged by reserve_inventory),
+# as metric OrderSaga/HoldEvents with the transition as its Event dimension.
+resource "aws_cloudwatch_log_metric_filter" "hold_events" {
+  for_each = toset(["holds_api", "hold_expiry"])
+
+  name           = "${var.project_prefix}-hold-events-${replace(each.key, "_", "-")}"
+  log_group_name = aws_cloudwatch_log_group.lambda[each.key].name
+  pattern        = "{ $.holdEvent = * }"
+
+  metric_transformation {
+    name       = "HoldEvents"
+    namespace  = "OrderSaga"
+    value      = "1"
+    dimensions = { Event = "$.holdEvent" }
+  }
+}
+
+# How late the schedule fired: now - expiresAt, in ms (EventBridge Scheduler's precision).
+resource "aws_cloudwatch_log_metric_filter" "hold_expiry_lag" {
+  name           = "${var.project_prefix}-hold-expiry-lag"
+  log_group_name = aws_cloudwatch_log_group.lambda["hold_expiry"].name
+  pattern        = "{ $.holdEvent = \"expired\" }"
+
+  metric_transformation {
+    name      = "HoldExpiryLag"
+    namespace = "OrderSaga"
+    value     = "$.expiryLagMs"
+    unit      = "Milliseconds"
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -417,6 +471,78 @@ locals {
         metrics = [
           ["OrderSaga", "WebhookSignatureFailures", { stat = "Sum", label = "Signature failures", color = "#d62728" }],
           ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.psp_dlq.name, { stat = "Maximum", label = "Messages in psp DLQ", color = "#ff7f0e" }],
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
+  ]
+
+  # ---- Row 9: checkout holds (step 2.2) ----
+  hold_log_sources = join(" | ", [for name in local.hold_log_groups : "SOURCE '${name}'"])
+  hold_widgets = [
+    {
+      type   = "log"
+      x      = 0
+      y      = 53
+      width  = 6
+      height = 6
+      properties = {
+        title  = "Active holds now (latest status per hold, holds created in the time range)"
+        region = var.region
+        view   = "table"
+        query  = "${local.hold_log_sources} | filter ispresent(holdStatus) | stats latest(holdStatus) as status by holdId | filter status = \"ACTIVE\" | stats count(*) as activeHolds"
+      }
+    },
+    {
+      type   = "metric"
+      x      = 6
+      y      = 53
+      width  = 6
+      height = 6
+      properties = {
+        title  = "Hold transitions per 5 min"
+        region = var.region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [for event in ["created", "consumed", "released", "expired"] :
+          ["OrderSaga", "HoldEvents", "Event", event, { label = event }]
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
+    {
+      type   = "metric"
+      x      = 12
+      y      = 53
+      width  = 6
+      height = 6
+      properties = {
+        title  = "Expiry lag: schedule fired after expiresAt (ms)"
+        region = var.region
+        view   = "timeSeries"
+        period = 300
+        metrics = [
+          ["OrderSaga", "HoldExpiryLag", { stat = "p50", label = "p50" }],
+          ["OrderSaga", "HoldExpiryLag", { stat = "Maximum", label = "max" }],
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
+    {
+      type   = "metric"
+      x      = 18
+      y      = 53
+      width  = 6
+      height = 6
+      properties = {
+        title  = "hold-expiry Lambda: invocations / errors (errors should be 0)"
+        region = var.region
+        view   = "timeSeries"
+        period = 300
+        metrics = [
+          ["AWS/Lambda", "Invocations", "FunctionName", local.hold_expiry_function_name, { stat = "Sum", label = "Invocations" }],
+          ["AWS/Lambda", "Errors", "FunctionName", local.hold_expiry_function_name, { stat = "Sum", label = "Errors", color = "#d62728" }],
         ]
         yAxis = { left = { min = 0 } }
       }
@@ -742,7 +868,8 @@ locals {
         }
       },
     ],
-    local.payment_widgets
+    local.payment_widgets,
+    local.hold_widgets
   )
 }
 

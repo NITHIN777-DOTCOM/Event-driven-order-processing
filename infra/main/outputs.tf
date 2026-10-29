@@ -150,3 +150,11 @@ output "signup_url" {
 output "user_pool_console_url" {
   value = "${local.console}/cognito/v2/idp/user-pools/${aws_cognito_user_pool.users.id}/overview?region=${var.region}"
 }
+
+output "holds_table" {
+  value = aws_dynamodb_table.holds.name
+}
+
+output "holds_schedule_group" {
+  value = aws_scheduler_schedule_group.holds.name
+}

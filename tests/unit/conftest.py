@@ -37,8 +37,14 @@ os.environ.update(
     WEBHOOK_URL="https://example.invalid/webhooks/payment",
     PROVIDER_FUNCTION="test-payment-provider",
     PSP_QUEUE_URL="https://sqs.ap-south-1.amazonaws.com/123456789012/test-psp-requests",
+    HOLDS_TABLE="test-holds",
+    SCHEDULE_GROUP="test-holds",
+    EXPIRY_FUNCTION_ARN=f"arn:aws:lambda:{REGION}:123456789012:function:test-hold-expiry",
+    SCHEDULER_ROLE_ARN="arn:aws:iam::123456789012:role/test-holds-scheduler-role",
+    CLIENT_IDS_PARAMETER="/test/auth/client-ids",
 )
 WEBHOOK_SECRET = "test-webhook-secret-0123456789abcdef"
+SPA_CLIENT, AUTOMATION_CLIENT = "test-client", "test-automation-client"
 
 PRODUCTS = [
     {"productId": "WIRELESS-MOUSE", "name": "Wireless Mouse", "price": Decimal("799.00"), "stock": 100, "reserved": 0},
@@ -113,8 +119,20 @@ def aws():
             AttributeDefinitions=[{"AttributeName": "pspTxnId", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
+        holds = ddb.create_table(
+            TableName="test-holds",
+            KeySchema=[{"AttributeName": "holdId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "holdId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
         for product in PRODUCTS:
             inventory.put_item(Item=product)
+
+        scheduler = boto3.client("scheduler", region_name=REGION)
+        scheduler.create_schedule_group(Name="test-holds")
+        boto3.client("ssm", region_name=REGION).put_parameter(
+            Name="/test/auth/client-ids", Type="String", Value=json.dumps({"spa": SPA_CLIENT, "automation": AUTOMATION_CLIENT})
+        )
 
         boto3.client("ssm", region_name=REGION).put_parameter(
             Name="/test/psp/webhook-secret", Value=WEBHOOK_SECRET, Type="SecureString"
@@ -144,6 +162,8 @@ def aws():
             wallet_txns=wallet_txns,
             payments=payments,
             psp=psp,
+            holds=holds,
+            scheduler=scheduler,
             sqs=sqs,
             queue_url=queue_url,
             psp_queue_url=psp_queue_url,
@@ -171,12 +191,12 @@ USER_A, EMAIL_A = "11111111-aaaa-4aaa-8aaa-111111111111", "asha@example.com"
 USER_B, EMAIL_B = "22222222-bbbb-4bbb-8bbb-222222222222", "bilal@example.com"
 
 
-def jwt_claims(user_id=USER_A, email=EMAIL_A, verified="true", token_use="access") -> dict:
+def jwt_claims(user_id=USER_A, email=EMAIL_A, verified="true", token_use="access", client_id=SPA_CLIENT) -> dict:
     """What API Gateway's JWT authorizer puts in the event after verifying a Cognito token (all values strings).
     Default: an access token, with the email + email_verified the pre-token trigger adds (step 2.0)."""
     claims = {"sub": user_id, "token_use": token_use}
     if token_use == "access":
-        claims.update(client_id="test-client", scope="openid email profile")
+        claims.update(client_id=client_id, scope="openid email profile")
     else:
         claims.update(aud="test-client")
     if email is not None:

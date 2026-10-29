@@ -32,6 +32,15 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
   r) webhook_duplicate -> the success callback arrives twice: COMPLETED, one DEBIT, the 2nd callback is a no-op
   s) webhook_bad_signature -> a forged callback (wrong secret) is rejected with 401 first, then the genuine one
                           completes the order; the rejection is logged and counted in a CloudWatch metric
+  t) checkout hold     -> POST /holds moves stock to `held` and schedules its expiry; a 2nd hold releases the 1st
+                          (one per user); over the per-item cap -> 400; out of stock -> 409 naming the product;
+                          DELETE releases it (stock back, schedule gone)
+  u) hold expiry       -> a 30 s hold (automation client) is expired by its EventBridge Scheduler schedule and the
+                          stock comes back; records how many seconds after expiresAt the release happened
+  v) last unit race    -> two users hold the last unit at the same moment: exactly one 201, one 409
+  w) hold ownership    -> another user can't release (404) or see someone's hold
+  x) I5                -> stock conservation for EVERY product at the end of the run: seeded stock =
+                          stock + held + reserved, and held = the units in ACTIVE holds
 
 Auth: every API call carries a Cognito access token for test user A (or B), from auth_tokens.py. The API
 takes identity only from that token, so no request below sends an email or user id.
@@ -44,7 +53,7 @@ against the money invariants, using the wallet ledger (order-saga-wallet-txns) a
   I3  never more than one DEBIT or one CREDIT per order (no double charge, no double refund)
   I4  the intent, if any, is in a final state (SUCCEEDED, FAILED, TIMED_OUT, REFUNDED), and the expected one
 
-The poison, payment_timeout and payment_late orders are placed FIRST, so their minutes of waiting
+The poison, payment_timeout and payment_late orders and the 30 s hold are placed FIRST, so their minutes of waiting
 (SQS retries, the 120 s payment timeout, the ~150 s late callback) overlap the other scenarios.
 The DLQ is only peeked (VisibilityTimeout=0) and is never purged, so it stays for screenshots.
 Results are printed and written to docs/evidence/e2e-failure-tests.md. Exit code 1 if anything fails.
@@ -68,6 +77,7 @@ from pathlib import Path
 import boto3
 
 from auth_tokens import auth_header, test_user
+from seed_inventory import PRODUCTS as SEED_PRODUCTS
 from tf_outputs import load_outputs
 
 OUT = load_outputs()
@@ -88,6 +98,10 @@ logs = boto3.client("logs", region_name=REGION)
 ssm = boto3.client("ssm", region_name=REGION)
 payments_table = ddb.Table(OUT["payments_table"])
 wallet_txns_table = ddb.Table(OUT["wallet_txns_table"])
+holds_table = ddb.Table(OUT["holds_table"])
+scheduler = boto3.client("scheduler", region_name=REGION)
+SEEDED_STOCK = {p["productId"]: p["stock"] for p in SEED_PRODUCTS}  # I5 baseline (run seed_inventory.py first)
+SHORT_HOLD_SECONDS = 30
 cloudwatch = boto3.client("cloudwatch", region_name=REGION)
 RUN_STARTED = datetime.now(timezone.utc)
 SLOW_TIMEOUT_SECONDS = 300  # payment_timeout / payment_late: 120 s timeout, ~150 s late callback, plus slack
@@ -105,6 +119,7 @@ class Scenario:
     checks: list[tuple[bool, str]] = field(default_factory=list)
     timeline: list[dict] = field(default_factory=list)
     money: str = ""  # intent status + ledger summary, filled by check_money
+    hold_lag_seconds: float | None = None  # scenario u: how late the expiry schedule fired
 
     def check(self, passed: bool, description: str) -> bool:
         self.checks.append((bool(passed), description))
@@ -924,6 +939,179 @@ def check_money(s: Scenario) -> None:
     s.money = f"{status or '-'} · {ledger}"
 
 
+# --------------------------------------------------------------------------------------------
+# Step 2.2: checkout holds
+# --------------------------------------------------------------------------------------------
+def post_hold(items: list[tuple[str, int]], user: str = USER, duration: int | None = None) -> tuple[int, dict]:
+    body: dict = {"items": [{"productId": p, "quantity": q} for p, q in items]}
+    if duration is not None:
+        body["durationSeconds"] = duration
+    return http_json("POST", f"{API}/holds", body, auth_header(user))
+
+
+def current_hold(user: str = USER) -> dict | None:
+    return http_json("GET", f"{API}/holds/current", headers=auth_header(user))[1].get("hold")
+
+
+def delete_hold(hold_id: str, user: str = USER) -> tuple[int, dict]:
+    request = urllib.request.Request(f"{API}/holds/{hold_id}", method="DELETE", headers=auth_header(user))
+    try:
+        with urllib.request.urlopen(request, timeout=15) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as err:
+        return err.code, json.loads(err.read() or b"{}")
+
+
+def counters(product_id: str) -> tuple[int, int, int]:
+    """(stock, held, reserved) for a product."""
+    item = inventory_table.get_item(Key={"productId": product_id}, ConsistentRead=True)["Item"]
+    return int(item["stock"]), int(item.get("held", 0)), int(item["reserved"])
+
+
+def stored_hold(hold_id: str) -> dict:
+    return holds_table.get_item(Key={"holdId": hold_id}, ConsistentRead=True).get("Item") or {}
+
+
+def schedule_exists(hold_id: str) -> bool:
+    try:
+        scheduler.get_schedule(Name=hold_id, GroupName=OUT["holds_schedule_group"])
+        return True
+    except scheduler.exceptions.ResourceNotFoundException:
+        return False
+
+
+def scenario_hold_lifecycle() -> Scenario:
+    s = Scenario("t", "checkout hold: stock -> held + expiry schedule; 2nd hold releases the 1st; 400/409; DELETE releases")
+    product = "COMPACT-KEYBOARD"
+    before = counters(product)
+    code, first = post_hold([(product, 2)])
+    s.check(code == 201 and first.get("status") == "ACTIVE", f"POST /holds -> {code} {first.get('status')} (expected 201 ACTIVE)")
+    hold_id = first.get("holdId", "")
+    s.check(first.get("durationSeconds") == 600 and 590 <= first.get("secondsLeft", 0) <= 600,
+            f"no durationSeconds -> {first.get('durationSeconds')} s, secondsLeft {first.get('secondsLeft')} (expected 600)")
+    s.check(counters(product) == (before[0] - 2, before[1] + 2, before[2]), f"{product} (stock, held, reserved) {before} -> {counters(product)} (2 units stock -> held)")
+    s.check(schedule_exists(hold_id), f"one-time schedule {hold_id} exists in {OUT['holds_schedule_group']}")
+    s.check((current_hold() or {}).get("holdId") == hold_id, "GET /holds/current returns it")
+
+    code, second = post_hold([(product, 1)])
+    s.check(code == 201, f"2nd POST /holds -> {code} (expected 201)")
+    s.check(stored_hold(hold_id).get("status") == "RELEASED", f"1st hold {stored_hold(hold_id).get('status')} (expected RELEASED: one ACTIVE hold per user)")
+    s.check(not schedule_exists(hold_id), "1st hold's schedule deleted")
+    s.check(counters(product) == (before[0] - 1, before[1] + 1, before[2]), f"{product} now {counters(product)} (only the 2nd hold's 1 unit held)")
+
+    code, body = post_hold([(product, 6)])
+    s.check(code == 400, f"quantity 6 (cap 5) -> {code} (expected 400: {body.get('error')})")
+    code, body = post_hold([("LAPTOP-STAND", 1)], duration=10)
+    s.check(code == 400, f"durationSeconds 10 (min 30) -> {code} (expected 400)")
+    code, body = post_hold([("WEBCAM-1080P", 1)])
+    s.check(code == 409 and body.get("productId") == "WEBCAM-1080P", f"out of stock -> {code}, productId {body.get('productId')} (expected 409 WEBCAM-1080P)")
+
+    code, _ = post_hold([(product, 1)])
+    hold_id = (current_hold() or {}).get("holdId", "")
+    code, body = delete_hold(hold_id)
+    s.check(code == 200 and body.get("status") == "RELEASED", f"DELETE /holds/{hold_id} -> {code} {body.get('status')} (expected 200 RELEASED)")
+    s.check(counters(product) == before, f"{product} back to {counters(product)} (expected {before})")
+    s.check(current_hold() is None and not schedule_exists(hold_id), "no current hold, schedule deleted")
+    s.order_id = None
+    s.timeline = [{"timestamp": first.get("serverTime", ""), "status": "HOLD", "detail": f"{hold_id} and its predecessors"}]
+    return s
+
+
+def start_short_hold() -> tuple[Scenario, dict, tuple[int, int, int]]:
+    s = Scenario("u", f"{SHORT_HOLD_SECONDS} s hold expired by its EventBridge Scheduler schedule, stock restored", user=LOW_BALANCE_USER)
+    before = counters("DESK-MAT")
+    code, hold = post_hold([("DESK-MAT", 3)], user=LOW_BALANCE_USER, duration=SHORT_HOLD_SECONDS)
+    s.check(code == 201 and hold.get("durationSeconds") == SHORT_HOLD_SECONDS, f"POST /holds (automation client, {SHORT_HOLD_SECONDS} s) -> {code}")
+    return s, hold, before
+
+
+def finish_short_hold(s: Scenario, hold: dict, before: tuple[int, int, int]) -> Scenario:
+    hold_id = hold.get("holdId", "")
+    deadline = time.time() + SHORT_HOLD_SECONDS + 240
+    item = stored_hold(hold_id)
+    while item.get("status") == "ACTIVE" and time.time() < deadline:
+        time.sleep(3)
+        item = stored_hold(hold_id)
+    s.check(item.get("status") == "EXPIRED", f"hold {hold_id} {item.get('status')} (expected EXPIRED)")
+    s.check(item.get("expiredBy") == "schedule", f"expired by: {item.get('expiredBy')} (expected the schedule, not a lazy read)")
+    lag = int(item.get("expiryLagMs", -1)) / 1000
+    s.check(0 <= lag <= 120, f"released {lag:.1f} s after expiresAt {item.get('expiresAt')} (EventBridge Scheduler precision)")
+    s.check(counters("DESK-MAT") == before, f"DESK-MAT (stock, held, reserved) back to {counters('DESK-MAT')} (expected {before})")
+    s.check(not schedule_exists(hold_id), "schedule deleted itself after firing (ActionAfterCompletion DELETE)")
+    s.timeline = [
+        {"timestamp": item.get("createdAt", ""), "status": "ACTIVE", "detail": f"{hold_id}: 3 x DESK-MAT held for {SHORT_HOLD_SECONDS} s"},
+        {"timestamp": item.get("expiresAt", ""), "status": "expiresAt", "detail": "the schedule's at() time"},
+        {"timestamp": item.get("endedAt", ""), "status": "EXPIRED", "detail": f"by the schedule, {lag:.1f} s after expiresAt"},
+    ]
+    s.hold_lag_seconds = lag
+    return s
+
+
+def scenario_hold_ownership() -> Scenario:
+    s = Scenario("w", "hold ownership: B can't release or see A's hold (404)")
+    code, mine = post_hold([("LAPTOP-STAND", 1)])
+    hold_id = mine.get("holdId", "")
+    code, body = delete_hold(hold_id, user=LOW_BALANCE_USER)
+    s.check(code == 404, f"B: DELETE /holds/{hold_id} (A's) -> {code} (expected 404, same as a missing hold)")
+    s.check((current_hold(LOW_BALANCE_USER) or {}).get("holdId") != hold_id, "B's GET /holds/current never shows A's hold")
+    s.check(stored_hold(hold_id).get("status") == "ACTIVE", "A's hold is still ACTIVE")
+    s.check(delete_hold(hold_id)[0] == 200, "A can release it")
+    return s
+
+
+def scenario_last_unit_race() -> Scenario:
+    """Make VERTICAL-MOUSE's last unit the only one, then let both users hold it at the same moment."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    s = Scenario("v", "two users race for the last unit -> exactly one hold (201), the other 409")
+    product, seeded = "VERTICAL-MOUSE", SEEDED_STOCK["VERTICAL-MOUSE"]
+    try:  # test setup: park all but 1 unit (the conditional keeps it exact)
+        inventory_table.update_item(
+            Key={"productId": product}, UpdateExpression="SET stock = :one", ConditionExpression="stock = :seeded AND held = :zero",
+            ExpressionAttributeValues={":one": 1, ":seeded": seeded, ":zero": 0},
+        )
+    except inventory_table.meta.client.exceptions.ConditionalCheckFailedException:
+        s.check(False, f"setup: {product} is not at its seeded stock {seeded} with nothing held; run seed_inventory.py first")
+        return s
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda user: (user, *post_hold([(product, 1)], user=user)), [USER, LOW_BALANCE_USER]))
+        codes = sorted(code for _, code, _ in results)
+        s.check(codes == [201, 409], f"HTTP codes {codes} (expected [201, 409])")
+        winner = next((u, b) for u, c, b in results if c == 201)
+        loser = next(b for _, c, b in results if c == 409)
+        s.check(loser.get("productId") == product, f"the loser's 409 names {loser.get('productId')}")
+        s.check(counters(product)[:2] == (0, 1), f"{product} (stock, held) {counters(product)[:2]} (expected (0, 1))")
+        delete_hold(winner[1]["holdId"], user=winner[0])
+    finally:
+        inventory_table.update_item(  # put the parked units back
+            Key={"productId": product}, UpdateExpression="SET stock = stock + :parked", ExpressionAttributeValues={":parked": seeded - 1},
+        )
+    s.check(counters(product) == (seeded, 0, 0), f"{product} restored to {counters(product)}")
+    return s
+
+
+def scenario_stock_conservation() -> Scenario:
+    s = Scenario("x", "I5 stock conservation for every product: seeded = stock + held + reserved; held = ACTIVE holds")
+    active: dict[str, int] = {}
+    kwargs: dict = {"FilterExpression": "#s = :active", "ExpressionAttributeNames": {"#s": "status"}, "ExpressionAttributeValues": {":active": "ACTIVE"}}
+    while True:
+        page = holds_table.scan(**kwargs)
+        for hold in page["Items"]:
+            for item in hold["items"]:
+                active[item["productId"]] = active.get(item["productId"], 0) + int(item["quantity"])
+        if "LastEvaluatedKey" not in page:
+            break
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    broken = []
+    for product, seeded in SEEDED_STOCK.items():
+        stock, held, reserved = counters(product)
+        if stock + held + reserved != seeded or held != active.get(product, 0):
+            broken.append(f"{product}: {stock}+{held}+{reserved} vs {seeded}, ACTIVE holds {active.get(product, 0)}")
+    s.check(not broken, f"I5 holds for all {len(SEEDED_STOCK)} products" if not broken else f"I5 BROKEN: {broken}")
+    return s
+
+
 def main() -> int:
     started = time.monotonic()
     set_wallet(USER)  # DemoPay: start every run from ₹10,00,000
@@ -938,6 +1126,8 @@ def main() -> int:
         "q", "payment_late -> charged after the timeout, refunded automatically, order stays FAILED", "PODCAST-MIC", "payment_late"
     )
     print(f"  payment_timeout {timeout_order.order_id} · payment_late {late_order.order_id}")
+    short_hold, short_hold_body, short_hold_before = start_short_hold()
+    print(f"  {SHORT_HOLD_SECONDS} s hold {short_hold_body.get('holdId')} (user B)")
 
     results = []
     for run in (
@@ -956,6 +1146,8 @@ def main() -> int:
         scenario_webhook_duplicate,
         scenario_webhook_bad_signature,
         scenario_webhook_security,
+        scenario_hold_lifecycle,
+        scenario_hold_ownership,
     ):
         result = run()
         print(f"[{'PASS' if result.passed else 'FAIL'}] {result.key}) {result.title}  {result.order_id}")
@@ -976,6 +1168,9 @@ def main() -> int:
     results.append(finish_timeout(timeout_order, "CURVED-MONITOR", timeout_before))
     results.append(finish_late(late_order, "PODCAST-MIC", late_before))
     check_signature_metric(next(r for r in results if r.key == "s"))
+    results.append(finish_short_hold(short_hold, short_hold_body, short_hold_before))
+    results.append(scenario_last_unit_race())
+    results.append(scenario_stock_conservation())
 
     print("Checking the money invariants I1-I4 for every order...")
     for r in results:

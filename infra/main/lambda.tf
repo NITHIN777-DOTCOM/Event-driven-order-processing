@@ -107,6 +107,24 @@ locals {
         WEBHOOK_SECRET_PARAMETER = local.webhook_secret_parameter
       }
     }
+    holds_api = {
+      description = "POST /holds - GET /holds/current - DELETE /holds/{holdId} (JWT) - holds the caller's cart for 10 min in one transaction and schedules its exact expiry"
+      environment = {
+        HOLDS_TABLE          = aws_dynamodb_table.holds.name
+        INVENTORY_TABLE      = aws_dynamodb_table.inventory.name
+        SCHEDULE_GROUP       = aws_scheduler_schedule_group.holds.name
+        EXPIRY_FUNCTION_ARN  = local.hold_expiry_function_arn
+        SCHEDULER_ROLE_ARN   = aws_iam_role.scheduler.arn
+        CLIENT_IDS_PARAMETER = local.client_ids_parameter
+      }
+    }
+    hold_expiry = {
+      description = "Invoked by EventBridge Scheduler at a hold's expiresAt - ACTIVE to EXPIRED and its stock back in one transaction - idempotent"
+      environment = {
+        HOLDS_TABLE     = aws_dynamodb_table.holds.name
+        INVENTORY_TABLE = aws_dynamodb_table.inventory.name
+      }
+    }
     pre_token = {
       description = "Cognito pre-token-generation trigger (V2_0) for order-saga-users - adds email + email_verified to ACCESS tokens"
       # Cognito waits at most 5 s for a trigger; the function makes no AWS calls and finishes in milliseconds.

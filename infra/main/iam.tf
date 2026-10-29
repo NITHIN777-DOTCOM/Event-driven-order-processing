@@ -261,6 +261,59 @@ data "aws_iam_policy_document" "release_inventory" {
   }
 }
 
+# Checkout holds (step 2.2). TransactWriteItems is authorised per item: Put/Update/Delete on holds (hold + pointer),
+# Update on inventory.
+data "aws_iam_policy_document" "holds_api" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["holds_api"].json]
+
+  statement {
+    sid       = "HoldsAndPrices"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]
+    resources = [aws_dynamodb_table.holds.arn]
+  }
+  statement {
+    sid       = "MoveStockBetweenAvailableAndHeld"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.inventory.arn]
+  }
+  statement {
+    sid       = "OneTimeExpirySchedulesInTheHoldsGroupOnly"
+    actions   = ["scheduler:CreateSchedule", "scheduler:DeleteSchedule"]
+    resources = [local.holds_schedules_arn]
+  }
+  # CreateSchedule hands the scheduler role to EventBridge Scheduler: only that role, only to that service.
+  statement {
+    sid       = "PassOnlyTheSchedulerRole"
+    actions   = ["iam:PassRole"]
+    resources = [aws_iam_role.scheduler.arn]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["scheduler.amazonaws.com"]
+    }
+  }
+  statement {
+    sid       = "ReadAppClientIds"
+    actions   = ["ssm:GetParameter"]
+    resources = [local.client_ids_parameter_arn] # a string: the parameter's value depends on Cognito -> cycle
+  }
+}
+
+data "aws_iam_policy_document" "hold_expiry" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["hold_expiry"].json]
+
+  statement {
+    sid       = "ExpireHoldAndDropPointer"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]
+    resources = [aws_dynamodb_table.holds.arn]
+  }
+  statement {
+    sid       = "ReturnHeldStock"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.inventory.arn]
+  }
+}
+
 locals {
   lambda_policies = {
     create_order      = data.aws_iam_policy_document.create_order.json
@@ -275,6 +328,8 @@ locals {
     wallet_api        = data.aws_iam_policy_document.wallet_api.json
     payment_provider  = data.aws_iam_policy_document.payment_provider.json
     payment_webhook   = data.aws_iam_policy_document.payment_webhook.json
+    holds_api         = data.aws_iam_policy_document.holds_api.json
+    hold_expiry       = data.aws_iam_policy_document.hold_expiry.json
     # The Cognito trigger touches no AWS resource: own logs + X-Ray only.
     pre_token = data.aws_iam_policy_document.lambda_base["pre_token"].json
   }

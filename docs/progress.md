@@ -3,7 +3,7 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.2 — checkout holds (10-min reservation, EventBridge Scheduler expiry): IN PROGRESS (2026-10-29).** Part 0 (2.1 postmortem, plan-time tag validation, expand->migrate->contract rule) committed first; bootstrap diff (Scheduler permissions) awaits "APPLY".
+**Upgrade step 2.2 — checkout holds (10-min reservation, EventBridge Scheduler expiry): IN PROGRESS (2026-10-29).** Part 0 `b6ed9e3` done (postmortem, plan-time tag validation, expand->migrate->contract rule). Bootstrap applied (Scheduler permissions on schedule-group/order-saga-*, state-bucket tag without '/'). Commit A (holds table, API, scheduler, expiry Lambda; saga + frontend untouched) pushed next; then commit B (saga consume + frontend), docs, report.
 (Step-by-step notes for 2.1 are in the "Step 2.1" section below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 

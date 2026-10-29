@@ -1,7 +1,7 @@
 """Tag values must pass the strictest AWS tag character set, checked before anything is deployed.
 
 The plan-time check lives in infra/modules/tag_values (proven by its `terraform test`). These tests keep every tag
-going through it: a Description tag written inline in infra/main would bypass the validation, so it fails CI here.
+going through it: a Description tag written inline in either stack would bypass the validation, so it fails CI here.
 The provider default_tags are checked directly.
 """
 
@@ -22,14 +22,15 @@ def allowed(value: str) -> bool:
     return len(value) <= 256 and all(ch.isalnum() or ch in " _.:=+@-" for ch in value)
 
 
-def test_no_inline_description_tags_in_the_main_stack():
+@pytest.mark.parametrize("stack", ["main", "bootstrap"])
+def test_no_inline_description_tags(stack):
     inline = [
         f"{path.name}: {match.group(1)}"
-        for path in (INFRA / "main").glob("*.tf")
+        for path in (INFRA / stack).glob("*.tf")
         if path != TAGS_FILE
         for match in INLINE_DESCRIPTION.finditer(path.read_text(encoding="utf-8"))
     ]
-    assert inline == [], f'use module.tags.description["<key>"] (infra/main/tags.tf) instead of: {inline}'
+    assert inline == [], f'use module.tags.description["<key>"] instead of: {inline}'
 
 
 def test_every_description_key_used_exists_in_tags_tf():

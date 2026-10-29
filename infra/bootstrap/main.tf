@@ -1,5 +1,15 @@
 data "aws_caller_identity" "current" {}
 
+# Tag values validated at PLAN time (letters, digits, spaces and _ . : = + - @ only), like infra/main/tags.tf.
+module "tags" {
+  source = "../modules/tag_values"
+
+  descriptions = {
+    state_bucket = "Terraform remote state for the order-saga project - stack infra main"
+    github_oidc  = "Lets GitHub Actions workflows of the order-saga repo assume AWS roles without stored keys"
+  }
+}
+
 locals {
   account_id = data.aws_caller_identity.current.account_id
   # Account ID suffix keeps the bucket name globally unique.
@@ -13,9 +23,8 @@ resource "aws_s3_bucket" "tfstate" {
   bucket = local.state_bucket_name
 
   tags = {
-    Name = local.state_bucket_name
-    # S3 tag values allow only letters, digits, spaces and + - = . _ : / @
-    Description = "Terraform remote state for the order-saga project - infra/main"
+    Name        = local.state_bucket_name
+    Description = module.tags.description["state_bucket"]
   }
 
   # Losing this bucket would orphan every resource in infra/main.

@@ -34,6 +34,7 @@ class Forbidden(Exception):
 class Caller:
     user_id: str  # Cognito "sub"
     email: str  # verified, lower-cased
+    client_id: str = ""  # the app client the access token was issued to (storefront or automation)
 
 
 def claims_from(event: dict[str, Any]) -> dict[str, Any]:
@@ -57,4 +58,4 @@ def caller_from(event: dict[str, Any]) -> Caller:
         raise Forbidden("The token carries no email address")
     if str(claims.get("email_verified", "")).lower() != "true":
         raise Forbidden("Verify your email address first")
-    return Caller(user_id=sub, email=email.strip().lower())
+    return Caller(user_id=sub, email=email.strip().lower(), client_id=str(claims.get("client_id") or ""))

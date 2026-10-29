@@ -29,7 +29,7 @@ resource "aws_iam_openid_connect_provider" "github" {
 
   tags = {
     Name        = "github-actions-oidc"
-    Description = "Lets GitHub Actions workflows of the order-saga repo assume AWS roles without stored keys"
+    Description = module.tags.description["github_oidc"]
   }
 }
 
@@ -298,6 +298,17 @@ data "aws_iam_policy_document" "github_deploy" {
     # Both are read-only and have no resource type, so they need "*".
     actions   = ["cognito-idp:DescribeUserPoolDomain", "cognito-idp:ListUserPools"]
     resources = ["*"]
+  }
+
+  # EventBridge Scheduler (step 2.2, checkout holds): Terraform only manages the schedule GROUP. The one-time
+  # schedules inside it are created and deleted at run time by the holds Lambda (with its own role), never by CI.
+  statement {
+    sid = "SchedulerProjectGroups"
+    actions = [
+      "scheduler:CreateScheduleGroup", "scheduler:GetScheduleGroup", "scheduler:DeleteScheduleGroup",
+      "scheduler:TagResource", "scheduler:UntagResource", "scheduler:ListTagsForResource",
+    ]
+    resources = ["arn:aws:scheduler:${var.region}:${local.account_id}:schedule-group/${local.p}-*"]
   }
 
   # SSM Parameter Store under /order-saga/* (e.g. the test-user password as a SecureString). It uses the

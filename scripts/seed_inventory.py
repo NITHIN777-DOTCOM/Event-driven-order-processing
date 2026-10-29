@@ -1,7 +1,7 @@
 """Seed the inventory table with the storefront catalogue (16 products in 5 categories).
 
 Idempotent: re-running it overwrites each product, which resets stock to its seed value and
-reserved to 0. The first 5 productIds are the original Phase 1 ones, so old orders and scripts
+reserved and held to 0. The first 5 productIds are the original Phase 1 ones, so old orders and scripts
 keep working.
 
 Usage: python scripts/seed_inventory.py
@@ -146,6 +146,7 @@ def main() -> None:
                     "mrp": Decimal(product["mrp"]),
                     "rating": Decimal(product["rating"]),
                     "reserved": 0,
+                    "held": 0,  # step 2.2: units in ACTIVE checkout holds
                     "imageKey": f"products/{product['productId'].lower()}.webp",
                 }
             )

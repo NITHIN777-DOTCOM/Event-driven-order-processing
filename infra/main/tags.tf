@@ -24,5 +24,8 @@ module "tags" {
     state_machine          = "Order saga - reserve inventory - request payment and wait up to 120 s for the signed webhook - complete or compensate - notify customer"
     notifications_topic    = "Customer order status emails published by the saga workflow"
     ops_alerts_topic       = "Operational alarms for the order saga - DLQ depth - errors - failed executions"
+    holds_table            = "Checkout holds - stock set aside for one user for 10 minutes - ACTIVE then CONSUMED or RELEASED or EXPIRED - plus one USER pointer per user"
+    holds_schedule_group   = "One-time schedules that expire checkout holds at their exact expiry time - created and deleted by order-saga-holds-api"
+    client_ids_parameter   = "Cognito app client ids for the hold duration rule - storefront 600 s - automation client may ask for 30 to 600 s"
   }
 }

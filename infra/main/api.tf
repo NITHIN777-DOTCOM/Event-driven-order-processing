@@ -6,8 +6,8 @@ resource "aws_apigatewayv2_api" "orders" {
   cors_configuration {
     # Only the storefront (CloudFront) and the local Vite dev server may call the API from a browser.
     allow_origins = ["https://${aws_cloudfront_distribution.frontend.domain_name}", "http://localhost:5173"]
-    allow_methods = ["GET", "POST", "OPTIONS"]
-    allow_headers = ["authorization", "content-type", "idempotency-key"] # authorization: the Cognito ID token
+    allow_methods = ["GET", "POST", "DELETE", "OPTIONS"]                 # DELETE: release a checkout hold
+    allow_headers = ["authorization", "content-type", "idempotency-key"] # authorization: the Cognito access token
     # Lets browser JavaScript read the idempotency response headers.
     expose_headers = ["idempotency-key", "idempotent-replayed"]
     max_age        = 300
@@ -57,6 +57,9 @@ locals {
     list_products = { route = "GET /products", fn = "list_products", auth = false }
     wallet_get    = { route = "GET /wallet", fn = "wallet_api", auth = true }
     wallet_reset  = { route = "POST /wallet/reset", fn = "wallet_api", auth = true }
+    hold_create   = { route = "POST /holds", fn = "holds_api", auth = true }
+    hold_current  = { route = "GET /holds/current", fn = "holds_api", auth = true }
+    hold_release  = { route = "DELETE /holds/{holdId}", fn = "holds_api", auth = true }
     # Server-to-server from the payment provider: no user, so no JWT. The HMAC signature is the authentication.
     payment_webhook = { route = "POST /webhooks/payment", fn = "payment_webhook", auth = false }
   }
