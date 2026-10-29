@@ -3,9 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.0 — access tokens for the API (pre-token-generation trigger): IN PROGRESS (2026-10-29).**
-Commit A `e1a8a3c` green (trigger deployed, API accepted access + ID tokens, every client sends the access token;
-live e2e 14/14). Commit B (access tokens only, ID token -> 401) pushed; evidence next. Then: **2.1 async payment (waitForTaskToken + HMAC webhook + timeout).**
+**Upgrade step 2.0 — access tokens for the API (pre-token-generation trigger): DONE (2026-10-29).**
+Next: **2.1 async payment (waitForTaskToken + HMAC webhook + timeout).**
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)
@@ -55,6 +54,17 @@ live e2e 14/14). Commit B (access tokens only, ID token -> 401) pushed; evidence
 - Commit B `2c1444b` green (Deploy 40736924726, apply 1 added / 15 changed). Live e2e 14/14 (adds k-n); unit tests 81, 94%.
   Evidence: docs/evidence/upgrade-1.2-auth.md. Test users: order-saga-test-a/b@example.com (creds in SSM, never printed).
 - Orders DLQ: 11 messages + 1 in flight (the UI run's poison order) = 12 (each e2e/UI run adds its poison order). Do NOT purge or redrive. UI suite 6/6.
+
+### Step 2.0 (access tokens for the API): DONE
+- Lambda `order-saga-pre-token` (V2_0 pre-token-generation trigger on `order-saga-users`, Essentials): adds `email` +
+  `email_verified` to ACCESS tokens only. Invoke permission scoped to the pool ARN. No bootstrap change was needed
+  (deploy role already had lambda:* on order-saga-* and cognito-idp:UpdateUserPool).
+- Commit A `e1a8a3c` (both token types accepted; frontend, scripts/auth_tokens.py, CI send the access token): CI +
+  Deploy 40848092637 green (5 added / 14 changed), live e2e 14/14.
+- Commit B `59ad7cd` (access only; `token_use = id` -> 401): CI 40849234155 + Deploy 40849337652 green (0 added /
+  11 changed), live e2e 14/14 (k adds ID token -> 401 x3), UI 6/6, unit 105 / 94.5%.
+- Evidence: docs/evidence/upgrade-2.0-access-tokens.md, report docs/evidence/upgrade-2.0-report.md.
+- Orders DLQ grows by one poison order per e2e/UI run (4 more today). Do NOT purge or redrive.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).

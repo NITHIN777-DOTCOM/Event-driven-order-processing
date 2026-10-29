@@ -630,6 +630,12 @@ behind Cognito), carried as a signed token the API can verify without calling ba
 - Browser: protected page → managed login with `code_challenge_method=S256` → back on the page; tokens only in
   `sessionStorage`; 0 console errors.
 
+- **Step 2.0 (access tokens):** a fresh access token carries `token_use=access`, `client_id`, `email`,
+  `email_verified=true` (JSON boolean) and no other added claim; the ID token is unchanged. Trigger: ~2 ms warm,
+  ~86 ms init on a cold start, 33 MB of 256 MB used; Cognito's limit is 5 s.
+- Live e2e after commit B: **14/14**; scenario k adds "access token carries the email claims → 200" and "ID token on
+  GET /wallet, GET /orders, POST /orders → **401**". UI suite **6/6**, 0 console errors. Unit tests 105, 94.5%.
+
 ### Likely interview questions
 1. *Why PKCE if there's no client secret?* Exactly because there's none: anyone can see a public client's ID, so
    PKCE binds the code to the browser that started the login. A stolen code is useless without the verifier.
@@ -681,6 +687,16 @@ others to project-tagged pools, then the deploy re-ran green. Lesson: least-priv
 "create" path miss what the "update" path needs; CloudTrail names the exact action.
 
 ---
+
+**The JWT authorizer happily accepted the wrong token type (step 2.0).** Commit A was deliberately
+"accept both"; its e2e run showed `GET /wallet` with the ID token → 200 through the same authorizer as the access
+token. That's expected but easy to forget: HTTP API JWT authorizers check the audience list against `aud` *or*
+`client_id`, so an ID token (aud = our client) and an access token (client_id = our client) both pass, and nothing in
+the API Gateway config can say "access tokens only". So the rule lives in `caller_from` as a `token_use` check, and
+commit B's e2e proves it on three routes (401 with "ID tokens are not accepted"). Side finding while decoding the
+tokens: the automation client's access token has `scope = aws.cognito.signin.user.admin` (Cognito's self-service
+scope, which lets the token call `GetUser`/`UpdateUserAttributes` for its own user). Not a problem here, since the
+API never reads scopes, but it's why a real API would define its own resource-server scopes and check them.
 
 ## 10. Known gaps (and where they get fixed)
 
