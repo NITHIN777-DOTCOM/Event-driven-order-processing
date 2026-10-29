@@ -9,7 +9,8 @@ Evidence referenced below:
 `docs/evidence/phase1-happy-path.md`, `docs/evidence/phase2-failure-tests.md`,
 `docs/evidence/e2e-failure-tests.md` (latest e2e run, 8/8, 2026-10-22 13:21 UTC),
 `docs/evidence/phase3-monitoring.md`, `docs/evidence/phase5-cicd.md`, `docs/evidence/upgrade-1.1-outbox.md`,
-`docs/evidence/upgrade-1.2-auth.md`.
+`docs/evidence/upgrade-1.2-auth.md`, `docs/evidence/upgrade-2.0-access-tokens.md`,
+`docs/evidence/upgrade-2.1-async-payment.md`.
 
 ---
 
@@ -698,7 +699,126 @@ tokens: the automation client's access token has `scope = aws.cognito.signin.use
 scope, which lets the token call `GetUser`/`UpdateUserAttributes` for its own user). Not a problem here, since the
 API never reads scopes, but it's why a real API would define its own resource-server scopes and check them.
 
-## 10. Known gaps (and where they get fixed)
+## 10. Async payments and webhooks (waitForTaskToken + HMAC + timeout)
+
+### What
+Payment works like a real gateway (Razorpay/Stripe): the saga **requests** a payment, **pauses**, and resumes only
+when the provider calls our **webhook**.
+- `RequestPayment` is a `lambda:invoke.waitForTaskToken` task with `TimeoutSeconds: 120`. Lambda `request_payment`
+  creates the payment intent `PI-<orderId>` in `order-saga-payments`, **stores the task token on it**, marks the order
+  `PAYMENT_PENDING` ("Awaiting payment confirmation") and sends `{intent, order, wallet, amount}` to SQS
+  `order-saga-psp-requests` with `DelaySeconds` 2–5.
+- **DemoPay** (`payment_provider`, a mock external PSP) consumes that queue, debits the wallet **once per intent**, and
+  POSTs a signed callback to `POST /webhooks/payment`. It also has an idempotent refund API.
+- `payment_webhook` (no JWT) verifies the **HMAC-SHA256** signature and timestamp, records the outcome on the intent
+  and the order, and calls `SendTaskSuccess` / `SendTaskFailure("PaymentDeclined")`.
+- No callback in 120 s → `States.Timeout` → intent `TIMED_OUT` (conditional) → the existing compensation → order
+  `FAILED` with "payment timeout". A success that arrives later is **refunded automatically**.
+- Secret: SSM SecureString `/order-saga/psp/webhook-secret`, created by `scripts/create_webhook_secret.py` (run by
+  Deploy) and cached in memory by both Lambdas. Never in Terraform state, env vars or logs.
+- Alarms: `order-saga-psp-dlq-not-empty`, `order-saga-webhook-signature-failures` (log metric filter). Dashboard row 8:
+  intent transitions by status, webhook latency, timeouts, signature failures + PSP DLQ.
+
+### Why (the problem it solves)
+Real payments are asynchronous: 3-D Secure, UPI approval on a phone, bank processing. A gateway answers "accepted"
+and confirms later through a webhook. A synchronous Lambda that "charges and returns" can't model that and would
+have to hold a connection open (and pay for it) while waiting. With a task token, Step Functions waits for free for
+up to a year: Standard workflows bill per state transition, not per second of waiting.
+
+### How
+**Money invariants** (designed first; the e2e suite asserts all four for every scenario, from the wallet ledger and
+the payments table):
+- **I1** COMPLETED ⇒ exactly one net DEBIT for the amount. **I2** FAILED ⇒ net charge 0. **I3** no intent charged
+  twice, no refund issued twice. **I4** every intent ends SUCCEEDED, FAILED, TIMED_OUT or REFUNDED.
+
+How each one holds:
+- **I3, provider side:** DemoPay writes `CHARGE#<intent>` (and `REFUND#<intent>`) in `order-saga-psp-transactions` in
+  the **same DynamoDB transaction** as the wallet change and the ledger entry, conditional on `attribute_not_exists`.
+  A redelivered SQS message, a duplicate request or a concurrent run finds the record and **replays the same outcome**
+  (same `paymentId`, same decline). Declines are recorded too, so a top-up between deliveries can't turn a decline
+  into a charge.
+- **I3, our side:** the intent id is deterministic (`PI-<orderId>`), so a retried step can't create a second intent.
+  Every intent transition is a conditional write (`#s = :requested`, `#s <> :refunded`).
+- **I1:** the order only reaches `MarkOrderCompleted` through `SendTaskSuccess`, which the webhook sends only after it
+  moved the intent REQUESTED → SUCCEEDED (in one transaction with the order's `PAYMENT_CAPTURED`).
+- **I2:** every failure path after payment runs `RefundPayment`, which calls DemoPay's idempotent refund. A success
+  that arrives after the saga gave up (intent `TIMED_OUT`, or `FAILED` because compensation abandoned it) is refunded
+  by the webhook at once.
+- **I4:** REQUESTED is left by the webhook (SUCCEEDED/FAILED), by the timeout path (TIMED_OUT) or by compensation
+  (FAILED, "abandoned"). A charge discovered later moves it to REFUNDED.
+
+**Races and how they resolve** (all decided by conditional writes; the loser re-reads and takes the other branch):
+
+| Race | Outcome |
+|---|---|
+| Callback arrives just **before** the timeout, `SendTaskSuccess` just **after** | The intent is SUCCEEDED, so the saga's `MarkPaymentTimedOut` condition fails, and its `RefundPayment` sees SUCCEEDED and refunds. The webhook gets `TaskTimedOut` and **must not** refund as well (it never refunds a SUCCEEDED intent). Net 0. |
+| Callback arrives **after** the timeout | The intent is TIMED_OUT, so `REQUESTED → SUCCEEDED` fails; the webhook refunds and marks REFUNDED. Net 0. |
+| Saga refund and late-callback refund **at the same time** | Both call DemoPay's refund; `REFUND#<intent>` lets only one credit through; `record_refund` writes once. |
+| Duplicate callback | The intent is already final, with `sagaResumedAt`: 200 no-op. |
+| Captured, but `SendTaskSuccess` failed transiently | The webhook returns 500 and DemoPay retries; the intent is SUCCEEDED without `sagaResumedAt`, so the retry only resumes. |
+| Step retried (new task token) | `request_payment` overwrites the stored token only while the intent is REQUESTED; if it's already final, it answers the new token itself from the stored outcome. |
+
+**Why the task token never leaves our system:** a token is a bearer capability to complete *our* workflow step.
+Handing it to a third party would let the provider (or anyone who steals its logs) resume or fail our saga
+directly, skipping the signature check, idempotency and amount validation. The provider only knows the intent id;
+the intent→token mapping stays in our table.
+
+**Signature:** `X-Signature = hex(HMAC_SHA256(secret, "<X-Timestamp>.<raw body>"))`. It is verified on the **raw
+bytes** (re-serialised JSON can differ), with a **±5-minute** timestamp window (replay protection; the timestamp is
+inside the signed string, so it can't be changed), and compared with `hmac.compare_digest` (constant time). Missing,
+forged, stale or future-dated → 401, logged as `event = webhook_signature_rejected` (the reason only, never the
+signature), which feeds the `WebhookSignatureFailures` metric and alarm. A valid signature for an unknown intent →
+404, no write. The amount and orderId must match the intent, or 400.
+
+### Trade-offs / alternatives considered
+- **Webhook vs polling the provider:** polling adds latency (up to the poll interval), costs requests and Lambda time
+  per order per poll, and hits the provider's rate limits at scale. A webhook is immediate. Polling is still the
+  right *safety net* (a reconciliation job asking "what happened to intents still REQUESTED?"), which is why the
+  timeout and late-refund paths exist.
+- **Auto-refund vs "void before capture":** a cancel/void call on timeout would stop a late charge from happening at
+  all. Not every payment rail supports it (UPI collect, bank transfers), so a late capture must be handled anyway;
+  the auto-refund covers both.
+- **SQS between us and DemoPay:** simulates the network hop and gives the provider at-least-once retries for free (5
+  receives, then `order-saga-psp-dlq` + alarm). The provider's processing delay is an SQS `DelaySeconds` set by the
+  sender, because SQS has no consumer-side delay.
+- **Refund API as a Lambda invoke:** IAM-authenticated and synchronous, standing in for an HTTPS call with an API
+  key. A real provider would be HTTPS, with the same idempotency key (the intent id) in a header.
+- **Separate provider table:** DemoPay's charge records are the provider's state, not ours. Mixing them into
+  `order-saga-payments` would let our code "know" things only the provider can know.
+- **No GSI on orderId:** the intent id is derived from the orderId, so a GetItem finds it.
+- **Secret in SSM, not Secrets Manager:** a SecureString with the AWS-managed key is free; rotation is "delete it and
+  re-run the script" (both Lambdas refresh within 5 minutes).
+- **Timeout of 120 s:** long enough for a slow provider, short enough that stock isn't held for long. Real systems use
+  minutes to hours (UPI collect: up to 10 minutes) plus a reservation TTL (step 2.2).
+
+### Numbers
+To be filled from `docs/evidence/upgrade-2.1-async-payment.md` after commit B.
+
+### Likely interview questions
+1. *What if the webhook is down?* DemoPay's request message isn't deleted, so SQS redelivers it (5 receives, about 10
+   minutes), and each delivery replays the same charge outcome (no second debit). Meanwhile the saga times out at
+   120 s and compensates. After 5 failures the request lands in `order-saga-psp-dlq` and the alarm fires; redriving it
+   replays the callback, which the webhook then treats as a late success and refunds. Money is never lost, only delayed.
+2. *What if the callback arrives twice?* The second finds the intent already final and resumed: 200 no-op. 200 and
+   not 409, because the provider would otherwise keep retrying a callback we already applied.
+3. *What if it arrives after the timeout?* The intent is TIMED_OUT, so the webhook refunds through DemoPay's
+   idempotent refund and marks the intent REFUNDED. The order stays FAILED, net charge 0.
+4. *Why not poll the provider instead?* See the trade-offs: latency, cost, rate limits. Polling is the fallback, not
+   the main path.
+5. *Why HMAC and not just "the URL is secret"?* URLs leak (logs, proxies, browser history). HMAC proves who sent the
+   body and that it wasn't changed; the timestamp stops replays.
+6. *Why a constant-time comparison?* `==` on strings can stop at the first differing byte, so the response time leaks
+   how much of a guess was right. `hmac.compare_digest` always compares everything.
+7. *What happens to the task token on a retry?* Each attempt gets a new token. `request_payment` overwrites the
+   stored token, but only while the intent is still REQUESTED (a conditional write), so a late retry can't clobber a
+   finished payment.
+8. *Can a callback for one order change another?* No: the intent id, the orderId and the amount in the signed body
+   must all match the stored intent.
+
+### Debugging story
+None recorded yet (commit B adds the live findings).
+
+## 11. Known gaps (and where they get fixed)
 
 ### What
 Design limits found and documented, each with a planned fix.
@@ -717,8 +837,11 @@ claiming there are no gaps.
 - **No Content-Security-Policy header** on the storefront. Tokens are in sessionStorage, so XSS is the main token-theft
   risk. Fix: a CloudFront response-headers policy with a strict CSP (`script-src 'self'`, `connect-src` = the API and
   the Cognito domains).
-- **ID token used as the API credential** (section 9). Fix if needed: access token + a pre-token-generation trigger
-  that adds the verified email.
+- ~~ID token used as the API credential~~ **fixed in step 2.0**: access tokens only, with a pre-token-generation
+  trigger (section 9).
+- **A charge whose callback never arrives** (webhook down for longer than DemoPay's 5 retries) leaves a debit for a
+  FAILED order until someone redrives `order-saga-psp-dlq` (the alarm says so). Fix: a scheduled reconciliation job
+  that asks the provider about intents in TIMED_OUT/FAILED and refunds any charge it finds.
 - Compensation failures are recorded in the execution (`refundError`/`releaseError`) but not alerted on.
 - HTTP API has no X-Ray; the SFN segment is missing from the map (section 7).
 

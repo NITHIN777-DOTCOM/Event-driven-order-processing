@@ -23,6 +23,8 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
   l) order isolation   -> A can't read B's order (404, same as a missing one); each list shows only its owner's
   m) wallet isolation  -> A resetting "B's" wallet (B's ids in the body) only changes A's wallet
   n) per-user idempotency -> B reusing A's Idempotency-Key gets B's OWN new order; A's replay still works
+  o) payment webhook   -> POST /webhooks/payment (no JWT) rejects unsigned, forged, stale and future-dated requests
+                          with 401; a correctly signed callback for an unknown intent is a 404 no-op
 
 Auth: every API call carries a Cognito ID token for test user A (or B), from auth_tokens.py. The API
 takes identity only from that token, so no request below sends an email or user id.
@@ -38,6 +40,8 @@ Results are printed and written to docs/evidence/e2e-failure-tests.md. Exit code
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import sys
 import time
@@ -68,6 +72,8 @@ inventory_table = ddb.Table(OUT["inventory_table"])
 sfn = boto3.client("stepfunctions", region_name=REGION)
 sqs = boto3.client("sqs", region_name=REGION)
 logs = boto3.client("logs", region_name=REGION)
+ssm = boto3.client("ssm", region_name=REGION)
+payments_table = ddb.Table(OUT["payments_table"])
 
 
 # --------------------------------------------------------------------------------------------
@@ -676,6 +682,55 @@ def scenario_per_user_idempotency() -> Scenario:
     return s
 
 
+# --------------------------------------------------------------------------------------------
+# Step 2.1: the payment webhook (server-to-server, HMAC-signed, no JWT)
+# --------------------------------------------------------------------------------------------
+def webhook_secret() -> str:
+    """The shared HMAC secret, read with our AWS credentials. Held in memory only, never printed."""
+    return ssm.get_parameter(Name=OUT["webhook_secret_parameter"], WithDecryption=True)["Parameter"]["Value"]
+
+
+def post_webhook(body: dict, headers: dict) -> tuple[int, dict]:
+    raw = json.dumps(body, separators=(",", ":")).encode()
+    request = urllib.request.Request(
+        OUT["webhook_url"], data=raw, method="POST", headers={"Content-Type": "application/json", **headers}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as err:
+        return err.code, json.loads(err.read() or b"{}")
+
+
+def signature_headers(secret: str, body: dict, at: float | None = None) -> dict:
+    raw = json.dumps(body, separators=(",", ":")).encode()
+    timestamp = str(int(time.time() if at is None else at))
+    digest = hmac.new(secret.encode(), timestamp.encode() + b"." + raw, hashlib.sha256).hexdigest()
+    return {"X-Timestamp": timestamp, "X-Signature": digest}
+
+
+def scenario_webhook_security() -> Scenario:
+    s = Scenario("o", "payment webhook: unsigned/forged/stale/future -> 401; valid signature, unknown intent -> 404 no-op")
+    unknown = f"PI-ORD-{datetime.now(timezone.utc):%Y%m%d}-e2e{uuid.uuid4().hex[:5]}"
+    body = {"eventId": "evt_e2e", "type": "payment.succeeded", "paymentIntentId": unknown,
+            "orderId": unknown[3:], "paymentId": "PAY-e2e000000000", "amount": "1.00", "currency": "INR"}
+    secret = webhook_secret()
+    for label, headers in (
+        ("no signature headers", {}),
+        ("signed with a wrong secret", signature_headers("not-the-secret", body)),
+        ("timestamp 10 min old (replay)", signature_headers(secret, body, time.time() - 600)),
+        ("timestamp 10 min in the future", signature_headers(secret, body, time.time() + 600)),
+    ):
+        code, answer = post_webhook(body, headers)
+        s.check(code == 401, f"POST /webhooks/payment {label} -> {code} (expected 401: {answer.get('error')})")
+    code, answer = post_webhook(body, signature_headers(secret, body))
+    s.check(code == 404, f"valid signature, unknown intent -> {code} (expected 404: {answer.get('error')})")
+    s.check("Item" not in payments_table.get_item(Key={"paymentIntentId": unknown}), "no payment intent was created")
+    code, _ = http_json("POST", f"{API}/webhooks/payment", body, auth_header(USER))
+    s.check(code == 401, f"a user's JWT is no substitute for the signature -> {code} (expected 401)")
+    return s
+
+
 def main() -> int:
     started = time.monotonic()
     set_wallet(USER)  # DemoPay: start every run from ₹10,00,000
@@ -697,6 +752,7 @@ def main() -> int:
         scenario_order_isolation,
         scenario_wallet_isolation,
         scenario_per_user_idempotency,
+        scenario_webhook_security,
     ):
         result = run()
         print(f"[{'PASS' if result.passed else 'FAIL'}] {result.key}) {result.title}  {result.order_id}")

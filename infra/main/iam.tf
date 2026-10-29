@@ -160,6 +160,70 @@ data "aws_iam_policy_document" "refund_payment" {
   }
 }
 
+# DemoPay (mock PSP): its own records, the wallets it debits/credits, the queue it consumes, the webhook secret.
+data "aws_iam_policy_document" "payment_provider" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["payment_provider"].json]
+
+  statement {
+    sid       = "OwnChargeAndRefundRecords"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.psp_transactions.arn]
+  }
+  statement {
+    sid       = "DebitAndCreditWallets"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.wallets.arn]
+  }
+  statement {
+    sid       = "WriteLedgerEntries"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.wallet_txns.arn]
+  }
+  statement {
+    sid       = "ConsumePaymentRequests"
+    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+    resources = [aws_sqs_queue.psp_requests.arn]
+  }
+  # The AWS-managed key aws/ssm decrypts it; its key policy already allows SSM use within the account.
+  statement {
+    sid       = "ReadWebhookSecret"
+    actions   = ["ssm:GetParameter"]
+    resources = [local.webhook_secret_arn]
+  }
+}
+
+# The webhook: verify (secret), record the outcome (payments + orders), resume the saga, refund late payments.
+data "aws_iam_policy_document" "payment_webhook" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["payment_webhook"].json]
+
+  statement {
+    sid       = "ReadWebhookSecret"
+    actions   = ["ssm:GetParameter"]
+    resources = [local.webhook_secret_arn]
+  }
+  statement {
+    sid       = "ReadAndUpdatePaymentIntents"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.payments.arn]
+  }
+  statement {
+    sid       = "RecordPaymentOnOrder"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.orders.arn]
+  }
+  # Task tokens are scoped to their state machine; this role can only answer tasks of the order saga.
+  statement {
+    sid       = "ResumeOrderSaga"
+    actions   = ["states:SendTaskSuccess", "states:SendTaskFailure"]
+    resources = [local.state_machine_arn]
+  }
+  statement {
+    sid       = "CallDemoPayRefundApi"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [local.payment_provider_arn]
+  }
+}
+
 data "aws_iam_policy_document" "wallet_api" {
   source_policy_documents = [data.aws_iam_policy_document.lambda_base["wallet_api"].json]
 
@@ -202,6 +266,8 @@ locals {
     list_products     = data.aws_iam_policy_document.list_products.json
     refund_payment    = data.aws_iam_policy_document.refund_payment.json
     wallet_api        = data.aws_iam_policy_document.wallet_api.json
+    payment_provider  = data.aws_iam_policy_document.payment_provider.json
+    payment_webhook   = data.aws_iam_policy_document.payment_webhook.json
     # The Cognito trigger touches no AWS resource: own logs + X-Ray only.
     pre_token = data.aws_iam_policy_document.lambda_base["pre_token"].json
   }

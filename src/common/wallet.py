@@ -74,8 +74,10 @@ def txn_put(
     balance_after: Decimal,
     order_id: str | None = None,
     note: str = "",
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """TransactWriteItems 'Put' for one ledger entry. The txnId sorts by time."""
+    """TransactWriteItems 'Put' for one ledger entry. The txnId sorts by time.
+    `extra` adds attributes, e.g. the paymentIntentId a DemoPay charge or refund belongs to."""
     ts = utc_now_iso()
     item = {
         "walletId": wid,
@@ -88,4 +90,5 @@ def txn_put(
     }
     if order_id:
         item["orderId"] = order_id
+    item.update(extra or {})
     return {"Put": {"TableName": table_name, "Item": item, "ConditionExpression": "attribute_not_exists(txnId)"}}

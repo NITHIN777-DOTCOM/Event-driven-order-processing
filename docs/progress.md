@@ -3,8 +3,10 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.0 — access tokens for the API (pre-token-generation trigger): DONE (2026-10-29).**
-Next: **2.1 async payment (waitForTaskToken + HMAC webhook + timeout).**
+**Upgrade step 2.1 — async payment with webhooks (waitForTaskToken + HMAC + timeout): IN PROGRESS (2026-10-29).**
+Commit A (payments + psp-transactions tables, psp-requests queue + DLQ, payment_provider "DemoPay", POST /webhooks/payment
++ payment_webhook, secret script, alarms) pushed: deployed, NOT yet wired into the state machine. Commit B next
+(request_payment + waitForTaskToken + 120 s timeout, refund via DemoPay, process_payment removed).
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)

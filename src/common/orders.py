@@ -11,6 +11,7 @@ PENDING = "PENDING"  # accepted by the API, waiting on the queue
 PROCESSING = "PROCESSING"  # Step Functions execution started
 RESERVED = "RESERVED"  # stock reserved for every item
 PAYMENT_RETRY = "PAYMENT_RETRY"  # a transient payment failure; Step Functions will retry
+PAYMENT_PENDING = "PAYMENT_PENDING"  # payment requested from the provider; the saga waits for its webhook
 PAYMENT_CAPTURED = "PAYMENT_CAPTURED"  # (simulated) payment succeeded
 PAYMENT_DECLINED = "PAYMENT_DECLINED"  # permanent payment failure; compensation follows
 OUT_OF_STOCK = "OUT_OF_STOCK"  # reservation impossible; nothing was reserved
@@ -78,11 +79,14 @@ def status_update(
     }
 
 
-def history_event(event: str, detail: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def history_event(
+    event: str, detail: str, extra: dict[str, Any] | None = None, condition: str | None = None
+) -> dict[str, Any]:
     """UpdateItem arguments that append one statusHistory entry WITHOUT changing `status`.
 
     Used for events that the tracker should show, but that aren't order states, such as failed
-    SQS delivery attempts of a poison message.
+    SQS delivery attempts of a poison message, or a refund recorded after the order already FAILED.
+    `condition` is ANDed in (e.g. "attribute_not_exists(refunded)" makes the write happen once).
     """
     now = utc_now_iso()
     names: dict[str, str] = {}
@@ -94,7 +98,7 @@ def history_event(event: str, detail: str, extra: dict[str, Any] | None = None) 
         assignments.append(f"#x{index} = :x{index}")
     args: dict[str, Any] = {
         "UpdateExpression": "SET " + ", ".join(assignments),
-        "ConditionExpression": "attribute_exists(orderId)",
+        "ConditionExpression": "attribute_exists(orderId)" + (f" AND ({condition})" if condition else ""),
         "ExpressionAttributeValues": values,
     }
     if names:

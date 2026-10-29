@@ -26,7 +26,7 @@ locals {
 }
 
 # -----------------------------------------------------------------------------
-# Alarms (8 alarms = 10 alarm metrics, exactly the 10-metric free tier)
+# Alarms (10 alarms = 12 alarm metrics: 2 over the 10-metric free tier since step 2.1, about $0.20/month)
 # -----------------------------------------------------------------------------
 resource "aws_cloudwatch_metric_alarm" "outbox_dlq_not_empty" {
   alarm_name        = "${var.project_prefix}-outbox-dlq-not-empty"
@@ -233,11 +233,82 @@ locals {
     aws_cloudwatch_metric_alarm.queue_backlog.arn,
     aws_cloudwatch_metric_alarm.outbox_pipe_failures.arn,
     aws_cloudwatch_metric_alarm.outbox_dlq_not_empty.arn,
+    aws_cloudwatch_metric_alarm.psp_dlq_not_empty.arn,
+    aws_cloudwatch_metric_alarm.webhook_signature_failures.arn,
   ]
 }
 
 # -----------------------------------------------------------------------------
-# Dashboard: 8 rows on a 24-column grid, top to bottom following the order's path
+# Async payments (step 2.1)
+# -----------------------------------------------------------------------------
+resource "aws_cloudwatch_metric_alarm" "psp_dlq_not_empty" {
+  alarm_name        = "${var.project_prefix}-psp-dlq-not-empty"
+  alarm_description = "CRITICAL: DemoPay gave up on a payment request (its callback to POST /webhooks/payment failed 5 times). Money may have moved without the saga knowing. Check the payment_webhook logs, fix the webhook, then redrive ${aws_sqs_queue.psp_dlq.name} to ${aws_sqs_queue.psp_requests.name}: the provider replays the same outcome and a late success is refunded automatically."
+
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  dimensions          = { QueueName = aws_sqs_queue.psp_dlq.name }
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}
+
+# One count per webhook request rejected for a missing, wrong or stale signature (the handler logs
+# event = "webhook_signature_rejected", never the signature itself).
+resource "aws_cloudwatch_log_metric_filter" "webhook_signature_failures" {
+  name           = "${var.project_prefix}-webhook-signature-failures"
+  log_group_name = aws_cloudwatch_log_group.lambda["payment_webhook"].name
+  pattern        = "{ $.event = \"webhook_signature_rejected\" }"
+
+  metric_transformation {
+    name      = "WebhookSignatureFailures"
+    namespace = "OrderSaga"
+    value     = "1"
+    unit      = "Count"
+  }
+}
+
+# Time from our payment request to the provider's callback (DemoPay's "processing time"), per callback.
+resource "aws_cloudwatch_log_metric_filter" "webhook_callback_delay" {
+  name           = "${var.project_prefix}-webhook-callback-delay"
+  log_group_name = aws_cloudwatch_log_group.lambda["payment_webhook"].name
+  pattern        = "{ ($.message = \"Webhook processed\") && ($.callbackDelayMs >= 0) }"
+
+  metric_transformation {
+    name      = "WebhookCallbackDelay"
+    namespace = "OrderSaga"
+    value     = "$.callbackDelayMs"
+    unit      = "Milliseconds"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "webhook_signature_failures" {
+  alarm_name        = "${var.project_prefix}-webhook-signature-failures"
+  alarm_description = "SECURITY: POST /webhooks/payment rejected requests with a missing, forged or stale HMAC signature. A few during e2e runs are expected (they test exactly this); otherwise someone may be probing the endpoint. Check sourceIp in the payment_webhook logs."
+
+  namespace           = "OrderSaga"
+  metric_name         = "WebhookSignatureFailures"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+
+  depends_on = [aws_cloudwatch_log_metric_filter.webhook_signature_failures]
+}
+
+# -----------------------------------------------------------------------------
+# Dashboard: 9 rows on a 24-column grid, top to bottom following the order's path
 # -----------------------------------------------------------------------------
 locals {
   # One Lambda graph per metric, with every function on it.
@@ -283,6 +354,73 @@ locals {
         metrics = [for table in local.dynamo_tables : ["AWS/DynamoDB", spec.metric, "TableName", table, { label = table }]]
       }
     }
+  ]
+
+  # ---- Row 8: async payments (step 2.1) ----
+  payment_log_sources = join(" | ", [for name in local.payment_log_groups : "SOURCE '${name}'"])
+  payment_widgets = [
+    {
+      type   = "log"
+      x      = 0
+      y      = 47
+      width  = 6
+      height = 6
+      properties = {
+        title  = "Payment intents: transitions by status (selected time range)"
+        region = var.region
+        view   = "bar"
+        query  = "${local.payment_log_sources} | filter ispresent(intentStatus) | stats count(*) as transitions by intentStatus"
+      }
+    },
+    {
+      type   = "metric"
+      x      = 6
+      y      = 47
+      width  = 6
+      height = 6
+      properties = {
+        title  = "Webhook latency: payment request -> provider callback (ms)"
+        region = var.region
+        view   = "timeSeries"
+        period = 60
+        metrics = [
+          ["OrderSaga", "WebhookCallbackDelay", { stat = "p50", label = "p50" }],
+          ["OrderSaga", "WebhookCallbackDelay", { stat = "p95", label = "p95" }],
+          ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.fn["payment_webhook"].function_name, { stat = "p95", label = "webhook handler p95", yAxis = "right" }],
+        ]
+      }
+    },
+    {
+      type   = "log"
+      x      = 12
+      y      = 47
+      width  = 6
+      height = 6
+      properties = {
+        title  = "Payment timeouts (no callback within 120 s)"
+        region = var.region
+        view   = "timeSeries"
+        query  = "SOURCE '${aws_cloudwatch_log_group.sfn.name}' | filter type = \"TaskTimedOut\" | stats count(*) as timeouts by bin(5m)"
+      }
+    },
+    {
+      type   = "metric"
+      x      = 18
+      y      = 47
+      width  = 6
+      height = 6
+      properties = {
+        title  = "Webhook signature failures / DemoPay DLQ (both should be 0)"
+        region = var.region
+        view   = "timeSeries"
+        period = 60
+        metrics = [
+          ["OrderSaga", "WebhookSignatureFailures", { stat = "Sum", label = "Signature failures", color = "#d62728" }],
+          ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.psp_dlq.name, { stat = "Maximum", label = "Messages in psp DLQ", color = "#ff7f0e" }],
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
   ]
 
   dashboard_widgets = concat(
@@ -603,7 +741,8 @@ locals {
           query  = "SOURCE '${aws_cloudwatch_log_group.sfn.name}' | fields @timestamp, details.cause as reason | filter type = \"ExecutionFailed\" | parse execution_arn /:(?<orderId>ORD-[0-9]+-[0-9a-f]+)$/ | display @timestamp, orderId, reason | sort @timestamp desc | limit 20"
         }
       },
-    ]
+    ],
+    local.payment_widgets
   )
 }
 

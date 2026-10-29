@@ -93,6 +93,34 @@ output "outbox_dlq_url" {
   value = aws_sqs_queue.outbox_dlq.url
 }
 
+# --- Async payments (payments.tf) --------------------------------------------------------------
+
+output "payments_table" {
+  value = aws_dynamodb_table.payments.name
+}
+
+output "psp_transactions_table" {
+  value = aws_dynamodb_table.psp_transactions.name
+}
+
+output "psp_requests_queue_url" {
+  value = aws_sqs_queue.psp_requests.url
+}
+
+output "psp_dlq_url" {
+  value = aws_sqs_queue.psp_dlq.url
+}
+
+output "webhook_url" {
+  description = "POST target for the payment provider's signed callbacks (no JWT)."
+  value       = local.webhook_url
+}
+
+output "webhook_secret_parameter" {
+  description = "SSM SecureString holding the webhook HMAC secret (created by scripts/create_webhook_secret.py; the value is never in state)."
+  value       = local.webhook_secret_parameter
+}
+
 # --- Authentication (auth.tf) ----------------------------------------------------------------
 
 output "user_pool_id" {

@@ -76,6 +76,10 @@ jobs:
       - name: Ensure test users (Cognito + SSM)
         run: python scripts/create_test_users.py
 
+      # Idempotent: the HMAC secret shared by DemoPay and POST /webhooks/payment (SSM SecureString, never printed).
+      - name: Ensure payment webhook secret (SSM)
+        run: python scripts/create_webhook_secret.py
+
       - name: Smoke test (one real order, wallet debited exactly once)
         env:
           GITHUB_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}

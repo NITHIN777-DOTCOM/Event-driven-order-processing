@@ -31,7 +31,14 @@ os.environ.update(
     WALLETS_TABLE="test-wallets",
     WALLET_TXNS_TABLE="test-wallet-txns",
     STATE_MACHINE_ARN=f"arn:aws:states:{REGION}:123456789012:stateMachine:test-workflow",
+    PAYMENTS_TABLE="test-payments",
+    PSP_TABLE="test-psp-transactions",
+    WEBHOOK_SECRET_PARAMETER="/test/psp/webhook-secret",
+    WEBHOOK_URL="https://example.invalid/webhooks/payment",
+    PROVIDER_FUNCTION="test-payment-provider",
+    PSP_QUEUE_URL="https://sqs.ap-south-1.amazonaws.com/123456789012/test-psp-requests",
 )
+WEBHOOK_SECRET = "test-webhook-secret-0123456789abcdef"
 
 PRODUCTS = [
     {"productId": "WIRELESS-MOUSE", "name": "Wireless Mouse", "price": Decimal("799.00"), "stock": 100, "reserved": 0},
@@ -94,8 +101,27 @@ def aws():
             ],
             BillingMode="PAY_PER_REQUEST",
         )
+        payments = ddb.create_table(
+            TableName="test-payments",
+            KeySchema=[{"AttributeName": "paymentIntentId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "paymentIntentId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        psp = ddb.create_table(
+            TableName="test-psp-transactions",
+            KeySchema=[{"AttributeName": "pspTxnId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pspTxnId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
         for product in PRODUCTS:
             inventory.put_item(Item=product)
+
+        boto3.client("ssm", region_name=REGION).put_parameter(
+            Name="/test/psp/webhook-secret", Value=WEBHOOK_SECRET, Type="SecureString"
+        )
+        from common import secrets as secret_cache  # a fresh cache per test (it lives in the module)
+
+        secret_cache.clear_cache()
 
         # create_order no longer uses SQS (transactional outbox), so its env var is NOT set. The queue
         # exists only so tests can assert that nothing was ever sent to it.
@@ -115,6 +141,8 @@ def aws():
             idempotency=idempotency,
             wallets=wallets,
             wallet_txns=wallet_txns,
+            payments=payments,
+            psp=psp,
             sqs=sqs,
             queue_url=queue_url,
             sfn=sfn,
@@ -211,3 +239,116 @@ def seed_order(orders_table, **overrides) -> dict:
     }
     orders_table.put_item(Item=order)
     return order
+
+
+# --- Async payments (step 2.1) ---------------------------------------------------------------------
+class FakeSfn:
+    """Stands in for the Step Functions client: records SendTaskSuccess/Failure, optionally fails with `error`."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.error: str | None = None
+
+    def send_task_success(self, **kwargs):
+        return self._call("success", kwargs)
+
+    def send_task_failure(self, **kwargs):
+        return self._call("failure", kwargs)
+
+    def _call(self, kind, kwargs):
+        self.calls.append((kind, kwargs))
+        if self.error:
+            from botocore.exceptions import ClientError
+
+            raise ClientError({"Error": {"Code": self.error, "Message": "simulated"}}, f"SendTask{kind.title()}")
+        return {}
+
+
+def seed_intent(aws, order, status="REQUESTED", token="task-token-1", **extra) -> dict:
+    """A payment intent for `order` (as request_payment would have written it)."""
+    intent = {
+        "paymentIntentId": f"PI-{order['orderId']}",
+        "orderId": order["orderId"],
+        "userId": order["userId"],
+        "walletId": order["walletId"],
+        "amount": order["totalAmount"],
+        "currency": "INR",
+        "status": status,
+        "taskToken": token,
+        "requestAttempts": 1,
+        "requestedAt": "2026-10-29T10:00:00.000Z",
+        "createdAt": "2026-10-29T10:00:00.000Z",
+        "updatedAt": "2026-10-29T10:00:00.000Z",
+        **extra,
+    }
+    aws.payments.put_item(Item=intent)
+    return intent
+
+
+def webhook_event(body, secret=WEBHOOK_SECRET, timestamp=None, headers=None, base64_body=False) -> dict:
+    """An API Gateway (payload v2) event for POST /webhooks/payment, signed with `secret` unless headers given."""
+    import base64
+
+    from common.signing import signed_headers
+
+    raw = body if isinstance(body, bytes) else json.dumps(body, separators=(",", ":")).encode()
+    if headers is None:
+        headers = signed_headers(secret, raw) if timestamp is None else signed_headers(secret, raw, now=timestamp)
+        headers = {k.lower(): v for k, v in headers.items()}  # HTTP APIs lower-case header names
+    return {
+        "headers": {"content-type": "application/json", **headers},
+        "body": base64.b64encode(raw).decode() if base64_body else raw.decode(),
+        "isBase64Encoded": base64_body,
+        "requestContext": {"requestId": "test-request", "http": {"sourceIp": "203.0.113.7"}},
+    }
+
+
+@pytest.fixture
+def payments(aws, load_handler, monkeypatch):
+    """provider + webhook wired together in-process: DemoPay's callbacks call the webhook handler directly,
+    and the webhook's refund calls go straight to DemoPay's refund function (no HTTP, no Lambda invoke)."""
+    provider = load_handler("payment_provider")
+    webhook = load_handler("payment_webhook")
+    fake_sfn = FakeSfn()
+    monkeypatch.setattr(webhook, "sfn", fake_sfn)
+    monkeypatch.setattr(webhook, "invoke_provider_refund", lambda _client, _fn, intent_id: provider.refund(intent_id))
+
+    sent: list[dict] = []
+
+    def deliver(body: bytes, secret: str) -> int:
+        from common.signing import signed_headers
+
+        headers = {k.lower(): v for k, v in signed_headers(secret, body).items()}
+        result = webhook.lambda_handler(webhook_event(body, headers=headers), None)
+        sent.append({"body": json.loads(body), "status": result["statusCode"], "result": json.loads(result["body"])})
+        return result["statusCode"]
+
+    monkeypatch.setattr(provider, "post_callback", deliver)
+    return SimpleNamespace(provider=provider, webhook=webhook, sfn=fake_sfn, callbacks=sent)
+
+
+def psp_request(order, simulate="none", **overrides) -> dict:
+    return {
+        "paymentIntentId": f"PI-{order['orderId']}",
+        "orderId": order["orderId"],
+        "walletId": order["walletId"],
+        "amount": str(order["totalAmount"]),
+        "currency": "INR",
+        "simulate": simulate,
+        **overrides,
+    }
+
+
+def sqs_event(*requests, receive_count=1) -> dict:
+    return {
+        "Records": [
+            {"messageId": f"m-{i}", "body": json.dumps(r), "attributes": {"ApproximateReceiveCount": str(receive_count)}}
+            for i, r in enumerate(requests)
+        ]
+    }
+
+
+def ledger(aws, wallet_id=USER_A) -> list[tuple[str, Decimal]]:
+    """[(type, amount)] of a wallet's ledger, oldest first."""
+    items = aws.wallet_txns.query(KeyConditionExpression="walletId = :w", ExpressionAttributeValues={":w": wallet_id})["Items"]
+    return [(t["type"], t["amount"]) for t in items]

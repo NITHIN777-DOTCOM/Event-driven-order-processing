@@ -87,6 +87,26 @@ locals {
         INVENTORY_TABLE = aws_dynamodb_table.inventory.name
       }
     }
+    payment_provider = {
+      description = "Mock payment provider DemoPay (SQS order-saga-psp-requests) - debits once per payment intent then calls our webhook with an HMAC signature - also its idempotent refund API"
+      timeout     = local.payment_provider_timeout
+      environment = {
+        PSP_TABLE                = aws_dynamodb_table.psp_transactions.name
+        WALLETS_TABLE            = aws_dynamodb_table.wallets.name
+        WALLET_TXNS_TABLE        = aws_dynamodb_table.wallet_txns.name
+        WEBHOOK_URL              = local.webhook_url
+        WEBHOOK_SECRET_PARAMETER = local.webhook_secret_parameter
+      }
+    }
+    payment_webhook = {
+      description = "POST /webhooks/payment (no JWT - HMAC-SHA256 signed) - idempotently records the payment outcome and resumes the saga (SendTaskSuccess/Failure) - refunds late payments"
+      environment = {
+        PAYMENTS_TABLE           = aws_dynamodb_table.payments.name
+        ORDERS_TABLE             = aws_dynamodb_table.orders.name
+        PROVIDER_FUNCTION        = local.payment_provider_name
+        WEBHOOK_SECRET_PARAMETER = local.webhook_secret_parameter
+      }
+    }
     pre_token = {
       description = "Cognito pre-token-generation trigger (V2_0) for order-saga-users - adds email + email_verified to ACCESS tokens"
       # Cognito waits at most 5 s for a trigger; the function makes no AWS calls and finishes in milliseconds.

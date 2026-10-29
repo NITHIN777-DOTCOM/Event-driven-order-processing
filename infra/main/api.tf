@@ -49,7 +49,7 @@ resource "aws_apigatewayv2_stage" "default" {
 
 locals {
   # route name => { route key, Lambda (key in local.lambda_functions), needs a signed-in user? }.
-  # Several routes may share one Lambda. Only the catalogue is public.
+  # Several routes may share one Lambda. No JWT on: the catalogue (public) and the payment webhook (HMAC-signed).
   api_routes = {
     create_order  = { route = "POST /orders", fn = "create_order", auth = true }
     get_order     = { route = "GET /orders/{id}", fn = "get_order", auth = true }
@@ -57,6 +57,8 @@ locals {
     list_products = { route = "GET /products", fn = "list_products", auth = false }
     wallet_get    = { route = "GET /wallet", fn = "wallet_api", auth = true }
     wallet_reset  = { route = "POST /wallet/reset", fn = "wallet_api", auth = true }
+    # Server-to-server from the payment provider: no user, so no JWT. The HMAC signature is the authentication.
+    payment_webhook = { route = "POST /webhooks/payment", fn = "payment_webhook", auth = false }
   }
   api_functions = toset([for r in local.api_routes : r.fn])
 }
