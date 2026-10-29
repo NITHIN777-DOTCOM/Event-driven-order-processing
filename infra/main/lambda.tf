@@ -18,6 +18,7 @@ locals {
         ORDERS_TABLE      = aws_dynamodb_table.orders.name
         INVENTORY_TABLE   = aws_dynamodb_table.inventory.name
         IDEMPOTENCY_TABLE = aws_dynamodb_table.idempotency.name
+        HOLDS_TABLE       = aws_dynamodb_table.holds.name
       }
     }
     get_order = {
@@ -51,10 +52,12 @@ locals {
       }
     }
     reserve_inventory = {
-      description = "Saga step - reserves stock for all items in one DynamoDB transaction and raises OutOfStock if any item is short"
+      description = "Saga step - consumes the order's checkout hold, or reserves stock for all items in one DynamoDB transaction - raises OutOfStock if any item is short"
       environment = {
         ORDERS_TABLE    = aws_dynamodb_table.orders.name
         INVENTORY_TABLE = aws_dynamodb_table.inventory.name
+        HOLDS_TABLE     = aws_dynamodb_table.holds.name
+        SCHEDULE_GROUP  = aws_scheduler_schedule_group.holds.name
       }
     }
     request_payment = {

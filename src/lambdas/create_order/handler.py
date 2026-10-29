@@ -18,6 +18,12 @@ order is never created (so no second stream INSERT), so it can never be charged 
 Keys are scoped per user (stored as "<sub>#<key>"): two users who happen to send the same key get
 their own orders, and nobody can replay (or probe) someone else's order by guessing a key.
 
+Checkout hold (step 2.2): an optional "holdId" names the caller's checkout hold for exactly these items.
+It is rejected (400) if it isn't one of the caller's holds (someone else's looks the same as a missing one), if
+its items differ from the order's, or if it was already used by another order. An EXPIRED or RELEASED hold is
+accepted: ReserveInventory then reserves the stock afresh (or fails with OutOfStock), so paying a second
+after the countdown ends doesn't lose the order.
+
 Identity: the customer is the signed-in caller (userId = JWT "sub", email = the verified "email"
 claim), never a field in the body. Any customerEmail the client sends is ignored.
 """
@@ -50,12 +56,14 @@ instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/traci
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
 INVENTORY_TABLE = os.environ["INVENTORY_TABLE"]
 IDEMPOTENCY_TABLE = os.environ["IDEMPOTENCY_TABLE"]
+HOLDS_TABLE = os.environ["HOLDS_TABLE"]
 
 # Clients are created once per Lambda container and reused across invocations.
 dynamodb = boto3.resource("dynamodb")
 orders_table = dynamodb.Table(ORDERS_TABLE)
 inventory_table = dynamodb.Table(INVENTORY_TABLE)
 idempotency_table = dynamodb.Table(IDEMPOTENCY_TABLE)
+holds_table = dynamodb.Table(HOLDS_TABLE)
 
 logger = get_logger("create_order")
 
@@ -64,6 +72,7 @@ MAX_ITEMS = 20  # well under the DynamoDB transaction limit used by reserve_inve
 MAX_QUANTITY = 50
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
+HOLD_ID_PATTERN = re.compile(r"^HOLD-\d{8}-[0-9a-f]{10}$")
 IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60  # DynamoDB TTL deletes the record after 24 h
 # Demo control: lets the presenter force each failure path of the saga.
 SIMULATE_MODES = (
@@ -99,6 +108,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         return replay(record, fingerprint, key, log)
 
     try:
+        check_hold(request, caller)
         order = build_order(request, scoped, caller)
     except BadRequest as err:
         log.warning("Rejected order request", reason=str(err))
@@ -200,11 +210,29 @@ def validate_request(body: dict[str, Any]) -> dict[str, Any]:
     if simulate not in SIMULATE_MODES:
         raise BadRequest(f"simulate must be one of: {', '.join(SIMULATE_MODES)}")
 
-    return {
-        "customerName": name.strip(),
-        "items": normalised_items,
-        "simulate": simulate,
-    }
+    hold_id = body.get("holdId")
+    if hold_id is not None and (not isinstance(hold_id, str) or not HOLD_ID_PATTERN.match(hold_id)):
+        raise BadRequest("holdId must look like HOLD-YYYYMMDD-<10 hex characters>")
+
+    normalised: dict[str, Any] = {"customerName": name.strip(), "items": normalised_items, "simulate": simulate}
+    if hold_id:
+        normalised["holdId"] = hold_id
+    return normalised
+
+
+def check_hold(request: dict[str, Any], caller: Caller) -> None:
+    """The holdId must be the caller's own hold, for exactly the order's items, and not already used."""
+    hold_id = request.get("holdId")
+    if not hold_id:
+        return
+    hold = holds_table.get_item(Key={"holdId": hold_id}, ConsistentRead=True).get("Item")
+    if not hold or hold.get("userId") != caller.user_id:
+        raise BadRequest("holdId is not one of your checkout holds")
+    held = {i["productId"]: int(i["quantity"]) for i in hold["items"]}
+    if held != {i["productId"]: i["quantity"] for i in request["items"]}:
+        raise BadRequest("The order's items don't match the checkout hold; hold the cart again")
+    if hold["status"] == "CONSUMED":
+        raise BadRequest(f"This checkout hold was already used by order {hold.get('orderId')}")
 
 
 def price_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -256,6 +284,7 @@ def build_order(request: dict[str, Any], idempotency_key: str, caller: Caller) -
         "status": PENDING,
         "statusHistory": [history_entry(PENDING, "Order received via API", now)],
         "simulate": request["simulate"],
+        **({"holdId": request["holdId"]} if request.get("holdId") else {}),
         "createdAt": now,
         "updatedAt": now,
         # GSI "gsi1": one partition per user, newest first, for GET /orders (no scan, no shared hot key).

@@ -8,6 +8,8 @@ page -> cart -> checkout (name, delivery, test scenario) -> payment (DemoPay "Pa
 payment declined, a REAL low-balance decline (the balance is set to ₹1,000 on the wallet page),
 the duplicate test, poison, and a late payment (DemoPay confirms after the 120 s timeout: the tracker shows
 "Awaiting payment confirmation", then the failure and the automatic refund). After each order, the DemoPay ledger is checked through the API.
+Checkout holds (step 2.2): every checkout must show the 10-minute countdown, the normal order must consume its hold,
+and a separate browser context with Playwright's fake clock jumps past the 10 minutes to capture "Your hold expired".
 Desktop (1440 px) and mobile (360 px) screenshots and docs/evidence/ui/README.md are written.
 """
 
@@ -92,6 +94,7 @@ class Run:
     def checkout(self, page: Page, scenario: str, shot_prefix: str | None = None) -> str:
         """Checkout step 1 (details + scenario) -> step 2 (DemoPay) -> Pay. Returns the orderId."""
         page.goto(self.base + "/checkout")
+        expect(page.get_by_test_id("hold-countdown")).to_have_text(re.compile(r"^(10:00|9:[0-5]\d)$"))  # cart held for 10 min
         page.locator("#name").fill(NAME)
         page.locator("#scenario").select_option(label=scenario)
         if shot_prefix:
@@ -171,7 +174,10 @@ class Run:
         order_id = self.checkout(page, "Normal", shot_prefix="desktop-07")
         result = self.wait_terminal(page)
         self.shot(page, "desktop-08-tracker-completed")
-        self.record("Normal", order_id, f"{result}; balance {before:,.0f} -> {self.balance():,.0f}", 1)
+        reserved = next(h["detail"] for h in self.api_json("GET", f"/orders/{order_id}")["statusHistory"] if h["status"] == "RESERVED")
+        consumed = "from checkout hold" in reserved
+        self.record("Normal", order_id, f"{result}; balance {before:,.0f} -> {self.balance():,.0f}; hold consumed: {consumed}", 1)
+        self.results[-1]["ok"] &= consumed
 
         # 2) Payment glitch: retried, debited once.
         self.add_from_listing(page, "Noise-Cancelling Wireless Headphones")
@@ -247,6 +253,33 @@ class Run:
         self.record("Poison message (to DLQ)", poison_id, self.wait_terminal(page, remaining), 0)
         self.shot(page, "desktop-17-tracker-poison-dead-lettered")
 
+    def hold_expiry(self, page: Page) -> None:
+        """Own browser context with a fake clock: jump 10 min ahead to show the expired-hold state, then "Hold again"."""
+        page.clock.install()
+        self.sign_in(page)
+        self.add_from_listing(page, "Slim Wireless Mouse")
+        page.goto(self.base + "/checkout")
+        expect(page.get_by_test_id("hold-countdown")).to_be_visible()
+        hold_id = self.api_json("GET", "/holds/current")["hold"]["holdId"]
+        page.clock.fast_forward("09:01")
+        expect(page.get_by_test_id("hold-countdown")).to_have_text(re.compile(r"^0:5\d$"))
+        self.shot(page, "desktop-07c-checkout-hold-last-minute", full_page=False)
+        page.clock.fast_forward("01:05")
+        expect(page.get_by_text("Your hold expired.")).to_be_visible()
+        self.shot(page, "desktop-07d-checkout-hold-expired", full_page=False)
+        page.get_by_role("button", name="Hold again").click()
+        expect(page.get_by_test_id("hold-countdown")).to_be_visible()
+        again = self.api_json("GET", "/holds/current")["hold"]["holdId"]
+        page.goto(self.base + "/cart")  # leaving checkout releases the hold
+        page.get_by_role("button", name="Remove").click()
+        page.wait_for_timeout(1500)
+        released = self.api_json("GET", "/holds/current")["hold"] is None
+        self.results.append({
+            "scenario": "Checkout hold: expired, held again, released on leaving", "orderId": "-",
+            "result": f"{hold_id} -> {again}; released: {released}", "debits": 0, "ok": released and again != hold_id, "expected": 0,
+        })
+        print(f"hold expiry UI: {hold_id} -> {again}, released on leaving: {released}")
+
     def mobile(self, phone: Page) -> None:
         base = self.base
         self.sign_in(phone)
@@ -307,6 +340,9 @@ def main() -> None:
         page = browser.new_context(viewport=DESKTOP).new_page()
         page.on("console", lambda msg: msg.type == "error" and run.console_errors.append(msg.text))
         run.desktop(page)
+        held = browser.new_context(viewport=DESKTOP).new_page()
+        held.on("console", lambda msg: msg.type == "error" and run.console_errors.append(msg.text))
+        run.hold_expiry(held)
         phone = browser.new_context(viewport=MOBILE, device_scale_factor=2, is_mobile=True, has_touch=True).new_page()
         phone.on("console", lambda msg: msg.type == "error" and run.console_errors.append(msg.text))
         run.mobile(phone)

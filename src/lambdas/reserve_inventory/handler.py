@@ -6,6 +6,14 @@ partly reserved.
 
 The order records exactly what it reserved (`reservedItems`). The compensation step
 (release_inventory) gives back only that, and only once.
+
+Checkout hold (step 2.2): if the order names a holdId, the hold's units are already set aside, so the step
+CONSUMES the hold instead of decrementing stock again: one transaction moves the hold ACTIVE -> CONSUMED, its
+units held -> reserved, and the order to RESERVED (common/holds.py, consume_items). If the hold is no longer
+ACTIVE (expired, released) or loses a race with its expiry at this very moment, the transaction is cancelled as a
+whole and the step falls back to the normal reservation below (which may raise OutOfStock). An ACTIVE hold that is
+already past its expiry is expired here first, so its units are available to the fresh reservation.
+Orders without a holdId take exactly the old path.
 """
 
 from __future__ import annotations
@@ -16,7 +24,8 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from common.logger import get_logger
+from common.holds import ACTIVE, EXPIRED, consume_items, delete_schedule, end_hold, is_overdue, lost_the_race
+from common.logger import StructuredLogger, get_logger
 from common.orders import OUT_OF_STOCK, RESERVED, cancellation_codes, status_update
 from common.tracing import instrument_aws_sdk
 
@@ -24,9 +33,13 @@ instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/traci
 
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
 INVENTORY_TABLE = os.environ["INVENTORY_TABLE"]
+HOLDS_TABLE = os.environ["HOLDS_TABLE"]
+SCHEDULE_GROUP = os.environ["SCHEDULE_GROUP"]
 
 dynamodb = boto3.resource("dynamodb")
 orders_table = dynamodb.Table(ORDERS_TABLE)
+holds_table = dynamodb.Table(HOLDS_TABLE)
+scheduler = boto3.client("scheduler")
 # The resource's client accepts plain Python values (no {"S": ...} type wrappers).
 ddb_client = dynamodb.meta.client
 logger = get_logger("reserve_inventory")
@@ -53,9 +66,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     elif order.get("simulate") == "out_of_stock":
         log.warning("Simulated out-of-stock")
         raise record_out_of_stock(order_id, f"Insufficient stock for: {order['items'][0]['productId']} (simulated)")
+    elif order.get("holdId") and consume_hold(order, log):
+        pass  # the checkout hold's units became this order's reservation
     else:
         try:
-            reserve_stock(order)
+            reserve_stock(order, fresh_after_hold=bool(order.get("holdId")))
         except OutOfStock as err:
             log.warning("Out of stock", reason=str(err))
             raise record_out_of_stock(order_id, str(err)) from err
@@ -78,7 +93,46 @@ def record_out_of_stock(order_id: str, reason: str) -> OutOfStock:
     return OutOfStock(reason)
 
 
-def reserve_stock(order: dict[str, Any]) -> None:
+def consume_hold(order: dict[str, Any], log: StructuredLogger) -> bool:
+    """Turn the order's ACTIVE checkout hold into its reservation. False = fall back to a fresh reservation."""
+    hold_id = order["holdId"]
+    hlog = log.bind(holdId=hold_id)
+    hold = holds_table.get_item(Key={"holdId": hold_id}, ConsistentRead=True).get("Item")
+    if not hold or hold["status"] != ACTIVE:
+        hlog.info("Checkout hold no longer active; reserving stock afresh", holdStatus=(hold or {}).get("status"))
+        return False
+    if is_overdue(hold):
+        # Past its expiry but the schedule hasn't fired yet: expire it now so its units can be reserved afresh.
+        detail = {"endReason": "expired before the order was reserved", "expiredBy": "reserve_inventory"}
+        if end_hold(ddb_client, HOLDS_TABLE, INVENTORY_TABLE, hold, EXPIRED, detail):
+            hlog.info("Hold expired", holdEvent="expired", holdStatus=EXPIRED, reason="overdue at reservation")
+        return False
+
+    reserved_items = [{"productId": i["productId"], "quantity": i["quantity"]} for i in order["items"]]
+    order_update = {
+        "Update": {
+            "TableName": ORDERS_TABLE,
+            "Key": {"orderId": order["orderId"]},
+            **status_update(
+                RESERVED,
+                f"Reserved stock for {len(reserved_items)} product(s) from checkout hold {hold_id}",
+                {"reservedItems": reserved_items, "released": False},
+            ),
+        }
+    }
+    try:
+        ddb_client.transact_write_items(TransactItems=[*consume_items(HOLDS_TABLE, INVENTORY_TABLE, hold, order["orderId"]), order_update])
+    except ClientError as err:
+        if lost_the_race(err):  # expired or released at this very moment: exactly one of us won
+            hlog.info("Hold ended while consuming it (lost the race); reserving stock afresh")
+            return False
+        raise
+    hlog.info("Checkout hold consumed", holdEvent="consumed", holdStatus="CONSUMED", items=[(i["productId"], i["quantity"]) for i in reserved_items])
+    delete_schedule(scheduler, SCHEDULE_GROUP, hold_id, hlog)
+    return True
+
+
+def reserve_stock(order: dict[str, Any], fresh_after_hold: bool = False) -> None:
     items = order["items"]
     reserved_items = [{"productId": i["productId"], "quantity": i["quantity"]} for i in items]
     transact_items: list[dict[str, Any]] = [
@@ -100,7 +154,8 @@ def reserve_stock(order: dict[str, Any]) -> None:
                 "Key": {"orderId": order["orderId"]},
                 **status_update(
                     RESERVED,
-                    f"Reserved stock for {len(items)} product(s)",
+                    f"Reserved stock for {len(items)} product(s)"
+                    + (f" (checkout hold {order['holdId']} had ended, so reserved afresh)" if fresh_after_hold else ""),
                     {"reservedItems": reserved_items, "released": False},
                 ),
             }

@@ -261,10 +261,10 @@ resource "aws_cloudwatch_metric_alarm" "hold_expiry_errors" {
   ok_actions    = local.alarm_actions
 }
 
-# One count per hold transition (holdEvent = created / released / expired; consumed is logged by reserve_inventory),
+# One count per hold transition (holdEvent = created / released / expired, and consumed from reserve_inventory),
 # as metric OrderSaga/HoldEvents with the transition as its Event dimension.
 resource "aws_cloudwatch_log_metric_filter" "hold_events" {
-  for_each = toset(["holds_api", "hold_expiry"])
+  for_each = toset(["holds_api", "hold_expiry", "reserve_inventory"])
 
   name           = "${var.project_prefix}-hold-events-${replace(each.key, "_", "-")}"
   log_group_name = aws_cloudwatch_log_group.lambda[each.key].name

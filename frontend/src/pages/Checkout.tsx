@@ -4,6 +4,8 @@
  *      signed-in Cognito user's: this page sits behind <RequireAuth> and has no email field.
  *   2. Payment: the DemoPay wallet card (balance, amount due, balance after) and "Pay ₹X"
  * Paying places the order (with an Idempotency-Key) and goes straight to the live tracker.
+ * Entering checkout holds the cart for 10 minutes (see hold.ts): a countdown banner shows the time left, the order
+ * carries the holdId so ReserveInventory consumes the hold, and leaving the page releases it.
  * The wallet is actually debited later: the saga's RequestPayment step asks DemoPay, which confirms by webhook.
  */
 import { useState, type FormEvent } from "react";
@@ -16,6 +18,7 @@ import { SCENARIOS, formatPrice } from "../format";
 import type { Simulate } from "../types";
 import { useWallet } from "../wallet";
 import { ErrorBanner, ProductImage } from "../components/ui";
+import { formatCountdown, useCheckoutHold, type HoldState } from "../hold";
 
 type Step = "details" | "payment";
 
@@ -54,6 +57,7 @@ export function Checkout() {
   const [busy, setBusy] = useState<"order" | "duplicate" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [duplicateResult, setDuplicateResult] = useState<{ requests: number; orderIds: string[] } | null>(null);
+  const checkoutHold = useCheckoutHold(cart.lines.map((line) => ({ productId: line.productId, quantity: line.quantity })));
 
   const scenario = SCENARIOS.find((s) => s.value === simulate)!;
   const detailsValid = form.name.trim().length > 0 && form.address.trim().length > 0;
@@ -79,7 +83,8 @@ export function Checkout() {
     setBusy("order");
     setError(null);
     try {
-      const result = await createOrder(buildOrder(), crypto.randomUUID());
+      const result = await createOrder({ ...buildOrder(), holdId: checkoutHold.holdId }, crypto.randomUUID());
+      checkoutHold.markConsumed(); // the order owns the hold now: leaving the page must not release it
       cart.clear();
       window.setTimeout(refresh, 4000); // the saga debits within a few seconds
       navigate(`/orders/${result.orderId}`);
@@ -89,7 +94,10 @@ export function Checkout() {
     }
   }
 
-  /** Sends the SAME request 3 times with ONE Idempotency-Key: the API must create exactly one order. */
+  /**
+   * Sends the SAME request 3 times with ONE Idempotency-Key: the API must create exactly one order.
+   * It doesn't use the checkout hold, so the hold stays available for the real "Pay".
+   */
   async function duplicateTest() {
     if (!detailsValid || busy) return;
     saveContact({ name: form.name.trim(), address: form.address.trim() });
@@ -126,6 +134,7 @@ export function Checkout() {
     <div>
       <h1 className="mb-4 text-[32px] font-semibold leading-tight">Checkout</h1>
       <StepHeader step={step} />
+      <HoldBanner state={checkoutHold.state} secondsLeft={checkoutHold.secondsLeft} onHoldAgain={checkoutHold.holdAgain} />
       {error && (
         <div className="mb-6">
           <ErrorBanner message={error} />
@@ -274,6 +283,55 @@ export function Checkout() {
           )}
         </aside>
       </div>
+    </div>
+  );
+}
+
+/** The checkout hold's state: a mm:ss countdown, "expired" with "Hold again", or why nothing could be held. */
+function HoldBanner({ state, secondsLeft, onHoldAgain }: { state: HoldState; secondsLeft: number; onHoldAgain: () => void }) {
+  const base = "mb-6 flex flex-wrap items-center justify-between gap-3 rounded-card border px-4 py-3 text-sm";
+  if (state.phase === "holding") {
+    return (
+      <div className={`${base} border-line bg-white text-muted`} role="status" data-testid="hold-banner">
+        Holding your items…
+      </div>
+    );
+  }
+  if (state.phase === "active") {
+    const ending = secondsLeft <= 60;
+    return (
+      <div className={`${base} ${ending ? "border-bad/30 bg-bad-bg" : "border-line bg-cream/60"}`} role="status" data-testid="hold-banner">
+        <span className="text-muted-strong">
+          Your items are held for you. Pay before the timer ends to keep them.
+          <span className="sr-only"> Expires at {new Date(state.hold.expiresAt).toLocaleTimeString()}.</span>
+        </span>
+        <span className={`font-mono text-lg font-semibold ${ending ? "text-bad" : "text-ink"}`} aria-hidden="true" data-testid="hold-countdown">
+          {formatCountdown(secondsLeft)}
+        </span>
+      </div>
+    );
+  }
+  if (state.phase === "expired") {
+    return (
+      <div className={`${base} border-bad/30 bg-bad-bg`} role="alert" data-testid="hold-banner">
+        <span className="text-bad">
+          <span className="font-semibold">Your hold expired.</span> The items went back on sale. You can still pay (stock is
+          checked again), or hold them again.
+        </span>
+        <button type="button" className="btn-secondary" onClick={onHoldAgain}>
+          Hold again
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className={`${base} border-line bg-retry-bg text-retry`} role="status" data-testid="hold-banner">
+      <span>
+        Couldn't hold your items: {state.message.replace(/\.?$/, ".")} You can still pay; stock is checked when the order is placed.
+      </span>
+      <button type="button" className="btn-secondary" onClick={onHoldAgain}>
+        Try again
+      </button>
     </div>
   );
 }

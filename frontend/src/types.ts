@@ -114,3 +114,16 @@ export interface CreateOrderResponse {
   idempotencyKey: string;
   duplicate: boolean;
 }
+
+/** A checkout hold (POST /holds): units set aside for this user until expiresAt (server time). */
+export type HoldStatus = "ACTIVE" | "CONSUMED" | "RELEASED" | "EXPIRED";
+
+export interface Hold {
+  holdId: string;
+  status: HoldStatus;
+  items: { productId: string; quantity: number }[];
+  expiresAt: string;
+  durationSeconds: number;
+  secondsLeft: number;
+  serverTime: string; // the server's clock when it answered: the countdown is computed against this, not Date.now()
+}

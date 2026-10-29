@@ -15,7 +15,7 @@ locals {
   holds_schedules_arn       = "arn:aws:scheduler:${var.region}:${local.account_id}:schedule/${local.holds_schedule_group}/*"
   client_ids_parameter      = "/${var.project_prefix}/auth/client-ids"
   client_ids_parameter_arn  = "arn:aws:ssm:${var.region}:${local.account_id}:parameter${local.client_ids_parameter}"
-  hold_log_groups           = [for key in ["holds_api", "hold_expiry"] : aws_cloudwatch_log_group.lambda[key].name]
+  hold_log_groups           = [for key in ["holds_api", "hold_expiry", "reserve_inventory"] : aws_cloudwatch_log_group.lambda[key].name]
 }
 
 resource "aws_dynamodb_table" "holds" {

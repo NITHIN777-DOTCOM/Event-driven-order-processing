@@ -907,8 +907,10 @@ automatically, at the expiry second, by a one-time **EventBridge Scheduler** sch
 - Expiry: schedule group `order-saga-holds`, one `at(expiresAt)` schedule per hold, `ActionAfterCompletion: DELETE`,
   invoking `order-saga-hold-expiry` through the role `order-saga-holds-scheduler-role` (may invoke that one function).
 - Inventory counters per product: `stock` (available), `held` (in ACTIVE holds), `reserved` (in orders).
-- Saga (commit B): `POST /orders` takes an optional `holdId`; ReserveInventory consumes the hold (held → reserved)
+- Saga: `POST /orders` takes an optional `holdId`; ReserveInventory consumes the hold (held → reserved)
   instead of decrementing stock again. Orders without a hold use the old path unchanged.
+- Storefront: entering checkout holds the cart; a banner counts down mm:ss; at 0 it says "Your hold expired" with
+  "Hold again"; leaving the page releases the hold; "Pay" sends the `holdId`.
 
 ### Why (the problem it solves)
 Without a hold, two shoppers can both see "1 left", both pay, and one of them gets "out of stock" after paying (or
@@ -957,9 +959,22 @@ cheap first line (rate limits per IP via WAF would be next).
 30–600 s, so the e2e suite tests real expiry without waiting 10 minutes. The client is the access token's verified
 `client_id` claim, compared with the two client ids stored in SSM by Terraform.
 
-**Countdown from server time (commit B):** the API returns `expiresAt` and `serverTime`. The browser computes the
+**Ordering with a hold.** `create_order` checks the `holdId` up front: it must be the caller's own hold (anyone
+else's, or a missing one, gives the same 400, so hold ids can't be probed), its items must match the order, and it
+must not be CONSUMED already. An EXPIRED or RELEASED hold is accepted on purpose: the order still goes ahead and
+ReserveInventory reserves afresh. ReserveInventory then tries ONE transaction: the hold `ACTIVE → CONSUMED` (with
+`expiresAtEpoch > now`), `held → reserved` per product, and the order `→ RESERVED`. If the hold had ended (or the
+transaction loses a race with the expiry), it falls back to the normal conditional decrement, which may raise
+OutOfStock if someone else took the units meanwhile; the RESERVED detail says which path ran. An overdue hold whose
+schedule hasn't fired yet is expired right there (`expiredBy: reserve_inventory`). Compensation is unchanged:
+ReleaseInventory returns `reserved → stock` either way.
+
+**Countdown from server time:** the API returns `expiresAt` and `serverTime`. The browser computes the
 offset `serverTime - Date.now()` once and counts down to `expiresAt` in server time, so a phone whose clock is 3
-minutes off still shows the right mm:ss.
+minutes off still shows the right mm:ss. Leaving checkout releases the hold (`DELETE` on unmount, and a
+`keepalive` fetch on `pagehide` for a closed tab); if that request is lost, the schedule releases it anyway.
+Creates and releases go through a small promise queue, so React StrictMode's double mount can't let an older
+create land after a newer one.
 
 ### Trade-offs / alternatives considered
 | Option | Why not (here) |

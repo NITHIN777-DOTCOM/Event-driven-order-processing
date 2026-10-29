@@ -159,13 +159,15 @@ def http_json(method: str, url: str, body: dict | None = None, headers: dict | N
 
 
 def place_order(
-    product_id: str, quantity: int, simulate: str, key: str | None = None, user: str = USER
+    product_id: str, quantity: int, simulate: str, key: str | None = None, user: str = USER, hold_id: str | None = None
 ) -> tuple[int, dict]:
     payload = {
         "customerName": "E2E Tester",
         "items": [{"productId": product_id, "quantity": quantity}],
         "simulate": simulate,
     }
+    if hold_id:
+        payload["holdId"] = hold_id
     headers = {"Idempotency-Key": key or str(uuid.uuid4()), **auth_header(user)}
     return http_json("POST", f"{API}/orders", payload, headers)
 
@@ -892,7 +894,7 @@ def poll_log_lines(log_group: str, *terms: str, since_ms: int = 0, tries: int = 
 EXPECTED_INTENT = {
     "a": "SUCCEEDED", "b": "FAILED", "c": "SUCCEEDED", "d": None, "e": "SUCCEEDED", "f": "SUCCEEDED",
     "g": None, "h": "FAILED", "i": "SUCCEEDED", "n": "SUCCEEDED",
-    "p": "TIMED_OUT", "q": "REFUNDED", "r": "SUCCEEDED", "s": "SUCCEEDED",
+    "p": "TIMED_OUT", "q": "REFUNDED", "r": "SUCCEEDED", "s": "SUCCEEDED", "y": "SUCCEEDED", "z": "SUCCEEDED",
 }
 FINAL_INTENT_STATUSES = {"SUCCEEDED", "FAILED", "TIMED_OUT", "REFUNDED"}
 
@@ -1036,7 +1038,11 @@ def finish_short_hold(s: Scenario, hold: dict, before: tuple[int, int, int]) -> 
     s.check(item.get("expiredBy") == "schedule", f"expired by: {item.get('expiredBy')} (expected the schedule, not a lazy read)")
     lag = int(item.get("expiryLagMs", -1)) / 1000
     s.check(0 <= lag <= 120, f"released {lag:.1f} s after expiresAt {item.get('expiresAt')} (EventBridge Scheduler precision)")
-    s.check(counters("DESK-MAT") == before, f"DESK-MAT (stock, held, reserved) back to {counters('DESK-MAT')} (expected {before})")
+    # Scenario l orders a DESK-MAT during this hold's window, so compare what the hold controls: its 3 units left
+    # `held` and went back to the pool (stock + reserved), whatever other orders did with the pool meanwhile.
+    after = counters("DESK-MAT")
+    s.check(after[1] == before[1] and after[0] + after[2] == before[0] + before[2],
+            f"DESK-MAT (stock, held, reserved) {before} -> {after}: the 3 held units went back (held {after[1]}, stock + reserved {after[0] + after[2]})")
     s.check(not schedule_exists(hold_id), "schedule deleted itself after firing (ActionAfterCompletion DELETE)")
     s.timeline = [
         {"timestamp": item.get("createdAt", ""), "status": "ACTIVE", "detail": f"{hold_id}: 3 x DESK-MAT held for {SHORT_HOLD_SECONDS} s"},
@@ -1091,6 +1097,61 @@ def scenario_last_unit_race() -> Scenario:
     return s
 
 
+def reserved_detail(order: dict) -> str:
+    return next((h.get("detail", "") for h in order.get("statusHistory", []) if h.get("status") == "RESERVED"), "")
+
+
+def scenario_order_consumes_hold() -> Scenario:
+    s = Scenario("y", "order with holdId -> ReserveInventory consumes the hold (held -> reserved, stock moved once); B can't use A's hold")
+    product = "LAPTOP-STAND"
+    before = counters(product)
+    code, hold = post_hold([(product, 1)])
+    hold_id = hold.get("holdId", "")
+    s.check(code == 201, f"POST /holds -> {code} {hold_id}")
+    code, body = place_order(product, 1, "none", user=LOW_BALANCE_USER, hold_id=hold_id)
+    s.check(code == 400, f"B: POST /orders with A's holdId -> {code} (expected 400: {body.get('error')})")
+    code, body = place_order(product, 1, "none", hold_id=hold_id)
+    s.check(code == 202, f"A: POST /orders with holdId -> {code} (expected 202)")
+    s.order_id = body.get("orderId")
+    order = wait_for_terminal(s.order_id)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
+    s.check(f"from checkout hold {hold_id}" in reserved_detail(order), f"RESERVED detail: {reserved_detail(order)!r}")
+    item = stored_hold(hold_id)
+    s.check(item.get("status") == "CONSUMED" and item.get("orderId") == s.order_id, f"hold {item.get('status')} by {item.get('orderId')} (expected CONSUMED by this order)")
+    s.check(counters(product) == (before[0] - 1, before[1], before[2] + 1),
+            f"{product} (stock, held, reserved) {before} -> {counters(product)} (stock -1 once, at hold time; held -> reserved)")
+    s.check(not schedule_exists(hold_id) and current_hold() is None, "expiry schedule deleted, no current hold")
+    return s
+
+
+def start_expiring_hold() -> tuple[Scenario, dict]:
+    s = Scenario("z", f"order after its {SHORT_HOLD_SECONDS} s hold expired -> reserved afresh (the hold isn't reused)")
+    code, hold = post_hold([("COMPACT-KEYBOARD", 1)], duration=SHORT_HOLD_SECONDS)
+    s.check(code == 201, f"POST /holds ({SHORT_HOLD_SECONDS} s) -> {code} {hold.get('holdId')}")
+    return s, hold
+
+
+def finish_expiring_hold(s: Scenario, hold: dict) -> Scenario:
+    hold_id = hold.get("holdId", "")
+    deadline = time.time() + SHORT_HOLD_SECONDS + 240
+    while stored_hold(hold_id).get("status") == "ACTIVE" and time.time() < deadline:
+        time.sleep(3)
+    s.check(stored_hold(hold_id).get("status") == "EXPIRED", f"hold {hold_id} {stored_hold(hold_id).get('status')} (expected EXPIRED)")
+    before = counters("COMPACT-KEYBOARD")
+    code, body = place_order("COMPACT-KEYBOARD", 1, "none", hold_id=hold_id)
+    s.check(code == 202, f"POST /orders with the expired holdId -> {code} (expected 202: the order still goes ahead)")
+    s.order_id = body.get("orderId")
+    order = wait_for_terminal(s.order_id)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
+    s.check("had ended, so reserved afresh" in reserved_detail(order), f"RESERVED detail: {reserved_detail(order)!r}")
+    s.check(counters("COMPACT-KEYBOARD") == (before[0] - 1, before[1], before[2] + 1),
+            f"COMPACT-KEYBOARD {before} -> {counters('COMPACT-KEYBOARD')} (a normal fresh reservation)")
+    s.check(stored_hold(hold_id).get("status") == "EXPIRED", "the expired hold stays EXPIRED (never revived)")
+    return s
+
+
 def scenario_stock_conservation() -> Scenario:
     s = Scenario("x", "I5 stock conservation for every product: seeded = stock + held + reserved; held = ACTIVE holds")
     active: dict[str, int] = {}
@@ -1128,6 +1189,8 @@ def main() -> int:
     print(f"  payment_timeout {timeout_order.order_id} · payment_late {late_order.order_id}")
     short_hold, short_hold_body, short_hold_before = start_short_hold()
     print(f"  {SHORT_HOLD_SECONDS} s hold {short_hold_body.get('holdId')} (user B)")
+    expiring, expiring_body = start_expiring_hold()
+    print(f"  {SHORT_HOLD_SECONDS} s hold {expiring_body.get('holdId')} (user A, ordered after it expires)")
 
     results = []
     for run in (
@@ -1148,6 +1211,7 @@ def main() -> int:
         scenario_webhook_security,
         scenario_hold_lifecycle,
         scenario_hold_ownership,
+        scenario_order_consumes_hold,
     ):
         result = run()
         print(f"[{'PASS' if result.passed else 'FAIL'}] {result.key}) {result.title}  {result.order_id}")
@@ -1169,6 +1233,7 @@ def main() -> int:
     results.append(finish_late(late_order, "PODCAST-MIC", late_before))
     check_signature_metric(next(r for r in results if r.key == "s"))
     results.append(finish_short_hold(short_hold, short_hold_body, short_hold_before))
+    results.append(finish_expiring_hold(expiring, expiring_body))
     results.append(scenario_last_unit_race())
     results.append(scenario_stock_conservation())
 

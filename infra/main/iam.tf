@@ -36,6 +36,11 @@ data "aws_iam_policy_document" "create_order" {
     actions   = ["dynamodb:GetItem"]
     resources = [aws_dynamodb_table.inventory.arn, aws_dynamodb_table.idempotency.arn, aws_dynamodb_table.orders.arn]
   }
+  statement {
+    sid       = "CheckTheOrdersCheckoutHold"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.holds.arn]
+  }
   # TransactWriteItems is authorised per item: PutItem on the idempotency table and on the orders table.
   statement {
     sid       = "WriteOrderAndIdempotencyKey"
@@ -116,6 +121,17 @@ data "aws_iam_policy_document" "reserve_inventory" {
     sid       = "ReserveStockAndMarkOrder"
     actions   = ["dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.inventory.arn, aws_dynamodb_table.orders.arn]
+  }
+  # Step 2.2: consume the order's checkout hold (hold -> CONSUMED, pointer deleted) or expire an overdue one.
+  statement {
+    sid       = "ConsumeCheckoutHold"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]
+    resources = [aws_dynamodb_table.holds.arn]
+  }
+  statement {
+    sid       = "DeleteTheConsumedHoldsSchedule"
+    actions   = ["scheduler:DeleteSchedule"]
+    resources = [local.holds_schedules_arn]
   }
 }
 

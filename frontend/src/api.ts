@@ -4,7 +4,7 @@
  * Every request carries the signed-in user's Cognito ID token (when there is one) as "Authorization".
  */
 import { getAccessToken, type AuthConfig } from "./auth";
-import type { CreateOrderResponse, Order, OrderSummary, Product, Simulate, Wallet } from "./types";
+import type { CreateOrderResponse, Hold, Order, OrderSummary, Product, Simulate, Wallet } from "./types";
 
 export interface AppConfig {
   apiUrl: string;
@@ -67,6 +67,7 @@ export interface NewOrder {
   customerName: string;
   items: { productId: string; quantity: number }[];
   simulate: Simulate;
+  holdId?: string; // the checkout hold to consume (the saga reserves afresh if it has ended)
 }
 
 /** POST /orders. Re-using an idempotencyKey returns the original order (HTTP 200, duplicate: true). */
@@ -77,6 +78,25 @@ export async function createOrder(order: NewOrder, idempotencyKey: string): Prom
     headers: { "Idempotency-Key": idempotencyKey },
   });
   return body;
+}
+
+export type HoldItems = { productId: string; quantity: number }[];
+
+/** POST /holds: set the cart aside for 10 minutes. Replaces the user's previous hold. 409 = a product is short. */
+export async function createHold(items: HoldItems): Promise<Hold> {
+  return (await request<Hold>("/holds", { method: "POST", body: JSON.stringify({ items }) })).body;
+}
+
+/**
+ * DELETE /holds/{holdId}: give the units back. `keepalive` lets the request finish while the page is closing,
+ * which is why the token is passed in (there is no time to await a token refresh in "pagehide").
+ */
+export function releaseHold(holdId: string, token: string | undefined): void {
+  void fetch(`${apiUrl}/holds/${encodeURIComponent(holdId)}`, {
+    method: "DELETE",
+    keepalive: true,
+    headers: token ? { Authorization: token } : {},
+  }).catch(() => undefined); // best effort: the hold expires on its own anyway
 }
 
 /** DemoPay: the signed-in user's balance + 20 most recent transactions (₹10,00,000 on first use). */
