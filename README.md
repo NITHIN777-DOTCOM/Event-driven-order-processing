@@ -6,8 +6,8 @@
 
 **Live demo:** https://dg38gx94mao9n.cloudfront.net. Browse freely; **Sign in** (top right) to check out. Use
 *Create an account* on the sign-in page: any email you can read works, and Cognito emails you a 6-digit code.
-At checkout, open **Test scenario** and try *Payment glitch*, *Payment declined* or *Poison message* to watch each
-failure path live. Payments use **DemoPay**, a demo wallet (₹10,00,000 per account). It isn't real money.
+At checkout, open **Test scenario** and try *Payment glitch*, *Payment declined*, *Late payment (auto-refund)* or
+*Poison message* to watch each failure path live. Payments use **DemoPay**, a demo wallet (₹10,00,000 per account). It isn't real money.
 
 ![Order tracker: a "Payment glitch" order is retried with backoff, then completes](docs/images/order-saga-demo.gif)
 
@@ -19,6 +19,11 @@ failure path live. Payments use **DemoPay**, a demo wallet (₹10,00,000 per acc
 
 - **Saga with real compensation.** If payment or completion fails, the workflow undoes its own steps in reverse order: it **refunds** the wallet, **releases** the reserved stock, marks the order FAILED with a readable reason, and sends a notification via SNS.
 - **Idempotent at three layers.** An `Idempotency-Key` on `POST /orders` stops duplicate orders. The execution name equals the `orderId`, so a duplicate SQS delivery can't start a second saga. Payment and refund are conditional on `paymentId` / `refunded`, so a customer is **never charged or refunded twice**.
+- **Asynchronous payments, like a real gateway.** The saga *requests* a payment and **pauses** (`waitForTaskToken`,
+  120 s timeout) until the mock provider **DemoPay** confirms through an **HMAC-signed webhook** (raw-body signature,
+  ±5 min replay window, constant-time compare). The task token never leaves our system. A payment that arrives after
+  the timeout is **refunded automatically**, and four money invariants (one net debit per completed order, zero net
+  charge per failed one, no double charge or refund, every intent final) are checked for every e2e scenario.
 - **Atomic money movement.** A payment is one DynamoDB `TransactWriteItems` across three tables (wallet balance, ledger entry, order), conditional on enough balance and no prior payment. A low balance is a **real** decline, not a simulated one.
 - **Retries where they help, not where they hurt.** Transient payment errors are retried with exponential backoff (2 s → 4 s → 8 s). A permanent decline goes straight to compensation.
 - **Transactional outbox, no dual write.** `create_order` makes exactly one write: the DynamoDB transaction. The new order row *is* the outbox record. A **DynamoDB stream → EventBridge Pipe** (INSERT-only filter) delivers it to SQS, so a crash right after the write can't lose the order.
@@ -28,7 +33,7 @@ failure path live. Payments use **DemoPay**, a demo wallet (₹10,00,000 per acc
   verified claims** (`sub`). Orders and wallets are keyed by the user; someone else's order is a **404**, not a 403; idempotency keys
   are scoped per user.
 - **Poison messages are isolated.** After 3 failed receives, SQS moves the message to a dead-letter queue, and a CloudWatch alarm emails the operator.
-- **100% infrastructure as code.** 106 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
+- **100% infrastructure as code.** 133 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
 - **CI/CD with no stored keys.** GitHub Actions assumes AWS roles through **OIDC**, scoped to this repo's `main` branch (deploy) or its pull requests (read-only plan). Every merge is applied, published and smoke-tested.
 - **Close to $0 when idle.** Everything is pay-per-use: Lambda, Step Functions, on-demand DynamoDB, SQS, SNS, CloudFront and S3. There's no VPC, NAT gateway or server. The one fixed cost is the outbox pipe polling the stream, estimated at about $1.6/month (an estimate from AWS's documented polling rate, not measured; see [the evidence](docs/evidence/upgrade-1.1-outbox.md)). A $5/month budget alert is the backstop.
 
@@ -53,12 +58,21 @@ flowchart LR
   q -->|"batches of 10"| sw["start_workflow"]
   q -.->|"after 3 failed receives"| dlq["SQS DLQ"]
   sw -->|"StartExecution<br/>name = orderId"| sfn["Step Functions<br/>order-saga-workflow"]
-  sfn --> lam["reserve · payment<br/>refund · release Lambdas"]
+  sfn --> lam["reserve · request_payment<br/>refund · release Lambdas"]
   lam --> ddb
+  lam -->|"payment request<br/>(no task token)"| pspq["SQS<br/>psp-requests"]
+  pspq --> psp["DemoPay<br/>payment_provider<br/>(mock PSP)"]
+  pspq -.->|"after 5 failed receives"| pspdlq["SQS psp DLQ"]
+  psp -->|"POST /webhooks/payment<br/>HMAC-signed, no JWT"| wh["payment_webhook"]
+  wh -->|"SendTaskSuccess / Failure"| sfn
+  wh --> ddb
+  ssm[("SSM SecureString<br/>webhook secret")] -.-> psp
+  ssm -.-> wh
   sfn -->|"direct UpdateItem"| ddb
   sfn -->|"direct Publish"| sns["SNS<br/>notifications"] --> mail["Customer email"]
   dlq -.-> cw["CloudWatch alarms"] -.-> ops["SNS ops-alerts"]
   odlq -.-> cw
+  pspdlq -.-> cw
 ```
 
 **Life of an order**
@@ -71,7 +85,12 @@ flowchart LR
 2. **Transactional outbox:** the new order row appears on the table's **DynamoDB stream**. The **EventBridge Pipe** `order-saga-orders-outbox` forwards only INSERTs with status PENDING, as `{"orderId": ...}`, onto **SQS**, which absorbs spikes and decouples the API from the workflow. Delivery is at least once; duplicates are harmless (next step).
 3. `start_workflow` consumes batches of 10 messages. It marks the order PROCESSING and starts a **Step Functions** execution named after the order (`ReportBatchItemFailures`: only failed messages are retried).
 4. **ReserveInventory** decrements stock for every item in one DynamoDB transaction, so stock is never partly reserved.
-5. **ProcessPayment** debits the DemoPay wallet: balance, ledger entry and order are updated atomically, exactly once.
+5. **RequestPayment** (`waitForTaskToken`) creates payment intent `PI-<orderId>`, stores the task token on it, marks
+   the order PAYMENT_PENDING ("Awaiting payment confirmation") and queues the request to **DemoPay**. The saga pauses,
+   at no cost. DemoPay debits the wallet once per intent (one transaction: balance, ledger, provider record) and
+   POSTs a signed callback to `POST /webhooks/payment`. `payment_webhook` verifies the HMAC, moves the intent to
+   SUCCEEDED and the order to PAYMENT_CAPTURED, and calls `SendTaskSuccess` (or `SendTaskFailure("PaymentDeclined")`).
+   No callback within 120 s → `MarkPaymentTimedOut` → compensation → FAILED "payment timeout".
 6. **MarkOrderCompleted** and **NotifyCustomer** call DynamoDB and SNS **directly from the state machine**, with no Lambda in between.
 7. Every step appends `{status, timestamp, detail}` to the order's `statusHistory`. The tracker polls `GET /orders/{id}` every 1.5 s and turns that history into the live feed.
 
@@ -82,11 +101,13 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
   [*] --> ReserveInventory
-  ReserveInventory --> ProcessPayment
+  ReserveInventory --> RequestPayment
   ReserveInventory --> DescribeFailure: OutOfStock or other error, nothing to undo
-  ProcessPayment --> ProcessPayment: PaymentTransientError, retry 2s 4s 8s
-  ProcessPayment --> MarkOrderCompleted
-  ProcessPayment --> RefundPayment: PaymentDeclined or retries exhausted
+  RequestPayment --> RequestPayment: PaymentTransientError, retry 2s 4s 8s
+  RequestPayment --> MarkOrderCompleted: webhook SendTaskSuccess
+  RequestPayment --> RefundPayment: PaymentDeclined (webhook) or retries exhausted
+  RequestPayment --> MarkPaymentTimedOut: States.Timeout, no callback in 120 s
+  MarkPaymentTimedOut --> RefundPayment
   MarkOrderCompleted --> NotifyCustomer
   MarkOrderCompleted --> RefundPayment: error after payment
   NotifyCustomer --> OrderCompleted
@@ -99,7 +120,7 @@ stateDiagram-v2
   OrderFailed --> [*]
 ```
 
-Compensation runs in **reverse order**: refund first, then release stock. Both steps are idempotent (`RefundPayment` is a no-op if nothing was charged), so retries are always safe. `DescribeFailure` is a JSONata Pass state that turns a Lambda error into a readable reason such as *"PaymentDeclined: Insufficient wallet balance: ₹1,000 available, ₹5,999 needed"*. Definition: [`statemachine/order_saga.asl.json`](statemachine/order_saga.asl.json).
+Compensation runs in **reverse order**: refund first, then release stock. Both steps are idempotent (`RefundPayment` goes through DemoPay's idempotent refund and is a no-op if nothing was charged), so retries are always safe. `DescribeFailure` is a JSONata Pass state that turns a Lambda error into a readable reason such as *"PaymentDeclined: Insufficient wallet balance: ₹1,000 available, ₹5,999 needed"*. Definition: [`statemachine/order_saga.asl.json`](statemachine/order_saga.asl.json).
 
 ---
 
@@ -108,8 +129,12 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | Failure | What happens | Mechanism |
 |---|---|---|
 | Payment glitch | Retried twice, then succeeds; wallet debited **once** | Step Functions `Retry` on `PaymentTransientError`: up to 3 retries, 2 s interval, backoff ×2 |
-| Card declined | No money moves; stock released; order FAILED; email sent | `Catch PaymentDeclined` → RefundPayment (no-op) → ReleaseInventory |
-| Insufficient wallet balance | Real decline; nothing debited; stock released | Transaction condition `balance >= total`, then the same compensation path |
+| Card declined | No money moves; stock released; order FAILED; email sent | DemoPay's declined webhook → `SendTaskFailure("PaymentDeclined")` → RefundPayment (no-op) → ReleaseInventory |
+| Insufficient wallet balance | Real decline; nothing debited; stock released | DemoPay checks `balance >= total` in its transaction, then the same decline path |
+| Provider never answers | After 120 s the order FAILS with "payment timeout"; nothing charged; stock released | `TimeoutSeconds: 120` on the `waitForTaskToken` task → `States.Timeout` → intent TIMED_OUT (conditional) → compensation |
+| Payment arrives after the timeout | Refunded automatically; the order stays FAILED; net charge 0 | The webhook finds the intent TIMED_OUT and calls DemoPay's idempotent refund (intent → REFUNDED) |
+| Duplicate or forged webhook | A duplicate is a 200 no-op; a bad, stale or missing signature is a 401, logged and alarmed | Intent state machine with conditional writes; HMAC-SHA256 over `timestamp.body`, ±5 min; `order-saga-webhook-signature-failures` alarm |
+| Payment provider down | Requests retried by SQS (5 receives), then dead-lettered; ops alarm emails | `order-saga-psp-requests` → `order-saga-psp-dlq`; alarm `order-saga-psp-dlq-not-empty` |
 | Out of stock | Order FAILED; no compensation needed | Reservation is one all-or-nothing transaction; `Catch OutOfStock` skips release |
 | Duplicate click or retry | Same order returned (`200`, `duplicate: true`); no second order | `Idempotency-Key` record written in the same transaction as the order (24 h TTL) |
 | Duplicate SQS delivery | Ignored; exactly one execution | Conditional PENDING → PROCESSING update; execution name = `orderId` |

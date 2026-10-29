@@ -6,12 +6,13 @@ After each order the DemoPay ledger was checked through `GET /wallet`.
 
 | Scenario | orderId | Tracker result | Wallet DEBITs (expected) |
 |---|---|---|---|
-| Normal | `ORD-20261029-756f2710` | Order completed; balance 1,000,000 -> 996,501 | 1 (1) ✓ |
-| Payment glitch (retries) | `ORD-20261029-dddd6be7` | Order completed | 1 (1) ✓ |
-| Payment declined | `ORD-20261029-a41e1d12` | Order failed | 0 (0) ✓ |
-| Low balance (real decline) | `ORD-20261029-6e23f4fa` | Order failed | 0 (0) ✓ |
-| Duplicate test (3 requests) | `ORD-20261029-811bf7bf` | Order completed · 1 order | 1 (1) ✓ |
-| Poison message (to DLQ) | `ORD-20261029-fa277eef` | Stuck in the dead-letter queue | 0 (0) ✓ |
+| Normal | `ORD-20261029-99c3557f` | Order completed; balance 1,000,000 -> 996,501 | 1 (1) ✓ |
+| Payment glitch (retries) | `ORD-20261029-92eee1a7` | Order completed | 1 (1) ✓ |
+| Payment declined | `ORD-20261029-9ebc95b0` | Order failed | 0 (0) ✓ |
+| Low balance (real decline) | `ORD-20261029-bec1403b` | Order failed | 0 (0) ✓ |
+| Duplicate test (3 requests) | `ORD-20261029-75080e1a` | Order completed · 1 order | 1 (1) ✓ |
+| Late payment (auto-refund) | `ORD-20261029-5d34022a` | Order failed; refund row shown: True | 1 (1) ✓ |
+| Poison message (to DLQ) | `ORD-20261029-002670fe` | Stuck in the dead-letter queue | 0 (0) ✓ |
 
 Browser console errors during the run: 0
 
@@ -52,6 +53,14 @@ Browser console errors during the run: 0
 ### desktop-07-checkout-payment
 
 ![desktop-07-checkout-payment](desktop-07-checkout-payment.png)
+
+### desktop-07a-tracker-awaiting-payment
+
+![desktop-07a-tracker-awaiting-payment](desktop-07a-tracker-awaiting-payment.png)
+
+### desktop-07b-tracker-late-payment-refunded
+
+![desktop-07b-tracker-late-payment-refunded](desktop-07b-tracker-late-payment-refunded.png)
 
 ### desktop-08-tracker-completed
 

@@ -6,7 +6,8 @@
 A person's path, end to end: browse -> sign in (Cognito managed login, as test user A) -> product
 page -> cart -> checkout (name, delivery, test scenario) -> payment (DemoPay "Pay ₹X") -> live tracker. Scenarios: normal, payment glitch,
 payment declined, a REAL low-balance decline (the balance is set to ₹1,000 on the wallet page),
-the duplicate test and poison. After each order, the DemoPay ledger is checked through the API.
+the duplicate test, poison, and a late payment (DemoPay confirms after the 120 s timeout: the tracker shows
+"Awaiting payment confirmation", then the failure and the automatic refund). After each order, the DemoPay ledger is checked through the API.
 Desktop (1440 px) and mobile (360 px) screenshots and docs/evidence/ui/README.md are written.
 """
 
@@ -140,6 +141,13 @@ class Run:
         page.wait_for_timeout(23_000)  # past 20 s, so the SQS-retrying hint row shows
         self.shot(page, "desktop-12-tracker-poison-retrying")
 
+        # Late payment (step 2.1), also placed early: the saga waits for DemoPay's webhook, times out at 120 s,
+        # and the payment that arrives at ~150 s is refunded automatically. Net charge 0.
+        self.add_from_listing(page, "Dynamic Podcast Microphone")
+        late_id = self.checkout(page, "Late payment (auto-refund)")
+        expect(page.get_by_text("Awaiting payment confirmation").first).to_be_visible(timeout=20_000)
+        self.shot(page, "desktop-07a-tracker-awaiting-payment")
+
         # Browse: category, search, product page, cart page.
         page.goto(base + "/c/keyboards")
         expect(page.get_by_text(re.compile(r"1–3 of 3 results"))).to_be_visible()
@@ -219,7 +227,21 @@ class Run:
         expect(page.locator("tbody tr").first).to_contain_text("ORD-")
         self.shot(page, "desktop-16-orders")
 
-        # 6) Back to the poison order: wait until its third failed delivery dead-letters it.
+        # 6) Back to the late payment: FAILED at the 120 s timeout, then the refund row once DemoPay's late
+        # callback arrives (the tracker stops polling at FAILED, so reload until the refund shows).
+        page.goto(f"{base}/orders/{late_id}")
+        result = self.wait_terminal(page, 200)
+        for _ in range(30):
+            if page.get_by_text(re.compile(r"refunded", re.I)).count():
+                break
+            page.wait_for_timeout(5_000)
+            page.reload()
+            self.wait_terminal(page, 30)
+        refunded = page.get_by_text(re.compile(r"refunded", re.I)).count() > 0
+        self.record("Late payment (auto-refund)", late_id, f"{result}; refund row shown: {refunded}", 1)
+        self.shot(page, "desktop-07b-tracker-late-payment-refunded")
+
+        # 7) Back to the poison order: wait until its third failed delivery dead-letters it.
         page.goto(f"{base}/orders/{poison_id}")
         remaining = max(30, 300 - int(time.monotonic() - poison_started))
         self.record("Poison message (to DLQ)", poison_id, self.wait_terminal(page, remaining), 0)

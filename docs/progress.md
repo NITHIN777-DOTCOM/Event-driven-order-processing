@@ -3,12 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.1 — async payment with webhooks (waitForTaskToken + HMAC + timeout): IN PROGRESS (2026-10-29).**
-Commit A (payments + psp-transactions tables, psp-requests queue + DLQ, payment_provider "DemoPay", POST /webhooks/payment
-+ payment_webhook, secret script, alarms) deployed green (fixes 59bcbaa, 2d926ed: DynamoDB tag value without
-parentheses, then terraform fmt); live webhook check passed (unsigned/forged/stale/future -> 401, unknown intent -> 404).
-Commit B (request_payment + waitForTaskToken + 120 s timeout, refund via DemoPay, process_payment removed, its log group
-kept as retired) pushed next; then live e2e + capture_ui, evidence, README, report.
+**Upgrade step 2.1 — async payment with webhooks: DONE (2026-10-29). Next: step 2.2 (reservation holds with TTL).**
+(Step-by-step notes for 2.1 are in the "Step 2.1" section below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)
@@ -69,6 +65,21 @@ kept as retired) pushed next; then live e2e + capture_ui, evidence, README, repo
   11 changed), live e2e 14/14 (k adds ID token -> 401 x3), UI 6/6, unit 105 / 94.5%.
 - Evidence: docs/evidence/upgrade-2.0-access-tokens.md, report docs/evidence/upgrade-2.0-report.md.
 - Orders DLQ grows by one poison order per e2e/UI run (4 more today). Do NOT purge or redrive.
+
+### Step 2.1 (async payment: waitForTaskToken + HMAC webhook + 120 s timeout)
+- A `b2cdc15` (+ `59bcbaa`, `2d926ed`): tables order-saga-payments / order-saga-psp-transactions, queue
+  order-saga-psp-requests (+ DLQ, maxReceiveCount 5), payment_provider "DemoPay", POST /webhooks/payment (no JWT) +
+  payment_webhook, SSM SecureString /order-saga/psp/webhook-secret (scripts/create_webhook_secret.py, run by Deploy),
+  alarms psp-dlq-not-empty + webhook-signature-failures (10 alarms), dashboard row 8. Live: 401 x4, unknown intent 404.
+- B `47fac57` (+ `108e8a9`): RequestPayment (waitForTaskToken, TimeoutSeconds 120) -> MarkPaymentTimedOut on
+  States.Timeout; refund via DemoPay; process_payment removed (log group kept: `retired_log_groups` in lambda.tf).
+- B's first apply failed on the SFN Description tag (parentheses). The old function was already gone: 32 orders in
+  that window failed safely (net 0, stock released). Any tag value: letters, digits, spaces, _ . : = + - @ only.
+- Live e2e 19/19 (p timeout, q late refund, r duplicate webhook, s bad signature; I1-I4 checked per order);
+  capture_ui 7/7, 0 console errors. Unit tests 166, 94%. Evidence: docs/evidence/upgrade-2.1-async-payment.md,
+  report: docs/evidence/upgrade-2.1-report.md.
+- Known gap (interview-prep §11): no reconciliation job for intents stuck REQUESTED if a saga dies outside its timeout.
+- Orders DLQ: 2 more poison orders today (e2e + UI run). Do NOT purge or redrive.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
@@ -150,12 +161,13 @@ kept as retired) pushed next; then live e2e + capture_ui, evidence, README, repo
   Evidence: docs/evidence/phase5-cicd.md.
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
-## Next (upgrade step 2.1)
-- Async payment: ProcessPayment waits with `waitForTaskToken`; an HMAC-signed webhook completes it; a timeout fails it.
+## Next (upgrade step 2.2)
+- Reservation holds with TTL: reserved stock expires if the saga never finishes (pairs with the 120 s payment timeout).
 
 ## Known limitations / ideas (good viva points)
 - (Fixed in 1.2) Wallets/orders are keyed by the Cognito `sub`; the API has a JWT authorizer.
-- No Content-Security-Policy header yet (tokens are in sessionStorage). The ID token is the API credential.
+- No Content-Security-Policy header yet (tokens are in sessionStorage). (Fixed in 2.0) The API takes access tokens only.
+- No reconciliation job for payment intents left REQUESTED if a saga dies outside its own timeout (2.1).
 - Cognito's default email sender is limited to a few dozen emails/day (sign-up codes).
 - (Fixed in 1.1) The create_order dual write is gone: transactional outbox via DynamoDB Streams -> Pipes -> SQS.
 - No sweeper for orders stuck in PENDING if delivery fails beyond the stream's 24 h retention.

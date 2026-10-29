@@ -792,7 +792,18 @@ signature), which feeds the `WebhookSignatureFailures` metric and alarm. A valid
   minutes to hours (UPI collect: up to 10 minutes) plus a reservation TTL (step 2.2).
 
 ### Numbers
-To be filled from `docs/evidence/upgrade-2.1-async-payment.md` after commit B.
+From `docs/evidence/upgrade-2.1-async-payment.md` (live, 2026-10-29):
+- Live e2e **19/19**, with I1–I4 asserted for every order (4 new scenarios: timeout, late, duplicate, bad signature).
+- Request → webhook: **p50 5.2 s, max 11.5 s** over 15 payments (includes DemoPay's simulated 2–5 s delay). A normal
+  order now takes **6.1 s** end to end, up from **0.56 s** with the synchronous charge: that is the cost of modelling
+  a real gateway, and the saga pays nothing while it waits.
+- Timeout fired at **120.0 s**; the late payment arrived at **150.2 s** and was refunded at once (ledger DEBIT +
+  CREDIT, net ₹0, intent REFUNDED).
+- Commit A: unsigned / forged / stale / future requests → **401** ×4, unknown intent with a valid signature → **404**.
+- Rollout probe: **32** orders in the half-applied window, all on the old definition, all **net ₹0**; 2 after the
+  switch, both COMPLETED.
+- Unit tests **166**, coverage **94%**. Extra cost: 2 alarms (~$0.20/month), SQS polling for the new queue (within
+  or near the free tier); waiting in Step Functions is free.
 
 ### Likely interview questions
 1. *What if the webhook is down?* DemoPay's request message isn't deleted, so SQS redelivers it (5 receives, about 10
@@ -818,8 +829,11 @@ To be filled from `docs/evidence/upgrade-2.1-async-payment.md` after commit B.
 **Rollout (two commits):** A deployed the provider, webhook, tables, queues, secret and alarms *next to* the old
 synchronous `process_payment`, and the live e2e proved the webhook rejects unsigned, forged, stale and future-dated
 calls before anything depended on it. B then switched the state machine to `RequestPayment` and removed
-`process_payment`. Terraform updates the state machine before it deletes the old function, and executions keep the
-definition they started with, so orders in flight during the deploy still finish on the old path. The old function's
+`process_payment`. Executions keep the definition they started with (proven live: 19 orders placed before the switch
+all ran the old definition, even those finishing after it; 2 placed after ran `RequestPayment` and completed). In a
+clean apply Terraform switches the state machine before deleting the old function; when the first apply failed
+half-way (see the debugging story) the old-definition orders lost their function and **failed safely**: compensation
+ran, every one of them ended with zero net charge and its stock released. The old function's
 log group stays under Terraform (`retired_log_groups`) so removing a function never deletes its logs; the 7-day
 retention ages them out.
 
