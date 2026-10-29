@@ -47,9 +47,9 @@ resource "aws_dynamodb_table" "payments" {
     enabled = false
   }
 
+  # Tag values allow only letters, digits, spaces and _ . : / = + - @ (no parentheses: found in the step 2.1 deploy).
   tags = {
     Name        = "${var.project_prefix}-payments"
-    # Tag values allow only letters, digits, spaces and _ . : / = + - @ (no parentheses: found in the step 2.1 deploy).
     Description = "Payment intents - one per order - id PI-orderId - REQUESTED then SUCCEEDED or FAILED or TIMED_OUT then maybe REFUNDED"
   }
 }
