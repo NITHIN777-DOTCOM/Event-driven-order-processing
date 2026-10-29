@@ -74,6 +74,8 @@ resource "aws_apigatewayv2_integration" "lambda" {
 # Validates the Cognito JWT on protected routes BEFORE any Lambda runs (no Lambda authorizer to write or pay for):
 # signature (the pool's public keys, fetched and cached by API Gateway), issuer = our user pool, audience = one of
 # our two app clients, and expiry. A missing, tampered or expired token gets 401 from API Gateway itself.
+# "Audience" works for both Cognito token types: an ID token names its app client in "aud", an access token
+# in "client_id" (it has no "aud"), and HTTP API JWT authorizers check whichever is present against this list.
 # The Lambdas then read the caller only from the verified claims (src/common/auth.py).
 resource "aws_apigatewayv2_authorizer" "cognito" {
   api_id           = aws_apigatewayv2_api.orders.id

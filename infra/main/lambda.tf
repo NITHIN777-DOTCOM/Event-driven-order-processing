@@ -87,6 +87,12 @@ locals {
         INVENTORY_TABLE = aws_dynamodb_table.inventory.name
       }
     }
+    pre_token = {
+      description = "Cognito pre-token-generation trigger (V2_0) for order-saga-users - adds email + email_verified to ACCESS tokens"
+      # Cognito waits at most 5 s for a trigger; the function makes no AWS calls and finishes in milliseconds.
+      timeout     = 5
+      environment = {} # no tables, no topics: it only reads the event Cognito sends
+    }
   }
 
   # order-saga-create-order, order-saga-get-order, ...
@@ -138,8 +144,12 @@ resource "aws_lambda_function" "fn" {
   timeout          = try(each.value.timeout, local.default_lambda_timeout)
   memory_size      = 256
 
-  environment {
-    variables = each.value.environment
+  # Omitted when a function needs no variables (an empty block shows up as a change on every plan).
+  dynamic "environment" {
+    for_each = length(each.value.environment) > 0 ? [each.value.environment] : []
+    content {
+      variables = environment.value
+    }
   }
 
   tracing_config {

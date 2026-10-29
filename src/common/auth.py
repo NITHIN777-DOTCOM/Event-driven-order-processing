@@ -7,12 +7,19 @@ runs. It then passes the claims in event.requestContext.authorizer.jwt.claims (a
 Identity never comes from the request body, query string or headers: a client can put anything there.
   userId = the "sub" claim  (Cognito's immutable user id; an email can change or be reused, sub can't)
   email  = the "email" claim, accepted only if "email_verified" is "true"
+
+Which token? (step 2.0) The API is meant to be called with the ACCESS token: that is the token OAuth issues
+for calling APIs. The ID token is for the client app (who signed in). Cognito's access tokens don't carry the
+email, so the pre-token-generation trigger (src/lambdas/pre_token) adds email + email_verified to them.
+During the rollout both token types are accepted; the "token_use" claim says which one arrived.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
+ACCEPTED_TOKEN_USES = ("access", "id")  # transitional: commit B narrows this to access tokens only
 
 
 class Unauthorized(Exception):
@@ -40,10 +47,12 @@ def caller_from(event: dict[str, Any]) -> Caller:
     if not isinstance(sub, str) or not sub:
         # Only reachable if a route were deployed without the authorizer: fail closed.
         raise Unauthorized("Sign in required")
+    if claims.get("token_use") not in ACCEPTED_TOKEN_USES:
+        raise Unauthorized("Send a Cognito access token in the Authorization header")
     email = claims.get("email")
     if not isinstance(email, str) or not email:
-        # An access token has no email claim; the API expects the ID token.
-        raise Forbidden("Send the ID token: it must carry a verified email")
+        # The pre-token trigger adds the email to every access token of a user who has one.
+        raise Forbidden("The token carries no email address")
     if str(claims.get("email_verified", "")).lower() != "true":
         raise Forbidden("Verify your email address first")
     return Caller(user_id=sub, email=email.strip().lower())

@@ -3,8 +3,9 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 1.2 — Cognito auth + user-keyed wallets/orders: DONE (2026-10-28). Phase 1 (Foundation) is complete.**
-Next: **2.1 async payment (waitForTaskToken + HMAC webhook + timeout).**
+**Upgrade step 2.0 — access tokens for the API (pre-token-generation trigger): IN PROGRESS (2026-10-29).**
+Commit A (trigger deployed, API accepts access + ID tokens, every client sends the access token) pushed; commit B
+(access tokens only) next. Then: **2.1 async payment (waitForTaskToken + HMAC webhook + timeout).**
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)

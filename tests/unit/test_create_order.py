@@ -58,7 +58,7 @@ def test_identity_fields_in_the_body_are_ignored(aws, handler):
     [
         (None, 401),  # no authorizer context at all: fail closed
         ({"email": EMAIL_A, "email_verified": "true"}, 401),  # no sub
-        (jwt_claims(email=None), 403),  # an access token: no email claim
+        (jwt_claims(email=None), 403),  # an access token without the trigger's email claim
         (jwt_claims(verified="false"), 403),  # email not verified
     ],
 )

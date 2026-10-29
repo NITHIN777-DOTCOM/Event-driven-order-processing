@@ -52,13 +52,14 @@ export function initAuth(config: AuthConfig): void {
 }
 
 /**
- * The ID token to send as "Authorization" on API calls, or undefined when signed out.
- * The API needs the user's id (sub) AND verified email; Cognito puts the email only in the ID token,
- * so that is the one sent (API Gateway's JWT authorizer accepts it: aud = this app client).
+ * The ACCESS token to send as "Authorization" on API calls, or undefined when signed out.
+ * OAuth practice: the access token is for calling APIs; the ID token tells this app who signed in.
+ * The pool's pre-token trigger adds the verified email to the access token, which the API needs.
+ * (API Gateway's JWT authorizer accepts it: client_id = this app client.)
  */
-export async function getIdToken(): Promise<string | undefined> {
+export async function getAccessToken(): Promise<string | undefined> {
   const user = await manager?.getUser();
-  return user && !user.expired ? user.id_token : undefined;
+  return user && !user.expired ? user.access_token : undefined;
 }
 
 /** Wraps the app: provides useAuth() and handles the redirect back from Cognito. */

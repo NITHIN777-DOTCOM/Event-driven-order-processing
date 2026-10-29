@@ -202,6 +202,8 @@ locals {
     list_products     = data.aws_iam_policy_document.list_products.json
     refund_payment    = data.aws_iam_policy_document.refund_payment.json
     wallet_api        = data.aws_iam_policy_document.wallet_api.json
+    # The Cognito trigger touches no AWS resource: own logs + X-Ray only.
+    pre_token = data.aws_iam_policy_document.lambda_base["pre_token"].json
   }
 }
 

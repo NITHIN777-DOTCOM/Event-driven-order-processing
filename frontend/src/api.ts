@@ -3,7 +3,7 @@
  * build works against any deployment (Terraform writes config.json next to the app in S3).
  * Every request carries the signed-in user's Cognito ID token (when there is one) as "Authorization".
  */
-import { getIdToken, type AuthConfig } from "./auth";
+import { getAccessToken, type AuthConfig } from "./auth";
 import type { CreateOrderResponse, Order, OrderSummary, Product, Simulate, Wallet } from "./types";
 
 export interface AppConfig {
@@ -34,7 +34,7 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
   let res: Response;
-  const token = await getIdToken();
+  const token = await getAccessToken();
   try {
     res = await fetch(`${apiUrl}${path}`, {
       ...init,

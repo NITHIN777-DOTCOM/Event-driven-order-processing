@@ -2,7 +2,9 @@
 #
 #   Browser (SPA)  --authorization code + PKCE-->  managed login (order-saga-<account>.auth...)  -> ID/access tokens
 #   Scripts / CI   --AdminInitiateAuth (IAM-signed)-->  "automation" client                       -> ID/access tokens
-#   API Gateway    --JWT authorizer-->  checks issuer + audience (both clients) before any Lambda runs
+#   Cognito        --pre-token-generation trigger (order-saga-pre-token)-->  adds email + email_verified to ACCESS tokens
+#   API Gateway    --JWT authorizer-->  checks issuer + audience (both clients) before any Lambda runs; the API
+#                                       is called with the ACCESS token (step 2.0)
 #
 # Cost: ESSENTIALS is the cheapest feature plan with managed login. 10,000 monthly active users are free
 # (indefinitely, not a 12-month trial); this demo has a handful. No paid add-ons: no threat protection
@@ -60,6 +62,16 @@ resource "aws_cognito_user_pool" "users" {
     allowed_first_auth_factors = ["PASSWORD"]
   }
   mfa_configuration = "OFF" # demo shop; MFA would be the first thing to turn on for real money
+
+  # Step 2.0: copy email + email_verified into ACCESS tokens, so the API can accept access tokens (the token
+  # meant for APIs) instead of ID tokens. Event version V2_0 is the one that can customise access tokens; it
+  # needs the Essentials or Plus plan (this pool is Essentials). See src/lambdas/pre_token/handler.py.
+  lambda_config {
+    pre_token_generation_config {
+      lambda_arn     = aws_lambda_function.fn["pre_token"].arn
+      lambda_version = "V2_0"
+    }
+  }
 
   # The pool holds every user account: refuse to delete it, even from Terraform (clear this first, on purpose).
   deletion_protection = "ACTIVE"
@@ -134,6 +146,15 @@ resource "aws_cognito_user_pool_client" "automation" {
   }
   enable_token_revocation       = true
   prevent_user_existence_errors = "ENABLED"
+}
+
+# Only this user pool may invoke the trigger (not any Cognito pool in any account).
+resource "aws_lambda_permission" "cognito_pre_token" {
+  statement_id  = "AllowInvokeFromOrderSagaUserPool"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.fn["pre_token"].function_name
+  principal     = "cognito-idp.amazonaws.com"
+  source_arn    = aws_cognito_user_pool.users.arn
 }
 
 # Managed login v2 needs a style per app client that shows the page; Cognito's default look is enough.

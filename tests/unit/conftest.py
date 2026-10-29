@@ -141,11 +141,18 @@ USER_A, EMAIL_A = "11111111-aaaa-4aaa-8aaa-111111111111", "asha@example.com"
 USER_B, EMAIL_B = "22222222-bbbb-4bbb-8bbb-222222222222", "bilal@example.com"
 
 
-def jwt_claims(user_id=USER_A, email=EMAIL_A, verified="true") -> dict:
-    """What API Gateway's JWT authorizer puts in the event after verifying a Cognito ID token."""
-    claims = {"sub": user_id, "email_verified": verified, "token_use": "id"}
+def jwt_claims(user_id=USER_A, email=EMAIL_A, verified="true", token_use="access") -> dict:
+    """What API Gateway's JWT authorizer puts in the event after verifying a Cognito token (all values strings).
+    Default: an access token, with the email + email_verified the pre-token trigger adds (step 2.0)."""
+    claims = {"sub": user_id, "token_use": token_use}
+    if token_use == "access":
+        claims.update(client_id="test-client", scope="openid email profile")
+    else:
+        claims.update(aud="test-client")
     if email is not None:
         claims["email"] = email
+    if verified is not None:
+        claims["email_verified"] = verified
     return claims
 
 

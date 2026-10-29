@@ -576,20 +576,35 @@ def forged_as(token: str, sub: str) -> str:
     return f"{head}.{new_payload}.{signature}"
 
 
+def token_claims(token: str) -> dict:
+    """A JWT's payload, decoded WITHOUT verifying it (only to look at the claims Cognito issued)."""
+    payload = token.split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+
+
 def scenario_auth_gate() -> Scenario:
-    s = Scenario("k", "auth gate: no/tampered/forged token -> 401, access token -> 403, /products public")
+    s = Scenario("k", "auth gate: no/tampered/forged token -> 401, access token with email claims -> 200, /products public")
     code, body = http_json("GET", f"{API}/products")
     s.check(code == 200 and len(body.get("products", [])) > 0, f"GET /products without a token -> {code} (expected 200)")
     for method, path in (("POST", "/orders"), ("GET", "/orders"), ("GET", "/orders/ORD-20261028-00000000"),
                          ("GET", "/wallet"), ("POST", "/wallet/reset")):
         code, _ = http_json(method, f"{API}{path}", {} if method == "POST" else None)
         s.check(code == 401, f"{method} {path} without a token -> {code} (expected 401)")
-    token = test_user(USER)["id_token"]
+    token = test_user(USER)["access_token"]
     for label, bad in (("tampered signature", tampered(token)), ("payload forged as user B", forged_as(token, test_user(LOW_BALANCE_USER)["sub"]))):
         code, _ = http_json("GET", f"{API}/wallet", headers={"Authorization": bad})
         s.check(code == 401, f"GET /wallet with a {label} -> {code} (expected 401)")
-    code, body = http_json("GET", f"{API}/wallet", headers={"Authorization": test_user(USER)["access_token"]})
-    s.check(code == 403, f"GET /wallet with an ACCESS token (no email claim) -> {code} (expected 403: {body.get('error')})")
+    # Step 2.0: the pre-token trigger puts the verified email in the ACCESS token, which the API now takes.
+    claims = token_claims(token)
+    s.check(
+        claims.get("token_use") == "access" and claims.get("email") == test_user(USER)["email"] and claims.get("email_verified") is True,
+        f"access token carries token_use={claims.get('token_use')}, email (matches A: {claims.get('email') == test_user(USER)['email']}), "
+        f"email_verified={claims.get('email_verified')}",
+    )
+    code, body = http_json("GET", f"{API}/wallet", headers={"Authorization": token})
+    s.check(code == 200 and body.get("walletId") == test_user(USER)["sub"], f"GET /wallet with the ACCESS token -> {code} (expected 200, A's wallet)")
+    code, body = http_json("GET", f"{API}/wallet", headers={"Authorization": test_user(USER)["id_token"]})
+    s.check(code == 200, f"GET /wallet with the ID token -> {code} (expected 200 during the step 2.0 rollout)")
     return s
 
 

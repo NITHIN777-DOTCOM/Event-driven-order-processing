@@ -489,7 +489,8 @@ with no time window at all, because a clock-dependent window there could hide a 
   SSM SecureStrings (`/order-saga/test-users/a|b`). `scripts/auth_tokens.py` signs in and caches the tokens; every
   API-calling script and the CI smoke test uses it.
 - Storefront: browsing is public; checkout, wallet, orders and the tracker send signed-out visitors to managed login
-  and back. Every API call carries the ID token. Checkout no longer asks for an email: it's the account's.
+  and back. Every API call carries the **access token** (step 2.0; it was the ID token in 1.2). Checkout no longer
+  asks for an email: it's the account's.
 - API: a **JWT authorizer** (`order-saga-cognito-jwt`) on every route except `GET /products`. The Lambdas take the
   caller **only from the verified claims**: `userId = sub`, `email = email` (required to be `email_verified`).
 - **Row-level isolation:** orders store `userId` + `walletId`; `GET /orders` queries only the caller's partition
@@ -514,8 +515,9 @@ behind Cognito), carried as a signed token the API can verify without calling ba
   endpoint, not the standard OIDC end-session one).
 - `<RequireAuth>` wraps the protected routes and passes the current path through the OIDC `state`, so the user
   lands back where they started; `/auth/callback` only accepts same-site paths from it.
-- The **ID token** is sent as `Authorization`: the API needs the user's id (`sub`) and *verified* email, and Cognito
-  puts the email only in the ID token. API Gateway's JWT authorizer can validate it (its `aud` is the app client).
+- Step 1.2 sent the **ID token** as `Authorization`, because Cognito puts the email only in the ID token. Step 2.0
+  switched to the **access token**: a pre-token-generation trigger adds `email` + `email_verified` to it (see
+  "Access tokens for the API" below).
 - CI: the deploy job runs `create_test_users.py` (idempotent) before the smoke test. The deploy role got
   `cognito-idp:AdminInitiateAuth` and `cognito-idp:ListUserPoolClients`, scoped to pools tagged `Project=aws-order-saga`.
 - `aws_apigatewayv2_authorizer.cognito` (`infra/main/api.tf`): type JWT, identity source `$request.header.Authorization`,
@@ -532,6 +534,21 @@ behind Cognito), carried as a signed token the API can verify without calling ba
   `refund_payment` already used `walletId`. An order without one (pre-1.2 rows) is declined, not guessed.
 - Legacy rows (email-keyed wallets, orders with `gsi1pk = "ORDER"` and no `userId`) are left untouched; the API can't
   reach them any more (404 / not listed).
+
+#### Access tokens for the API (step 2.0)
+- **Lambda `order-saga-pre-token`**: a Cognito pre-token-generation trigger, event version **V2_0** (the version that
+  can change *access* tokens; it needs the Essentials or Plus plan, and the pool is Essentials). Cognito calls it on
+  every token issue (sign-in and refresh), right before signing. It copies exactly two attributes into the access
+  token's `claimsToAddOrOverride`: `email` and `email_verified` (a JSON boolean, as in the ID token). Nothing else, and
+  nothing for the ID token. A user without an email gets no claims (the API then answers 403).
+- No AWS calls, no SDK, 5 s timeout (Cognito's limit for triggers), own role with only its log group + X-Ray. The log
+  line has the trigger source, client id and `sub`, never the email.
+- `aws_lambda_permission.cognito_pre_token`: principal `cognito-idp.amazonaws.com`, `source_arn` = this pool's ARN, so
+  no other user pool (in any account) can invoke it.
+- `caller_from` checks `token_use`. Rollout: commit A accepted `access` and `id` while the frontend, scripts and CI
+  switched to the access token.
+- The JWT authorizer needed no change: HTTP API authorizers match the audience list against `aud` (ID token) **or**
+  `client_id` (access token, which has no `aud`).
 
 ### Trade-offs / alternatives considered
 - **Authorization code + PKCE vs implicit flow:** implicit returns tokens in the URL fragment (browser history,

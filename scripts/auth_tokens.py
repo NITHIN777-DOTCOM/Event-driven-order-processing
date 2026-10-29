@@ -57,7 +57,7 @@ def _sign_in(label: str) -> dict:
         AuthParameters={"USERNAME": creds["email"], "PASSWORD": creds["password"]},
     )["AuthenticationResult"]
     del creds
-    claims = _claims(result["IdToken"])
+    claims = _claims(result["IdToken"])  # the ID token is ours to read: it says who signed in
     return {
         "id_token": result["IdToken"],
         "access_token": result["AccessToken"],
@@ -76,8 +76,9 @@ def test_user(label: str = "a") -> dict:
 
 
 def auth_header(label: str = "a") -> dict:
-    """{"Authorization": "<ID token>"}. The API reads the user's id (sub) and verified email from the ID token."""
-    return {"Authorization": test_user(label)["id_token"]}
+    """{"Authorization": "<access token>"}. APIs take the ACCESS token (the ID token is for the client app);
+    the pool's pre-token trigger puts the verified email in it, next to the user's id (sub)."""
+    return {"Authorization": test_user(label)["access_token"]}
 
 
 if __name__ == "__main__":
