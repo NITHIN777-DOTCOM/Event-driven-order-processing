@@ -832,6 +832,14 @@ accepted the same style). The quick fix removed them but left a comment *inside*
 each AWS service validates tags differently, so read the failing resource's limits; and run `terraform fmt -check`
 locally before every push, even for a one-line fix.
 
+**The same lesson, one commit later, with a sharper edge.** Commit B's Deploy failed on the state machine's
+Description tag (parentheses again: Step Functions allows only `_ . : = + - @` besides letters, digits and spaces).
+Terraform had already **deleted `process_payment`** (an independent destroy) but had not switched the definition, so
+for a few minutes the live saga pointed at a missing function. Orders in that window failed safely: the Lambda
+error was caught by `States.ALL`, compensation ran, nothing was charged. The fix commit restored the deploy. Lesson:
+a "remove the old thing" change is safest when the removal can only happen after the switch, so the next removal
+of this kind goes in a separate commit after the switch is live.
+
 ## 11. Known gaps (and where they get fixed)
 
 ### What
