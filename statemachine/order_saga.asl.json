@@ -1,5 +1,5 @@
 {
-  "Comment": "Order saga: reserve inventory, debit the DemoPay wallet (with retries), then COMPLETE and notify. On failure it compensates in reverse order: refund the payment, release the stock, mark the order FAILED with a reason, notify.",
+  "Comment": "Order saga: reserve inventory, request payment from the provider and PAUSE until its signed webhook resumes the saga (task token, 120 s timeout), then COMPLETE and notify. On failure or timeout it compensates in reverse order: refund through the provider, release the stock, mark the order FAILED with a reason, notify.",
   "StartAt": "ReserveInventory",
   "States": {
     "ReserveInventory": {
@@ -49,25 +49,21 @@
           "Next": "DescribeFailure"
         }
       ],
-      "Next": "ProcessPayment"
+      "Next": "RequestPayment"
     },
-    "ProcessPayment": {
+    "RequestPayment": {
       "Type": "Task",
-      "Comment": "Lambda order-saga-process-payment: debits the customer's DemoPay wallet in ONE DynamoDB transaction (balance, ledger, order). PaymentTransientError is retried (2s, 4s, 8s); PaymentDeclined (card or insufficient balance) or exhausted retries trigger compensation.",
-      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Lambda order-saga-request-payment stores THIS task token on payment intent PI-<orderId> and asks DemoPay to charge (SQS, 2-5 s). The saga then waits: payment_webhook calls SendTaskSuccess (paid) or SendTaskFailure PaymentDeclined. No callback within 120 s -> States.Timeout -> MarkPaymentTimedOut. PaymentTransientError (payment_flaky) is retried 2 s, 4 s, 8 s; each retry gets a new token.",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
       "Parameters": {
-        "FunctionName": "${process_payment_function_arn}",
+        "FunctionName": "${request_payment_function_arn}",
         "Payload": {
           "orderId.$": "$.orderId",
-          "amount.$": "$.order.totalAmount",
-          "currency.$": "$.order.currency",
-          "simulate.$": "$.order.simulate"
+          "simulate.$": "$.order.simulate",
+          "taskToken.$": "$$.Task.Token"
         }
       },
-      "ResultSelector": {
-        "paymentId.$": "$.Payload.paymentId",
-        "status.$": "$.Payload.status"
-      },
+      "TimeoutSeconds": 120,
       "ResultPath": "$.payment",
       "Retry": [
         {
@@ -93,6 +89,13 @@
       "Catch": [
         {
           "ErrorEquals": [
+            "States.Timeout"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkPaymentTimedOut"
+        },
+        {
+          "ErrorEquals": [
             "PaymentDeclined"
           ],
           "ResultPath": "$.error",
@@ -108,9 +111,59 @@
       ],
       "Next": "MarkOrderCompleted"
     },
+    "MarkPaymentTimedOut": {
+      "Type": "Task",
+      "Comment": "Direct DynamoDB UpdateItem (no Lambda): payment intent REQUESTED -> TIMED_OUT, ONLY if still REQUESTED. If the webhook captured the payment a moment earlier (SUCCEEDED), the condition fails and the saga continues to RefundPayment, which refunds it.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${payments_table_name}",
+        "Key": {
+          "paymentIntentId": {
+            "S.$": "States.Format('PI-{}', $.orderId)"
+          }
+        },
+        "UpdateExpression": "SET #s = :timedOut, timedOutAt = :now, updatedAt = :now",
+        "ConditionExpression": "#s = :requested",
+        "ExpressionAttributeNames": {
+          "#s": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":timedOut": {
+            "S": "TIMED_OUT"
+          },
+          ":requested": {
+            "S": "REQUESTED"
+          },
+          ":now": {
+            "S.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "ResultPath": null,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.timeoutMarkError",
+          "Next": "DescribeTimeout"
+        }
+      ],
+      "Next": "DescribeTimeout"
+    },
+    "DescribeTimeout": {
+      "Type": "Pass",
+      "Comment": "Replaces the raw States.Timeout error with a readable one, so the order's failureReason says 'payment timeout'.",
+      "Result": {
+        "Error": "PaymentTimeout",
+        "Cause": "payment timeout - DemoPay did not confirm the payment within 120 s"
+      },
+      "ResultPath": "$.error",
+      "Next": "RefundPayment"
+    },
     "MarkOrderCompleted": {
       "Type": "Task",
-      "Comment": "Direct DynamoDB UpdateItem integration (no Lambda): sets status COMPLETED and appends it to statusHistory.",
+      "Comment": "Direct DynamoDB UpdateItem integration (no Lambda): sets status COMPLETED and appends it to statusHistory. Reached only after the webhook confirmed the payment (SendTaskSuccess).",
       "Resource": "arn:aws:states:::dynamodb:updateItem",
       "Parameters": {
         "TableName": "${orders_table_name}",
@@ -183,7 +236,7 @@
     },
     "RefundPayment": {
       "Type": "Task",
-      "Comment": "COMPENSATION - Lambda order-saga-refund-payment: credits back any wallet debit for this order (CREDIT ledger entry). Idempotent: a no-op if nothing was charged or it was already refunded.",
+      "Comment": "COMPENSATION - Lambda order-saga-refund-payment: refunds any charge for this order through DemoPay's idempotent refund API (a no-op if nothing was charged) and marks the intent REFUNDED. An intent still REQUESTED is marked FAILED (abandoned), so a later charge is refunded by the webhook.",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
         "FunctionName": "${refund_payment_function_arn}",

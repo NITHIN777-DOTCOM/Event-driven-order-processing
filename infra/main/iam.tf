@@ -119,44 +119,51 @@ data "aws_iam_policy_document" "reserve_inventory" {
   }
 }
 
-data "aws_iam_policy_document" "process_payment" {
-  source_policy_documents = [data.aws_iam_policy_document.lambda_base["process_payment"].json]
-
-  statement {
-    sid       = "ReadOrderAndRecordPayment"
-    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
-    resources = [aws_dynamodb_table.orders.arn]
-  }
-  # Create the wallet on first use (PutItem), read it, and debit it inside a transaction (UpdateItem).
-  statement {
-    sid       = "DebitWallet"
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
-    resources = [aws_dynamodb_table.wallets.arn]
-  }
-  statement {
-    sid       = "WriteLedgerEntry"
-    actions   = ["dynamodb:PutItem"]
-    resources = [aws_dynamodb_table.wallet_txns.arn]
-  }
-}
-
+# Compensation no longer touches wallets: money moves only inside the provider (DemoPay), via its refund API.
 data "aws_iam_policy_document" "refund_payment" {
   source_policy_documents = [data.aws_iam_policy_document.lambda_base["refund_payment"].json]
 
   statement {
-    sid       = "ReadOrderAndMarkRefunded"
+    sid       = "ReadAndFinishPaymentIntent"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.payments.arn]
+  }
+  statement {
+    sid       = "RecordRefundOnOrder"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.orders.arn]
+  }
+  statement {
+    sid       = "CallDemoPayRefundApi"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [local.payment_provider_arn]
+  }
+}
+
+# Starts a payment: intent + task token, order PAYMENT_PENDING, request to DemoPay. No wallet access at all.
+data "aws_iam_policy_document" "request_payment" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["request_payment"].json]
+
+  statement {
+    sid       = "ReadOrderAndMarkPaymentPending"
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
   }
   statement {
-    sid       = "CreditWallet"
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
-    resources = [aws_dynamodb_table.wallets.arn]
+    sid       = "CreatePaymentIntent"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.payments.arn]
   }
   statement {
-    sid       = "WriteLedgerEntry"
-    actions   = ["dynamodb:PutItem"]
-    resources = [aws_dynamodb_table.wallet_txns.arn]
+    sid       = "SendPaymentRequestToDemoPay"
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.psp_requests.arn]
+  }
+  # Only used when a re-run finds the payment already finished and answers the new token itself.
+  statement {
+    sid       = "AnswerOwnTaskToken"
+    actions   = ["states:SendTaskSuccess", "states:SendTaskFailure"]
+    resources = [local.state_machine_arn]
   }
 }
 
@@ -260,7 +267,7 @@ locals {
     get_order         = data.aws_iam_policy_document.get_order.json
     start_workflow    = data.aws_iam_policy_document.start_workflow.json
     reserve_inventory = data.aws_iam_policy_document.reserve_inventory.json
-    process_payment   = data.aws_iam_policy_document.process_payment.json
+    request_payment   = data.aws_iam_policy_document.request_payment.json
     release_inventory = data.aws_iam_policy_document.release_inventory.json
     list_orders       = data.aws_iam_policy_document.list_orders.json
     list_products     = data.aws_iam_policy_document.list_products.json
@@ -322,7 +329,7 @@ data "aws_iam_policy_document" "sfn" {
     sid     = "InvokeSagaLambdas"
     actions = ["lambda:InvokeFunction"]
     resources = flatten([
-      for key in ["reserve_inventory", "process_payment", "refund_payment", "release_inventory"] : [
+      for key in ["reserve_inventory", "request_payment", "refund_payment", "release_inventory"] : [
         aws_lambda_function.fn[key].arn,
         "${aws_lambda_function.fn[key].arn}:*", # versions/aliases
       ]
@@ -332,6 +339,11 @@ data "aws_iam_policy_document" "sfn" {
     sid       = "MarkOrderCompleted"
     actions   = ["dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
+  }
+  statement {
+    sid       = "MarkPaymentTimedOut"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.payments.arn]
   }
   statement {
     sid       = "NotifyCustomer"

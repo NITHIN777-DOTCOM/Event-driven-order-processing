@@ -4,7 +4,7 @@
  *      signed-in Cognito user's: this page sits behind <RequireAuth> and has no email field.
  *   2. Payment: the DemoPay wallet card (balance, amount due, balance after) and "Pay ₹X"
  * Paying places the order (with an Idempotency-Key) and goes straight to the live tracker.
- * The wallet is actually debited later, by the saga's ProcessPayment step.
+ * The wallet is actually debited later: the saga's RequestPayment step asks DemoPay, which confirms by webhook.
  */
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";

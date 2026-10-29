@@ -18,21 +18,34 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
                           the outbox (stream -> pipe -> queue)
   j) MODIFY            -> flipping an existing order's status back to PENDING (a MODIFY event) does NOT
                           re-enter the queue: the pipe only forwards INSERTs
-  k) auth gate         -> no token / tampered token -> 401 from API Gateway; an access token (no email)
-                          -> 403; GET /products works signed out
+  k) auth gate         -> no token / tampered / forged / ID token -> 401 from API Gateway; an access token
+                          (email claims added by the pre-token trigger) -> 200; GET /products works signed out
   l) order isolation   -> A can't read B's order (404, same as a missing one); each list shows only its owner's
   m) wallet isolation  -> A resetting "B's" wallet (B's ids in the body) only changes A's wallet
   n) per-user idempotency -> B reusing A's Idempotency-Key gets B's OWN new order; A's replay still works
   o) payment webhook   -> POST /webhooks/payment (no JWT) rejects unsigned, forged, stale and future-dated requests
                           with 401; a correctly signed callback for an unknown intent is a 404 no-op
+  p) payment_timeout   -> DemoPay never calls back: after 120 s the saga marks the intent TIMED_OUT, compensates,
+                          and the order FAILS with "payment timeout"; nothing charged
+  q) payment_late      -> DemoPay charges ~150 s in, after the timeout: the webhook finds TIMED_OUT and refunds at
+                          once (intent REFUNDED, ledger DEBIT + CREDIT, net 0), the order stays FAILED
+  r) webhook_duplicate -> the success callback arrives twice: COMPLETED, one DEBIT, the 2nd callback is a no-op
+  s) webhook_bad_signature -> a forged callback (wrong secret) is rejected with 401 first, then the genuine one
+                          completes the order; the rejection is logged and counted in a CloudWatch metric
 
-Auth: every API call carries a Cognito ID token for test user A (or B), from auth_tokens.py. The API
+Auth: every API call carries a Cognito access token for test user A (or B), from auth_tokens.py. The API
 takes identity only from that token, so no request below sends an email or user id.
 
-DemoPay: test user A's wallet is reset to ₹10,00,000 first, and each scenario checks the ledger
-(exactly one DEBIT for each paid order, none for failed ones).
+DemoPay: test user A's wallet is reset to ₹10,00,000 first. At the end, every order scenario is checked
+against the money invariants, using the wallet ledger (order-saga-wallet-txns) and the payment intent
+(order-saga-payments):
+  I1  COMPLETED -> exactly one DEBIT of the order total, no CREDIT
+  I2  FAILED (or never started) -> net charge 0 (no entries, or DEBIT + matching CREDIT)
+  I3  never more than one DEBIT or one CREDIT per order (no double charge, no double refund)
+  I4  the intent, if any, is in a final state (SUCCEEDED, FAILED, TIMED_OUT, REFUNDED), and the expected one
 
-The poison order is placed FIRST, so its ~3 minutes of SQS retries overlap the other scenarios.
+The poison, payment_timeout and payment_late orders are placed FIRST, so their minutes of waiting
+(SQS retries, the 120 s payment timeout, the ~150 s late callback) overlap the other scenarios.
 The DLQ is only peeked (VisibilityTimeout=0) and is never purged, so it stays for screenshots.
 Results are printed and written to docs/evidence/e2e-failure-tests.md. Exit code 1 if anything fails.
 """
@@ -74,6 +87,10 @@ sqs = boto3.client("sqs", region_name=REGION)
 logs = boto3.client("logs", region_name=REGION)
 ssm = boto3.client("ssm", region_name=REGION)
 payments_table = ddb.Table(OUT["payments_table"])
+wallet_txns_table = ddb.Table(OUT["wallet_txns_table"])
+cloudwatch = boto3.client("cloudwatch", region_name=REGION)
+RUN_STARTED = datetime.now(timezone.utc)
+SLOW_TIMEOUT_SECONDS = 300  # payment_timeout / payment_late: 120 s timeout, ~150 s late callback, plus slack
 
 
 # --------------------------------------------------------------------------------------------
@@ -84,8 +101,10 @@ class Scenario:
     key: str
     title: str
     order_id: str | None = None
+    user: str = USER  # whose order (and wallet) this is
     checks: list[tuple[bool, str]] = field(default_factory=list)
     timeline: list[dict] = field(default_factory=list)
+    money: str = ""  # intent status + ledger summary, filled by check_money
 
     def check(self, passed: bool, description: str) -> bool:
         self.checks.append((bool(passed), description))
@@ -244,7 +263,7 @@ def scenario_none() -> Scenario:
     order = wait_for_terminal(s.order_id)
     s.timeline = order.get("statusHistory", [])
     s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
-    expected = ["PENDING", "PROCESSING", "RESERVED", "PAYMENT_CAPTURED", "COMPLETED"]
+    expected = ["PENDING", "PROCESSING", "RESERVED", "PAYMENT_PENDING", "PAYMENT_CAPTURED", "COMPLETED"]
     s.check(statuses(order) == expected, f"statusHistory {' -> '.join(statuses(order))}")
     after = stock_of("MECH-KEYBOARD")
     s.check(after == (before[0] - 1, before[1] + 1), f"MECH-KEYBOARD stock {before[0]} -> {after[0]} (expected -1)")
@@ -395,7 +414,7 @@ def scenario_duplicate_sqs_message() -> Scenario:
 
 
 def scenario_low_balance() -> Scenario:
-    s = Scenario("h", "wallet balance too low -> REAL decline, stock released, nothing debited")
+    s = Scenario("h", "wallet balance too low -> REAL decline, stock released, nothing debited", user=LOW_BALANCE_USER)
     set_wallet(LOW_BALANCE_USER, 1000)
     before = stock_of("USB-MIC")
     code, body = place_order("USB-MIC", 1, "none", user=LOW_BALANCE_USER)  # ₹5,999 > ₹1,000, no simulate flag
@@ -537,19 +556,21 @@ def scenario_modify_does_not_restart(order_id: str) -> Scenario:
 def write_evidence(results: list[Scenario], duration: float) -> None:
     passed = sum(r.passed for r in results)
     lines = [
-        "# End-to-end tests: every saga path, including DemoPay wallet checks",
+        "# End-to-end tests: every saga path, with DemoPay money invariants (I1-I4)",
         "",
         f"Run: {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC · Region: {REGION} · API: `{API}`",
         f"Command: `python scripts/e2e_test.py` (after `python scripts/seed_inventory.py`) · Duration: {duration:.0f}s",
         "",
         f"**Result: {passed}/{len(results)} scenarios passed.**",
         "",
-        "| # | Scenario | Result | orderId | Execution (console) |",
-        "|---|----------|--------|---------|---------------------|",
+        "| # | Scenario | Result | orderId | Intent · ledger (I1-I4) | Execution (console) |",
+        "|---|----------|--------|---------|--------------------------|---------------------|",
     ]
     for r in results:
         link = f"[open]({r.console_link})" if r.order_id and r.key != "g" else "none started (by design)"
-        lines.append(f"| {r.key} | {r.title} | {'PASS' if r.passed else 'FAIL'} | `{r.order_id}` | {link} |")
+        lines.append(
+            f"| {r.key} | {r.title} | {'PASS' if r.passed else 'FAIL'} | `{r.order_id}` | {r.money or '-'} | {link} |"
+        )
     for r in results:
         lines += ["", f"## {r.key}) {r.title} - {'PASS' if r.passed else 'FAIL'}", "", f"orderId: `{r.order_id}`"]
         if r.order_id and r.key != "g":
@@ -662,7 +683,7 @@ def scenario_wallet_isolation() -> Scenario:
 
 
 def scenario_per_user_idempotency() -> Scenario:
-    s = Scenario("n", "per-user idempotency: B reusing A's Idempotency-Key gets B's own order")
+    s = Scenario("n", "per-user idempotency: B reusing A's Idempotency-Key gets B's own order", user=LOW_BALANCE_USER)
     key = f"e2e-shared-{uuid.uuid4().hex[:8]}"
     code_a, body_a = place_order("LAPTOP-STAND", 1, "none", key=key, user=USER)
     code_b, body_b = place_order("LAPTOP-STAND", 1, "none", key=key, user=LOW_BALANCE_USER)
@@ -731,12 +752,192 @@ def scenario_webhook_security() -> Scenario:
     return s
 
 
+# --------------------------------------------------------------------------------------------
+# Step 2.1: asynchronous payment scenarios
+# --------------------------------------------------------------------------------------------
+def intent_of(order_id: str) -> dict | None:
+    return payments_table.get_item(Key={"paymentIntentId": f"PI-{order_id}"}, ConsistentRead=True).get("Item")
+
+
+def start_slow(key: str, title: str, product: str, simulate: str) -> tuple[Scenario, tuple[int, int]]:
+    """Place an order whose outcome takes minutes; finish_* checks it at the end of the run."""
+    s = Scenario(key, title)
+    before = stock_of(product)
+    code, body = place_order(product, 1, simulate)
+    s.check(code == 202, f"POST /orders returned {code} (expected 202)")
+    s.order_id = body.get("orderId")
+    return s, before
+
+
+def finish_timeout(s: Scenario, product: str, before: tuple[int, int]) -> Scenario:
+    order = wait_for_terminal(s.order_id, timeout=SLOW_TIMEOUT_SECONDS)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "FAILED", f"order status {order.get('status')} (expected FAILED)")
+    reason = str(order.get("failureReason", ""))
+    s.check("payment timeout" in reason, f"failureReason '{reason}'")
+    s.check("PAYMENT_PENDING" in statuses(order), "the saga waited at PAYMENT_PENDING")
+    entered = states_entered(s)
+    s.check("MarkPaymentTimedOut" in entered, "MarkPaymentTimedOut ran (States.Timeout caught after 120 s)")
+    s.check({"RefundPayment", "ReleaseInventory"} <= set(entered), "compensation ran: RefundPayment, ReleaseInventory")
+    s.check(stock_of(product) == before, f"{product} (stock, reserved) {before} -> {stock_of(product)} (expected unchanged)")
+    waited = timeout_wait_seconds(s)
+    s.check(waited is not None and 119 <= waited <= 135, f"RequestPayment waited {waited} s before timing out (expected ~120)")
+    return s
+
+
+def timeout_wait_seconds(s: Scenario) -> float | None:
+    """Seconds between entering RequestPayment (last attempt) and the TaskTimedOut event."""
+    entered_at = timed_out_at = None
+    for page in sfn.get_paginator("get_execution_history").paginate(executionArn=s.execution_arn):
+        for e in page["events"]:
+            if e.get("stateEnteredEventDetails", {}).get("name") == "RequestPayment":
+                entered_at = e["timestamp"]
+            if e["type"] == "TaskTimedOut":
+                timed_out_at = e["timestamp"]
+    if entered_at and timed_out_at:
+        return round((timed_out_at - entered_at).total_seconds(), 1)
+    return None
+
+
+def finish_late(s: Scenario, product: str, before: tuple[int, int]) -> Scenario:
+    order = wait_for_terminal(s.order_id, timeout=SLOW_TIMEOUT_SECONDS)
+    s.check(order.get("status") == "FAILED", f"order status {order.get('status')} (expected FAILED: timed out at 120 s)")
+    s.check("payment timeout" in str(order.get("failureReason", "")), f"failureReason '{order.get('failureReason')}'")
+    s.check(stock_of(product) == before, f"{product} (stock, reserved) {before} -> {stock_of(product)} (expected unchanged)")
+    deadline = time.monotonic() + SLOW_TIMEOUT_SECONDS
+    intent = intent_of(s.order_id) or {}
+    while intent.get("status") != "REFUNDED" and time.monotonic() < deadline:
+        time.sleep(5)  # DemoPay charges ~150 s after the request; the webhook then refunds at once
+        intent = intent_of(s.order_id) or {}
+    s.check(intent.get("status") == "REFUNDED", f"intent {intent.get('paymentIntentId')} {intent.get('status')} (expected REFUNDED)")
+    order = get_order(s.order_id)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "FAILED", "order still FAILED after the late callback (it is never revived)")
+    s.check(statuses(order).count("PAYMENT_REFUNDED") == 1, "exactly one PAYMENT_REFUNDED in statusHistory")
+    return s
+
+
+def scenario_webhook_duplicate() -> Scenario:
+    s = Scenario("r", "webhook_duplicate -> callback delivered twice, COMPLETED, wallet debited once")
+    code, body = place_order("ERGO-MOUSE", 1, "webhook_duplicate")
+    s.check(code == 202, f"POST /orders returned {code} (expected 202)")
+    s.order_id = body.get("orderId")
+    order = wait_for_terminal(s.order_id)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
+    s.check(statuses(order).count("PAYMENT_CAPTURED") == 1, "exactly one PAYMENT_CAPTURED in statusHistory")
+    duplicates = poll_log_lines("/aws/lambda/order-saga-payment-webhook", f"PI-{s.order_id}", "duplicate")
+    s.check(duplicates >= 1, f"webhook log lines with result 'duplicate' for this intent: {duplicates} (expected >= 1)")
+    return s
+
+
+def scenario_webhook_bad_signature() -> Scenario:
+    s = Scenario("s", "webhook_bad_signature -> forged callback rejected (401), genuine one completes the order")
+    since_ms = int(time.time() * 1000) - 120_000  # slack for local-clock skew
+    code, body = place_order("WIRELESS-EARBUDS", 1, "webhook_bad_signature")
+    s.check(code == 202, f"POST /orders returned {code} (expected 202)")
+    s.order_id = body.get("orderId")
+    order = wait_for_terminal(s.order_id)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
+    rejected = poll_log_lines("/aws/lambda/order-saga-payment-webhook", "webhook_signature_rejected", since_ms=since_ms)
+    s.check(rejected >= 1, f"'webhook_signature_rejected' log lines since this order: {rejected} (expected >= 1)")
+    rejected_by_provider = poll_log_lines("/aws/lambda/order-saga-payment-provider", f"PI-{s.order_id}", "WRONG secret")
+    s.check(rejected_by_provider >= 1, "DemoPay logged the 401 for its forged callback, then sent the genuine one")
+    return s
+
+
+def check_signature_metric(s: Scenario) -> None:
+    """The metric filter turns rejections into OrderSaga/WebhookSignatureFailures (alarm source). Checked at the
+    end of the run because metric filters publish with a delay of a minute or two."""
+    total = 0.0
+    for _ in range(18):
+        stats = cloudwatch.get_metric_statistics(
+            Namespace="OrderSaga", MetricName="WebhookSignatureFailures", Statistics=["Sum"], Period=60,
+            StartTime=RUN_STARTED.timestamp() - 300, EndTime=time.time() + 60,
+        )
+        total = sum(p["Sum"] for p in stats["Datapoints"])
+        if total >= 1:
+            break
+        time.sleep(10)
+    s.check(total >= 1, f"CloudWatch OrderSaga/WebhookSignatureFailures during this run: {total:.0f} (expected >= 1)")
+
+
+def poll_log_lines(log_group: str, *terms: str, since_ms: int = 0, tries: int = 12) -> int:
+    lines = 0
+    for _ in range(tries):  # CloudWatch Logs ingestion can lag a few seconds
+        lines = count_log_lines(log_group, *terms, since_ms=since_ms)
+        if lines:
+            break
+        time.sleep(5)
+    return lines
+
+
+# Expected final payment intent status per scenario (None = payment never requested).
+EXPECTED_INTENT = {
+    "a": "SUCCEEDED", "b": "FAILED", "c": "SUCCEEDED", "d": None, "e": "SUCCEEDED", "f": "SUCCEEDED",
+    "g": None, "h": "FAILED", "i": "SUCCEEDED", "n": "SUCCEEDED",
+    "p": "TIMED_OUT", "q": "REFUNDED", "r": "SUCCEEDED", "s": "SUCCEEDED",
+}
+FINAL_INTENT_STATUSES = {"SUCCEEDED", "FAILED", "TIMED_OUT", "REFUNDED"}
+
+
+def ledger_for(order_id: str, user: str) -> list[dict]:
+    """This order's entries in the user's DemoPay ledger, read straight from DynamoDB (not the API's last 20)."""
+    since = (RUN_STARTED.timestamp() - 600)
+    since_iso = datetime.fromtimestamp(since, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    kwargs = {
+        "KeyConditionExpression": "walletId = :w AND txnId > :since",
+        "FilterExpression": "orderId = :o",
+        "ExpressionAttributeValues": {":w": test_user(user)["sub"], ":since": since_iso, ":o": order_id},
+        "ConsistentRead": True,
+    }
+    items: list[dict] = []
+    while True:
+        page = wallet_txns_table.query(**kwargs)
+        items += page["Items"]
+        if "LastEvaluatedKey" not in page:
+            return items
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+
+def check_money(s: Scenario) -> None:
+    """Money invariants I1-I4 for this scenario's order (see the module docstring)."""
+    order = orders_table.get_item(Key={"orderId": s.order_id}, ConsistentRead=True)["Item"]
+    entries = ledger_for(s.order_id, s.user)
+    debits = [e["amount"] for e in entries if e["type"] == "DEBIT"]
+    credits = [e["amount"] for e in entries if e["type"] == "CREDIT"]
+    net = sum(debits) - sum(credits)
+    ledger = f"ledger {len(debits)} DEBIT / {len(credits)} CREDIT, net ₹{net}"
+    if order["status"] == "COMPLETED":
+        s.check(debits == [order["totalAmount"]] and not credits, f"I1 COMPLETED -> one DEBIT of ₹{order['totalAmount']}: {ledger}")
+    else:
+        s.check(net == 0, f"I2 {order['status']} -> net charge 0: {ledger}")
+    s.check(len(debits) <= 1 and len(credits) <= 1, f"I3 no double charge / double refund: {ledger}")
+    intent = intent_of(s.order_id)
+    status = intent["status"] if intent else None
+    expected = EXPECTED_INTENT[s.key]
+    s.check(
+        (status is None or status in FINAL_INTENT_STATUSES) and status == expected,
+        f"I4 intent PI-{s.order_id}: {status or 'none (payment never requested)'} (expected {expected or 'none'})",
+    )
+    s.money = f"{status or '-'} · {ledger}"
+
+
 def main() -> int:
     started = time.monotonic()
     set_wallet(USER)  # DemoPay: start every run from ₹10,00,000
     print("Placing poison order first (it needs ~3 min of SQS retries)...")
     poison, poison_started = start_poison()
     print(f"  poison order {poison.order_id}")
+    print("Placing payment_timeout and payment_late orders (they finish after 2-3 min)...")
+    timeout_order, timeout_before = start_slow(
+        "p", "payment_timeout -> no callback in 120 s, compensated, FAILED, nothing charged", "CURVED-MONITOR", "payment_timeout"
+    )
+    late_order, late_before = start_slow(
+        "q", "payment_late -> charged after the timeout, refunded automatically, order stays FAILED", "PODCAST-MIC", "payment_late"
+    )
+    print(f"  payment_timeout {timeout_order.order_id} · payment_late {late_order.order_id}")
 
     results = []
     for run in (
@@ -752,6 +953,8 @@ def main() -> int:
         scenario_order_isolation,
         scenario_wallet_isolation,
         scenario_per_user_idempotency,
+        scenario_webhook_duplicate,
+        scenario_webhook_bad_signature,
         scenario_webhook_security,
     ):
         result = run()
@@ -769,12 +972,25 @@ def main() -> int:
     results.append(finish_poison(poison, poison_started))
     print(f"[{'PASS' if results[-1].passed else 'FAIL'}] g) {poison.title}  {poison.order_id}")
 
+    print("Waiting for the payment timeout and the late callback's refund...")
+    results.append(finish_timeout(timeout_order, "CURVED-MONITOR", timeout_before))
+    results.append(finish_late(late_order, "PODCAST-MIC", late_before))
+    check_signature_metric(next(r for r in results if r.key == "s"))
+
+    print("Checking the money invariants I1-I4 for every order...")
+    for r in results:
+        if r.key in EXPECTED_INTENT and r.order_id:
+            check_money(r)
+
     results.sort(key=lambda r: r.key)
     duration = time.monotonic() - started
     print("\n" + "=" * 100)
     print(f"{'#':<3}{'Result':<8}{'orderId':<24}Scenario")
     for r in results:
         print(f"{r.key:<3}{'PASS' if r.passed else 'FAIL':<8}{r.order_id or '-':<24}{r.title}")
+        for ok, text in r.checks:
+            if not ok:
+                print(f"      FAIL: {text}")
     print("=" * 100)
     for r in results:
         if r.order_id and r.key != "g":

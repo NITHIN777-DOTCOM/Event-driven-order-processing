@@ -815,8 +815,22 @@ To be filled from `docs/evidence/upgrade-2.1-async-payment.md` after commit B.
 8. *Can a callback for one order change another?* No: the intent id, the orderId and the amount in the signed body
    must all match the stored intent.
 
+**Rollout (two commits):** A deployed the provider, webhook, tables, queues, secret and alarms *next to* the old
+synchronous `process_payment`, and the live e2e proved the webhook rejects unsigned, forged, stale and future-dated
+calls before anything depended on it. B then switched the state machine to `RequestPayment` and removed
+`process_payment`. Terraform updates the state machine before it deletes the old function, and executions keep the
+definition they started with, so orders in flight during the deploy still finish on the old path. The old function's
+log group stays under Terraform (`retired_log_groups`) so removing a function never deletes its logs; the 7-day
+retention ages them out.
+
 ### Debugging story
-None recorded yet (commit B adds the live findings).
+**A DynamoDB tag broke the deploy, and the fix broke CI.** Commit A's Deploy failed on `order-saga-payments` with
+`ValidationException: The Tag Value provided is invalid`; everything else applied. DynamoDB tag values allow only
+letters, digits, spaces and `_ . : / = + - @`, and the Description tag contained parentheses (other services had
+accepted the same style). The quick fix removed them but left a comment *inside* the `tags = {}` block, which
+`terraform fmt` re-aligns, so CI's `fmt -check` failed. A third commit moved the comment above the block. Lessons:
+each AWS service validates tags differently, so read the failing resource's limits; and run `terraform fmt -check`
+locally before every push, even for a one-line fix.
 
 ## 11. Known gaps (and where they get fixed)
 

@@ -66,7 +66,11 @@ IDEMPOTENCY_HEADER = "Idempotency-Key"
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
 IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60  # DynamoDB TTL deletes the record after 24 h
 # Demo control: lets the presenter force each failure path of the saga.
-SIMULATE_MODES = ("none", "payment_declined", "payment_flaky", "out_of_stock", "poison")
+SIMULATE_MODES = (
+    "none", "payment_declined", "payment_flaky", "out_of_stock", "poison",
+    # step 2.1: the asynchronous payment and its webhook
+    "payment_timeout", "payment_late", "webhook_duplicate", "webhook_bad_signature",
+)
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -241,7 +245,7 @@ def build_order(request: dict[str, Any], idempotency_key: str, caller: Caller) -
     return {
         "orderId": order_id,
         "idempotencyKey": idempotency_key,
-        # Owner, from the verified token only. process_payment/refund_payment use walletId, never the email.
+        # Owner, from the verified token only. DemoPay (request_payment, payment_provider) uses walletId, never the email.
         "userId": caller.user_id,
         "walletId": wallet_id_for(caller.user_id),
         "customerName": request["customerName"],

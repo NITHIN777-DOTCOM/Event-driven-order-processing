@@ -2,7 +2,7 @@
 # Monitoring: one CloudWatch dashboard, alarms -> SNS ops-alerts, saved Logs Insights queries.
 #
 # Alarm design note: a compensated order (payment declined, out of stock) ends in a Fail state,
-# and process_payment raises on declines. So "ExecutionsFailed > 0" and "process_payment Errors > 0"
+# and request_payment raises PaymentTransientError for payment_flaky. So "ExecutionsFailed > 0" and those Lambda errors
 # are normal BUSINESS outcomes, not system faults. We alarm on:
 #   - system faults:   DLQ not empty, start_workflow crashes, API 5xx, executions timed out/aborted,
 #                      queue backlog, outbox pipe failures / outbox DLQ not empty
@@ -315,7 +315,7 @@ locals {
   lambda_widgets = [
     for index, spec in [
       { title = "Lambda invocations", metric = "Invocations", stat = "Sum" },
-      { title = "Lambda errors (process_payment errors include simulated declines)", metric = "Errors", stat = "Sum" },
+      { title = "Lambda errors (request_payment errors include simulated payment_flaky retries)", metric = "Errors", stat = "Sum" },
       { title = "Lambda duration p95 (ms)", metric = "Duration", stat = "p95" },
       { title = "Lambda throttles", metric = "Throttles", stat = "Sum" },
       ] : {
@@ -435,7 +435,7 @@ locals {
         properties = {
           markdown = join("\n", [
             "# Event-Driven Order Processing — Live Dashboard",
-            "**API Gateway -> Lambda -> DynamoDB (outbox) -> Stream -> EventBridge Pipe -> SQS (+DLQ) -> Step Functions saga** (reserve inventory -> payment with retries -> complete, or compensate) **-> SNS email**. Region `${var.region}`.",
+            "**API Gateway -> Lambda -> DynamoDB (outbox) -> Stream -> EventBridge Pipe -> SQS (+DLQ) -> Step Functions saga** (reserve inventory -> request payment and WAIT for the signed DemoPay webhook, 120 s timeout -> complete, or compensate) **-> SNS email**. Region `${var.region}`.",
             "",
             "[State machine](${local.console}/states/home?region=${var.region}#/statemachines/view/${local.sfn_arn}) · [Outbox pipe](${local.console}/events/home?region=${var.region}#/pipes/${local.outbox_pipe}) · [Orders queue](${local.console}/sqs/v3/home?region=${var.region}#/queues/${urlencode(aws_sqs_queue.orders.url)}) · [DLQ](${local.console}/sqs/v3/home?region=${var.region}#/queues/${urlencode(aws_sqs_queue.orders_dlq.url)}) · [Orders table](${local.console}/dynamodbv2/home?region=${var.region}#table?name=${aws_dynamodb_table.orders.name}) · [X-Ray service map](${local.console}/cloudwatch/home?region=${var.region}#xray:service-map/map)",
           ])

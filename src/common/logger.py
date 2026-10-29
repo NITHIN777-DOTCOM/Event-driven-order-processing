@@ -8,7 +8,7 @@ That makes the logs queryable in CloudWatch Logs Insights, for example:
     | sort @timestamp asc
 
 `orderId` is present on every line (null until it is known), so one order can be traced across
-create_order -> start_workflow -> reserve_inventory -> process_payment.
+create_order -> start_workflow -> reserve_inventory -> request_payment -> payment_webhook.
 """
 
 from __future__ import annotations

@@ -119,3 +119,21 @@ def test_indian_rupee_formatting():
     assert format_inr("1234.5") == "₹1,234.50"
     assert format_inr(799) == "₹799"
     assert format_inr(-3499) == "-₹3,499"
+
+
+def test_async_payment_rows():
+    rows = feed(
+        entry("PAYMENT_PENDING", "Awaiting payment confirmation from DemoPay · ₹5,097 · intent PI-ORD-1"),
+        entry("PAYMENT_CAPTURED", "₹5,097 captured by DemoPay · PAY-abc (confirmed by webhook)"),
+    )
+
+    assert [(r["service"], r["message"]) for r in rows] == [
+        ("Lambda · payment", "Payment requested from DemoPay, awaiting confirmation (saga paused until the webhook)"),
+        ("Webhook · DemoPay", "₹5,097 captured by DemoPay · PAY-abc"),
+    ]
+
+
+def test_payment_timeout_reason():
+    rows = feed(entry("FAILED", "x"), failureReason="PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s")
+
+    assert rows[0]["message"] == "Order marked FAILED: payment timeout - DemoPay did not confirm the payment within 120 s"

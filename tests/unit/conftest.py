@@ -127,6 +127,7 @@ def aws():
         # exists only so tests can assert that nothing was ever sent to it.
         sqs = boto3.client("sqs", region_name=REGION)
         queue_url = sqs.create_queue(QueueName="test-orders-queue")["QueueUrl"]
+        psp_queue_url = sqs.create_queue(QueueName="test-psp-requests")["QueueUrl"]
 
         sfn = boto3.client("stepfunctions", region_name=REGION)
         state_machine_arn = sfn.create_state_machine(
@@ -145,6 +146,7 @@ def aws():
             psp=psp,
             sqs=sqs,
             queue_url=queue_url,
+            psp_queue_url=psp_queue_url,
             sfn=sfn,
             state_machine_arn=state_machine_arn,
         )

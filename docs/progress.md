@@ -5,8 +5,10 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 ## Current phase
 **Upgrade step 2.1 — async payment with webhooks (waitForTaskToken + HMAC + timeout): IN PROGRESS (2026-10-29).**
 Commit A (payments + psp-transactions tables, psp-requests queue + DLQ, payment_provider "DemoPay", POST /webhooks/payment
-+ payment_webhook, secret script, alarms) pushed: deployed, NOT yet wired into the state machine. Commit B next
-(request_payment + waitForTaskToken + 120 s timeout, refund via DemoPay, process_payment removed).
++ payment_webhook, secret script, alarms) deployed green (fixes 59bcbaa, 2d926ed: DynamoDB tag value without
+parentheses, then terraform fmt); live webhook check passed (unsigned/forged/stale/future -> 401, unknown intent -> 404).
+Commit B (request_payment + waitForTaskToken + 120 s timeout, refund via DemoPay, process_payment removed, its log group
+kept as retired) pushed next; then live e2e + capture_ui, evidence, README, report.
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)

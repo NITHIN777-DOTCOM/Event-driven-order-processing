@@ -57,20 +57,20 @@ locals {
         INVENTORY_TABLE = aws_dynamodb_table.inventory.name
       }
     }
-    process_payment = {
-      description = "Saga step - debits the DemoPay wallet atomically with the order (never twice); declines on low balance"
+    request_payment = {
+      description = "Saga step (waitForTaskToken) - stores the task token on payment intent PI-orderId and asks DemoPay to charge via SQS - the webhook resumes the saga"
       environment = {
-        ORDERS_TABLE      = aws_dynamodb_table.orders.name
-        WALLETS_TABLE     = aws_dynamodb_table.wallets.name
-        WALLET_TXNS_TABLE = aws_dynamodb_table.wallet_txns.name
+        ORDERS_TABLE   = aws_dynamodb_table.orders.name
+        PAYMENTS_TABLE = aws_dynamodb_table.payments.name
+        PSP_QUEUE_URL  = aws_sqs_queue.psp_requests.url
       }
     }
     refund_payment = {
-      description = "Saga COMPENSATION - idempotently refunds a wallet debit when a later step fails"
+      description = "Saga COMPENSATION - refunds any charge through DemoPay's idempotent refund API and marks the payment intent REFUNDED"
       environment = {
         ORDERS_TABLE      = aws_dynamodb_table.orders.name
-        WALLETS_TABLE     = aws_dynamodb_table.wallets.name
-        WALLET_TXNS_TABLE = aws_dynamodb_table.wallet_txns.name
+        PAYMENTS_TABLE    = aws_dynamodb_table.payments.name
+        PROVIDER_FUNCTION = local.payment_provider_name
       }
     }
     wallet_api = {
@@ -117,6 +117,10 @@ locals {
 
   # order-saga-create-order, order-saga-get-order, ...
   lambda_names = { for key in keys(local.lambda_functions) : key => "${var.project_prefix}-${replace(key, "_", "-")}" }
+
+  # Log groups of removed functions (step 2.1: process_payment was replaced by request_payment). Kept under
+  # Terraform so removing a function never deletes its logs; the 7-day retention still ages them out.
+  retired_log_groups = toset(["process_payment"])
 }
 
 # Each zip = the function's handler.py + the shared src/common package.
@@ -143,9 +147,9 @@ data "archive_file" "lambda" {
 # Created by Terraform (not by Lambda on first run), so retention is enforced and the role
 # doesn't need logs:CreateLogGroup.
 resource "aws_cloudwatch_log_group" "lambda" {
-  for_each = local.lambda_functions
+  for_each = setunion(keys(local.lambda_functions), local.retired_log_groups)
 
-  name              = "/aws/lambda/${local.lambda_names[each.key]}"
+  name              = "/aws/lambda/${var.project_prefix}-${replace(each.key, "_", "-")}"
   retention_in_days = local.log_retention_days
 }
 

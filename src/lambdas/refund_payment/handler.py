@@ -1,92 +1,92 @@
-"""Saga compensation: refund a payment that was taken, back into the customer's DemoPay wallet.
+"""Saga compensation: give back any money taken for this order, through the provider's refund API.
 
-It runs on every failure path after ProcessPayment, BEFORE ReleaseInventory. It is IDEMPOTENT:
-  - nothing was debited (declined, insufficient balance, retries exhausted) -> no-op
-  - already refunded                                                          -> no-op
-  - otherwise ONE transaction: balance += paidAmount, CREDIT ledger entry, order.refunded = true
-    (conditional on the order having a paymentId and NOT being refunded yet)
-So a retried or repeated run can never refund twice.
+Runs on every failure path after RequestPayment (declined, timed out, a later step failed), BEFORE
+ReleaseInventory. Idempotent end to end, so retries and re-runs can never refund twice:
+
+  1. No payment intent -> nothing was ever requested: no-op.
+  2. Intent still REQUESTED -> the saga is giving up before DemoPay answered: mark it FAILED ("abandoned"),
+     conditionally. If DemoPay charges afterwards, its callback finds FAILED and the webhook refunds at once.
+  3. Ask DemoPay to refund the intent. Its refund is idempotent per intent (REFUND#<intent> record), and a
+     no-op when nothing was charged (declined, timed out before the charge).
+  4. If money was returned (now or earlier): intent -> REFUNDED and PAYMENT_REFUNDED in the order's history,
+     both conditional (record_refund in common/payments.py).
+
+Timeout race: if the webhook captured the payment a moment before the 120 s timeout, the intent is SUCCEEDED
+here and DemoPay has the charge, so this refunds it. The webhook deliberately never refunds a SUCCEEDED intent,
+so exactly one of the two paths owns each refund (common/payments.py).
 """
 
 from __future__ import annotations
 
 import os
-from decimal import Decimal
 from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
 
 from common.logger import get_logger
-from common.money import format_inr
-from common.orders import PAYMENT_REFUNDED, cancellation_codes, status_update
+from common.payments import FAILED, REFUNDED, REQUESTED, intent_id_for, invoke_provider_refund, money_returned, record_refund
+from common.timeutil import utc_now_iso
 from common.tracing import instrument_aws_sdk
-from common.wallet import CREDIT, balance_update, ensure_wallet, txn_put
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
 ORDERS_TABLE = os.environ["ORDERS_TABLE"]
-WALLETS_TABLE = os.environ["WALLETS_TABLE"]
-WALLET_TXNS_TABLE = os.environ["WALLET_TXNS_TABLE"]
+PAYMENTS_TABLE = os.environ["PAYMENTS_TABLE"]
+PROVIDER_FUNCTION = os.environ["PROVIDER_FUNCTION"]
 
 dynamodb = boto3.resource("dynamodb")
 orders_table = dynamodb.Table(ORDERS_TABLE)
-wallets_table = dynamodb.Table(WALLETS_TABLE)
+payments_table = dynamodb.Table(PAYMENTS_TABLE)
+lambda_client = boto3.client("lambda")
 logger = get_logger("refund_payment")
-
-MAX_BALANCE_CONFLICTS = 3
-
-
-class RefundConflict(Exception):
-    """The wallet kept changing under us. Step Functions retries the step (it's idempotent)."""
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     order_id = event["orderId"]
-    log = logger.bind(orderId=order_id)
+    intent_id = intent_id_for(order_id)
+    log = logger.bind(orderId=order_id, paymentIntentId=intent_id)
 
-    order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
-    if not order.get("paymentId") or not order.get("paidAmount"):
-        log.info("Nothing was charged for this order; nothing to refund")
-        return {"orderId": order_id, "refunded": False, "reason": "nothing charged"}
-    if order.get("refunded"):
-        log.info("Already refunded; nothing to do (idempotent no-op)")
-        return {"orderId": order_id, "refunded": False, "reason": "already refunded"}
+    intent = payments_table.get_item(Key={"paymentIntentId": intent_id}, ConsistentRead=True).get("Item")
+    if not intent:
+        log.info("No payment was requested for this order; nothing to refund")
+        return {"orderId": order_id, "refunded": False, "reason": "no payment requested"}
 
-    amount, wid = Decimal(order["paidAmount"]), order["walletId"]
-    for _ in range(MAX_BALANCE_CONFLICTS):
-        before = Decimal(ensure_wallet(wallets_table, wid)["balance"])
-        after = before + amount
-        try:
-            dynamodb.meta.client.transact_write_items(
-                TransactItems=[
-                    balance_update(WALLETS_TABLE, wid, before, after),
-                    txn_put(WALLET_TXNS_TABLE, wid, CREDIT, amount, after, order_id, f"Refund for {order_id}"),
-                    {
-                        "Update": {
-                            "TableName": ORDERS_TABLE,
-                            "Key": {"orderId": order_id},
-                            **status_update(
-                                PAYMENT_REFUNDED,
-                                f"{format_inr(amount)} refunded to DemoPay · balance {format_inr(after)}",
-                                {"refunded": True},
-                                condition="attribute_exists(paymentId) AND attribute_not_exists(refunded)",
-                            ),
-                        }
-                    },
-                ]
-            )
-        except ClientError as err:
-            if err.response["Error"]["Code"] != "TransactionCanceledException":
-                raise
-            codes = cancellation_codes(err.response)
-            if len(codes) > 2 and codes[2] == "ConditionalCheckFailed":
-                log.info("A concurrent run already refunded this order (idempotent no-op)")
-                return {"orderId": order_id, "refunded": False, "reason": "already refunded"}
-            if codes and codes[0] == "ConditionalCheckFailed":
-                continue  # balance changed concurrently: re-read and try again
+    if intent["status"] == REQUESTED:
+        abandon(intent, log)
+
+    refund = invoke_provider_refund(lambda_client, PROVIDER_FUNCTION, intent_id)
+    if not money_returned(refund):
+        log.info("Nothing was charged; nothing to refund", intentStatus=intent["status"])
+        return {"orderId": order_id, "refunded": False, "reason": refund.get("reason", "nothing charged")}
+
+    record_refund(payments_table, orders_table, intent, refund, "saga compensation")
+    log.info(
+        "Payment refunded" if refund.get("refunded") else "Already refunded (idempotent no-op)",
+        intentStatus=REFUNDED,
+        refundId=refund.get("refundId"),
+        amount=refund.get("amount"),
+    )
+    return {"orderId": order_id, "refunded": bool(refund.get("refunded")), "refundId": refund.get("refundId")}
+
+
+def abandon(intent: dict[str, Any], log: Any) -> None:
+    """REQUESTED -> FAILED, only if nobody changed it meanwhile. Keeps invariant I4: no intent stays REQUESTED."""
+    try:
+        payments_table.update_item(
+            Key={"paymentIntentId": intent["paymentIntentId"]},
+            UpdateExpression="SET #s = :failed, failureReason = :why, failedAt = :now, updatedAt = :now",
+            ConditionExpression="#s = :requested",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":failed": FAILED,
+                ":requested": REQUESTED,
+                ":why": "abandoned: the saga compensated before the provider answered",
+                ":now": utc_now_iso(),
+            },
+        )
+        intent["status"] = FAILED
+        log.info("Payment intent abandoned", intentStatus=FAILED)
+    except ClientError as err:
+        if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
-        log.info("Payment refunded", amount=amount, balanceAfter=after, walletId=wid)
-        return {"orderId": order_id, "refunded": True, "amount": str(amount)}
-
-    raise RefundConflict("Wallet kept changing; retry the refund")

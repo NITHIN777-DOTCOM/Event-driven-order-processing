@@ -17,11 +17,12 @@ API = "API Gateway"
 QUEUE = "SQS → Step Functions"
 INVENTORY = "Lambda · inventory"
 PAYMENT = "Lambda · payment"
+WEBHOOK = "Webhook · DemoPay"
 WORKFLOW = "Step Functions"
 DATABASE = "DynamoDB"
 EMAIL = "SNS"
 
-# Must match the ProcessPayment Retry block in statemachine/order_saga.asl.json.
+# Must match the RequestPayment Retry block in statemachine/order_saga.asl.json.
 PAYMENT_RETRY_INTERVAL_SECONDS = 2
 PAYMENT_RETRY_BACKOFF = 2
 
@@ -74,6 +75,8 @@ def rows_for(entry: dict[str, Any], order: dict[str, Any]) -> list[dict[str, Any
         attempt = _attempt(detail) or 1
         wait = PAYMENT_RETRY_INTERVAL_SECONDS * PAYMENT_RETRY_BACKOFF ** (attempt - 1)
         return [row(WORKFLOW, f"Payment glitch, retrying in {wait}s", "retry", f"attempt {attempt}")]
+    if status == "PAYMENT_PENDING":
+        return [row(PAYMENT, "Payment requested from DemoPay, awaiting confirmation (saga paused until the webhook)")]
     if status == "PAYMENT_DECLINED":
         if "Insufficient wallet balance" in detail:
             available = _AVAILABLE.search(detail)
@@ -83,6 +86,8 @@ def rows_for(entry: dict[str, Any], order: dict[str, Any]) -> list[dict[str, Any
     if status == "PAYMENT_CAPTURED":
         attempt = _attempt(detail) or 1
         note = f"attempt {attempt}" if attempt > 1 else None
+        if "confirmed by webhook" in detail:  # step 2.1: "₹7,597 captured by DemoPay · PAY-... (confirmed by webhook)"
+            return [row(WEBHOOK, detail.replace(" (confirmed by webhook)", ""), note=note)]
         if detail.startswith("₹"):  # wallet debit: "₹7,597 debited from DemoPay · balance ₹9,92,403 (attempt 1)"
             return [row(PAYMENT, _ATTEMPT_SUFFIX.sub("", detail), note=note)]
         return [row(PAYMENT, "Payment captured" + (f" on attempt {attempt}" if attempt > 1 else ""))]

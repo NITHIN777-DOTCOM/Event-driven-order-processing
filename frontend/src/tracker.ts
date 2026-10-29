@@ -3,6 +3,9 @@
  *
  *   Placed -> Queued -> Stock reserved -> Paid -> Confirmed
  *
+ * While the saga waits for DemoPay's webhook (PAYMENT_PENDING), the "Paid" step reads
+ * "Awaiting payment confirmation".
+ *
  * On failure the failing step turns red. When compensation ran (INVENTORY_RELEASED), a
  * "Stock released" step replaces "Confirmed", because the order will never be confirmed.
  */
@@ -70,7 +73,12 @@ function paidStep(order: Order, h: HistoryEntry[], failedAt?: string): Step {
 
   // Retries ran out: the order failed after at least one PAYMENT_RETRY and was never captured.
   const lastRetry = last(h, "PAYMENT_RETRY");
-  if (lastRetry && failedAt) return { key: "paid", label: "Paid", state: "failed", time: failedAt, note: "retries exhausted" };
+  const pending = last(h, "PAYMENT_PENDING");
+  // The saga gave up waiting for the provider's webhook (no callback within 120 s).
+  if (pending && failedAt && /timeout/i.test(order.failureReason ?? ""))
+    return { key: "paid", label: "Paid", state: "failed", time: failedAt, note: "no confirmation in 120 s" };
+  if (lastRetry && failedAt && !pending) return { key: "paid", label: "Paid", state: "failed", time: failedAt, note: "retries exhausted" };
+  if (pending && !failedAt) return { key: "paid", label: "Awaiting payment confirmation", state: "pending", time: pending.timestamp, note: "waiting for DemoPay" };
   if (lastRetry) return { key: "paid", label: "Paid", state: "pending", note: `retrying · ${ordinal(attempts)} attempt failed` };
   return { key: "paid", label: "Paid", state: "pending" };
 }

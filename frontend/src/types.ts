@@ -1,6 +1,15 @@
 /** Shapes returned by the order-saga HTTP API (see src/lambdas/* in the repo root). */
 
-export type Simulate = "none" | "payment_declined" | "payment_flaky" | "out_of_stock" | "poison";
+export type Simulate =
+  | "none"
+  | "payment_declined"
+  | "payment_flaky"
+  | "out_of_stock"
+  | "poison"
+  | "payment_timeout"
+  | "payment_late"
+  | "webhook_duplicate"
+  | "webhook_bad_signature";
 
 export interface Product {
   productId: string;

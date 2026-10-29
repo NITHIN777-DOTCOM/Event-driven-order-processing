@@ -27,7 +27,10 @@ from auth_tokens import LABELS, auth_header
 from tf_outputs import load_outputs
 
 TERMINAL_STATUSES = {"COMPLETED", "FAILED"}
-SIMULATE_MODES = ["none", "payment_declined", "payment_flaky", "out_of_stock", "poison"]
+SIMULATE_MODES = [
+    "none", "payment_declined", "payment_flaky", "out_of_stock", "poison",
+    "payment_timeout", "payment_late", "webhook_duplicate", "webhook_bad_signature",
+]
 DEFAULT_ITEMS = ["WIRELESS-MOUSE:2", "MECH-KEYBOARD:1"]
 
 

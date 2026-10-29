@@ -26,7 +26,7 @@ locals {
   psp_max_receive_count    = 5  # DemoPay retries a callback our webhook didn't accept 4 more times, then gives up
 
   # Lambdas that log an intent's status changes (field intentStatus), for the dashboard's payments row.
-  payment_log_groups = [for key in ["payment_webhook", "refund_payment"] : aws_cloudwatch_log_group.lambda[key].name]
+  payment_log_groups = [for key in ["request_payment", "payment_webhook", "refund_payment"] : aws_cloudwatch_log_group.lambda[key].name]
 }
 
 # OUR record of each payment: one intent per order (paymentIntentId = PI-<orderId>), with its status and the

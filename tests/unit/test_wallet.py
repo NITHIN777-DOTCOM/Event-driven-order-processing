@@ -1,57 +1,19 @@
-"""refund_payment (idempotent compensation) and the wallet API."""
+"""The wallet API: the caller's own DemoPay wallet, its ledger, and the demo balance helper.
+(Debits and refunds are DemoPay's: see test_payment_provider.py and test_refund_payment.py.)"""
 
 import json
 from decimal import Decimal
 
 import pytest
 
-from conftest import EMAIL_B, USER_A, USER_B, api_event, jwt_claims, seed_order, wallet_of
+from conftest import EMAIL_B, USER_A, USER_B, api_event, jwt_claims, psp_request, seed_intent, seed_order, sqs_event, wallet_of
 
 AS_B = jwt_claims(USER_B, EMAIL_B)
 
 
 @pytest.fixture
-def payment(load_handler):
-    return load_handler("process_payment")
-
-
-@pytest.fixture
-def refund(load_handler):
-    return load_handler("refund_payment")
-
-
-@pytest.fixture
 def api(load_handler):
     return load_handler("wallet_api")
-
-
-def paid_order(aws, payment):
-    order = seed_order(aws.orders)
-    payment.lambda_handler({"orderId": order["orderId"], "simulate": "none"}, None)
-    return order
-
-
-def test_refund_credits_wallet_once(aws, payment, refund):
-    order = paid_order(aws, payment)
-
-    first = refund.lambda_handler({"orderId": order["orderId"]}, None)
-    second = refund.lambda_handler({"orderId": order["orderId"]}, None)
-
-    assert first["refunded"] is True
-    assert second == {"orderId": order["orderId"], "refunded": False, "reason": "already refunded"}
-    assert wallet_of(aws, USER_A) == (Decimal("1000000"), ["DEBIT", "CREDIT"])  # back to the start, refunded ONCE
-    saved = aws.orders.get_item(Key={"orderId": order["orderId"]})["Item"]
-    assert saved["refunded"] is True
-    assert saved["statusHistory"][-1]["detail"] == "₹5,097 refunded to DemoPay · balance ₹10,00,000"
-
-
-def test_refund_is_a_no_op_when_nothing_was_charged(aws, refund):
-    order = seed_order(aws.orders)
-
-    result = refund.lambda_handler({"orderId": order["orderId"]}, None)
-
-    assert result["refunded"] is False and result["reason"] == "nothing charged"
-    assert wallet_of(aws, USER_A) == (None, [])
 
 
 def test_wallet_view_creates_wallet_with_ten_lakh(aws, api):
@@ -86,9 +48,11 @@ def test_wallet_without_identity_is_401(aws, api):
     assert api.lambda_handler(api_event(route_key="GET /wallet", claims=None), None)["statusCode"] == 401
 
 
-def test_wallet_view_lists_transactions_newest_first(aws, api, payment, refund):
-    order = paid_order(aws, payment)
-    refund.lambda_handler({"orderId": order["orderId"]}, None)
+def test_wallet_view_lists_transactions_newest_first(aws, api, payments):
+    order = seed_order(aws.orders)
+    seed_intent(aws, order)
+    payments.provider.lambda_handler(sqs_event(psp_request(order)), None)  # DemoPay debits
+    payments.provider.refund(f"PI-{order['orderId']}")  # ...and refunds
 
     body = json.loads(api.lambda_handler(api_event(route_key="GET /wallet"), None)["body"])
 

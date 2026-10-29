@@ -12,10 +12,11 @@ resource "aws_sfn_state_machine" "order_saga" {
 
   definition = templatefile("${path.module}/../../statemachine/order_saga.asl.json", {
     reserve_inventory_function_arn = aws_lambda_function.fn["reserve_inventory"].arn
-    process_payment_function_arn   = aws_lambda_function.fn["process_payment"].arn
+    request_payment_function_arn   = aws_lambda_function.fn["request_payment"].arn
     release_inventory_function_arn = aws_lambda_function.fn["release_inventory"].arn
     refund_payment_function_arn    = aws_lambda_function.fn["refund_payment"].arn
     orders_table_name              = aws_dynamodb_table.orders.name
+    payments_table_name            = aws_dynamodb_table.payments.name
     notifications_topic_arn        = aws_sns_topic.notifications.arn
   })
 
@@ -31,7 +32,7 @@ resource "aws_sfn_state_machine" "order_saga" {
 
   tags = {
     Name        = local.state_machine_name
-    Description = "Order saga - reserve inventory - process payment with retries - complete or compensate - notify customer"
+    Description = "Order saga - reserve inventory - request payment and wait for the signed webhook (120 s timeout) - complete or compensate - notify customer"
   }
 
   depends_on = [aws_iam_role_policy.sfn]

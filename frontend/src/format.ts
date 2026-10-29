@@ -28,9 +28,13 @@ export function ordinal(n: number): string {
 
 /** The checkout's "Test scenario" options, shared with the Orders table. */
 export const SCENARIOS: { value: Simulate; label: string; description: string }[] = [
-  { value: "none", label: "Normal", description: "Stock is reserved, your DemoPay wallet is debited and a confirmation email is sent." },
+  { value: "none", label: "Normal", description: "Stock is reserved, DemoPay confirms the payment through a signed webhook a few seconds later, and a confirmation email is sent." },
   { value: "payment_declined", label: "Payment declined", description: "The card is declined before any money moves, so the saga releases the reserved stock and fails the order." },
-  { value: "payment_flaky", label: "Payment glitch (retries)", description: "Payment fails twice with a transient error; Step Functions retries with backoff and the wallet is debited once." },
+  { value: "payment_flaky", label: "Payment glitch (retries)", description: "The payment request fails twice with a transient error; Step Functions retries with backoff and the wallet is debited once." },
+  { value: "payment_timeout", label: "Payment timeout", description: "DemoPay never answers. After 120 s the saga gives up, releases the stock and fails the order; nothing is charged." },
+  { value: "payment_late", label: "Late payment (auto-refund)", description: "DemoPay charges after the 120 s timeout (~150 s). The order has already failed, so the late payment is refunded automatically." },
+  { value: "webhook_duplicate", label: "Duplicate webhook", description: "DemoPay sends the success callback twice; the second is ignored, so the wallet is debited once." },
+  { value: "webhook_bad_signature", label: "Forged webhook first", description: "A callback with a wrong HMAC signature arrives first and is rejected (401); the genuine one then completes the order." },
   { value: "out_of_stock", label: "Out of stock", description: "Reservation fails before anything is held, so the order fails with nothing to release." },
   { value: "poison", label: "Poison message (to DLQ)", description: "The queue consumer rejects the message; after 3 attempts SQS moves it to the dead-letter queue (~3 min)." },
 ];
