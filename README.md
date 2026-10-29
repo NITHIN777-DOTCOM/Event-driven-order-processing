@@ -23,8 +23,9 @@ failure path live. Payments use **DemoPay**, a demo wallet (₹10,00,000 per acc
 - **Retries where they help, not where they hurt.** Transient payment errors are retried with exponential backoff (2 s → 4 s → 8 s). A permanent decline goes straight to compensation.
 - **Transactional outbox, no dual write.** `create_order` makes exactly one write: the DynamoDB transaction. The new order row *is* the outbox record. A **DynamoDB stream → EventBridge Pipe** (INSERT-only filter) delivers it to SQS, so a crash right after the write can't lose the order.
 - **Sign-in and row-level isolation.** Cognito managed login (authorization code + PKCE). API Gateway's **JWT authorizer**
-  rejects missing or forged tokens before any Lambda runs; the handlers take identity **only from the verified claims**
-  (`sub`). Orders and wallets are keyed by the user; someone else's order is a **404**, not a 403; idempotency keys
+  rejects missing or forged tokens before any Lambda runs; the API takes **access tokens only** (a pre-token-generation
+  trigger adds the verified email to them; an ID token gets 401), and the handlers take identity **only from the
+  verified claims** (`sub`). Orders and wallets are keyed by the user; someone else's order is a **404**, not a 403; idempotency keys
   are scoped per user.
 - **Poison messages are isolated.** After 3 failed receives, SQS moves the message to a dead-letter queue, and a CloudWatch alarm emails the operator.
 - **100% infrastructure as code.** 106 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
@@ -39,7 +40,7 @@ failure path live. Payments use **DemoPay**, a demo wallet (₹10,00,000 per acc
 flowchart LR
   user["Browser"] -->|HTTPS| cf["CloudFront"] --> s3[("S3 storefront<br/>private, OAC")]
   user -->|"sign in: code + PKCE"| cog["Cognito<br/>managed login<br/>order-saga-users"]
-  cog -->|"ID token (JWT)"| user
+  cog -->|"access token (JWT)"| user
   user -->|"JSON + Authorization: JWT"| api["API Gateway<br/>HTTP API<br/>JWT authorizer"]
   cog -.->|"signing keys (JWKS)"| api
   api --> co["create_order"]
@@ -63,8 +64,9 @@ flowchart LR
 **Life of an order**
 
 0. The shopper signs in through **Cognito managed login** (authorization code + PKCE). Every API call carries the
-   ID token; API Gateway's **JWT authorizer** checks its signature, issuer, audience and expiry, and the Lambdas read
-   the user's id (`sub`) and verified email from the claims, never from the request body.
+   **access token**, into which the `order-saga-pre-token` trigger has copied the verified email. API Gateway's **JWT
+   authorizer** checks its signature, issuer, audience (`client_id`) and expiry; the Lambdas accept only
+   `token_use = access` and read the user's id (`sub`) and verified email from the claims, never from the request body.
 1. The storefront calls `POST /orders` with an `Idempotency-Key` (scoped to the user). `create_order` validates the order, prices it from inventory on the server, and writes the order plus the idempotency record in **one transaction**. That's its only write. It replies `202 Accepted` right away, without waiting for the saga.
 2. **Transactional outbox:** the new order row appears on the table's **DynamoDB stream**. The **EventBridge Pipe** `order-saga-orders-outbox` forwards only INSERTs with status PENDING, as `{"orderId": ...}`, onto **SQS**, which absorbs spikes and decouples the API from the workflow. Delivery is at least once; duplicates are harmless (next step).
 3. `start_workflow` consumes batches of 10 messages. It marks the order PROCESSING and starts a **Step Functions** execution named after the order (`ReportBatchItemFailures`: only failed messages are retried).
@@ -127,7 +129,7 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | **Standard workflow, not Express** | Exactly-once step execution and a 90-day execution history in the console, which matter for payments | Costs more per transition than Express at high volume |
 | **Reserve stock before charging** | Never take money for something that can't ship; out-of-stock needs no refund | Stock is held briefly for orders whose payment then fails (released by compensation) |
 | **Direct SDK integrations** (DynamoDB, SNS) | Fewer Lambdas and cold starts; less code to maintain | Logic in ASL/JSONata is harder to unit-test than Python |
-| **Cognito + API Gateway JWT authorizer** | Token checks are configuration, not code; bad tokens are rejected before a Lambda runs; free up to 10,000 monthly users | Ownership ("is this order yours?") still has to be checked in each handler; the ID token, not the access token, is the API credential (it carries the verified email) |
+| **Cognito + API Gateway JWT authorizer** | Token checks are configuration, not code; bad tokens are rejected before a Lambda runs; free up to 10,000 monthly users | Ownership ("is this order yours?") still has to be checked in each handler; the email reaches the access token only through a pre-token-generation Lambda that runs on every sign-in and refresh |
 | **HTTP API instead of REST API** | Cheaper, lower latency, built-in CORS | No X-Ray tracing, WAF or usage plans; traces start at the first Lambda |
 | **On-demand DynamoDB** | $0 when idle, no capacity planning | More expensive per request than provisioned capacity under steady heavy load |
 
@@ -163,14 +165,14 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | h | Wallet balance too low → real decline, nothing debited, stock released | PASS |
 | i | Crash simulation: order row written straight into DynamoDB, no SQS send → COMPLETED via the outbox | PASS |
 | j | MODIFY on an existing order (status back to PENDING) → not re-delivered | PASS |
-| k | No token / tampered / forged token → 401 from the JWT authorizer; access token → 403; `GET /products` public | PASS |
+| k | No token / tampered / forged token → 401 from the JWT authorizer; ID token → 401 (access tokens only); access token carries the trigger's email claims → 200; `GET /products` public | PASS |
 | l | User A reading B's order → 404 (worded like a missing order); each order list holds only its owner's orders | PASS |
 | m | A's wallet reset with B's ids in the body → only A's wallet changes | PASS |
 | n | B reusing A's Idempotency-Key → B's own new order; A's replay still returns A's | PASS |
 
 - **UI suite** ([`scripts/capture_ui.py`](scripts/capture_ui.py)): every scenario driven through the deployed storefront in Chromium, signing in through Cognito managed login. **6/6**, with ledger checks.
 - **Every deploy** runs a smoke test: one real order must reach COMPLETED within 60 s with exactly one wallet debit.
-- Evidence: [`docs/evidence/`](docs/evidence/). The e2e results are in [`e2e-failure-tests.md`](docs/evidence/e2e-failure-tests.md), UI screenshots in [`ui/`](docs/evidence/ui/), monitoring in [`phase3-monitoring.md`](docs/evidence/phase3-monitoring.md), CI/CD runs in [`phase5-cicd.md`](docs/evidence/phase5-cicd.md) and sign-in/isolation in [`upgrade-1.2-auth.md`](docs/evidence/upgrade-1.2-auth.md).
+- Evidence: [`docs/evidence/`](docs/evidence/). The e2e results are in [`e2e-failure-tests.md`](docs/evidence/e2e-failure-tests.md), UI screenshots in [`ui/`](docs/evidence/ui/), monitoring in [`phase3-monitoring.md`](docs/evidence/phase3-monitoring.md), CI/CD runs in [`phase5-cicd.md`](docs/evidence/phase5-cicd.md) sign-in/isolation in [`upgrade-1.2-auth.md`](docs/evidence/upgrade-1.2-auth.md) and access tokens in [`upgrade-2.0-access-tokens.md`](docs/evidence/upgrade-2.0-access-tokens.md).
 
 ### Observability
 
@@ -263,8 +265,10 @@ docs/              progress log, evidence, images, resume bullets
 - **Authentication:** Cognito user pool `order-saga-users` (self-sign-up, email verification), managed login with
   authorization code + PKCE; the public `spa` app client has no password API flow at all. Scripts and CI sign in as
   test users through a separate IAM-gated `automation` client; their passwords live only in SSM SecureStrings.
-- **Authorization:** every route except `GET /products` needs a valid Cognito JWT. Handlers use only the token's
-  `sub`/verified email; orders and wallets are per user, and another user's order returns 404.
+- **Authorization:** every route except `GET /products` needs a valid Cognito **access token** (an ID token is
+  rejected with 401). A pre-token-generation trigger (`order-saga-pre-token`, V2_0) adds `email` + `email_verified`
+  to access tokens and nothing else. Handlers use only the token's `sub`/verified email; orders and wallets are per
+  user, and another user's order returns 404.
 - **Token storage:** tokens are in `sessionStorage` (cleared when the tab closes), 60-minute lifetime, refresh tokens
   rotate. An XSS bug could still read them; there is no Content-Security-Policy header yet.
 - **Cognito's default email sender** is limited to a few dozen emails per day per account (sign-up codes); a busy

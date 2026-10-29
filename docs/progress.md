@@ -4,8 +4,8 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 
 ## Current phase
 **Upgrade step 2.0 — access tokens for the API (pre-token-generation trigger): IN PROGRESS (2026-10-29).**
-Commit A (trigger deployed, API accepts access + ID tokens, every client sends the access token) pushed; commit B
-(access tokens only) next. Then: **2.1 async payment (waitForTaskToken + HMAC webhook + timeout).**
+Commit A `e1a8a3c` green (trigger deployed, API accepted access + ID tokens, every client sends the access token;
+live e2e 14/14). Commit B (access tokens only, ID token -> 401) pushed; evidence next. Then: **2.1 async payment (waitForTaskToken + HMAC webhook + timeout).**
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)

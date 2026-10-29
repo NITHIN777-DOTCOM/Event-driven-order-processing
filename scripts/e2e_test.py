@@ -583,7 +583,7 @@ def token_claims(token: str) -> dict:
 
 
 def scenario_auth_gate() -> Scenario:
-    s = Scenario("k", "auth gate: no/tampered/forged token -> 401, access token with email claims -> 200, /products public")
+    s = Scenario("k", "auth gate: no/tampered/forged/ID token -> 401, access token with email claims -> 200, /products public")
     code, body = http_json("GET", f"{API}/products")
     s.check(code == 200 and len(body.get("products", [])) > 0, f"GET /products without a token -> {code} (expected 200)")
     for method, path in (("POST", "/orders"), ("GET", "/orders"), ("GET", "/orders/ORD-20261028-00000000"),
@@ -603,8 +603,11 @@ def scenario_auth_gate() -> Scenario:
     )
     code, body = http_json("GET", f"{API}/wallet", headers={"Authorization": token})
     s.check(code == 200 and body.get("walletId") == test_user(USER)["sub"], f"GET /wallet with the ACCESS token -> {code} (expected 200, A's wallet)")
-    code, body = http_json("GET", f"{API}/wallet", headers={"Authorization": test_user(USER)["id_token"]})
-    s.check(code == 200, f"GET /wallet with the ID token -> {code} (expected 200 during the step 2.0 rollout)")
+    # A genuine, unexpired ID token passes the JWT authorizer (aud = our client) but is the wrong token for an API.
+    for method, path in (("GET", "/wallet"), ("GET", "/orders"), ("POST", "/orders")):
+        code, body = http_json(method, f"{API}{path}", {} if method == "POST" else None, {"Authorization": test_user(USER)["id_token"]})
+        s.check(code == 401 and "ID tokens are not accepted" in body.get("error", ""),
+                f"{method} {path} with the ID token -> {code} (expected 401: {body.get('error')})")
     return s
 
 

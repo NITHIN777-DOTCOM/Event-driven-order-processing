@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 
 import pytest
 
@@ -44,8 +45,26 @@ def test_unknown_token_use_is_unauthorized(token_use):
         caller_from(api_event(claims=claims))
 
 
-def test_id_token_is_still_accepted_during_the_rollout():
-    assert caller_from(api_event(claims=jwt_claims(token_use="id"))).user_id == USER_A
+def test_id_token_is_rejected_with_a_clear_message():
+    with pytest.raises(Unauthorized, match="ID tokens are not accepted"):
+        caller_from(api_event(claims=jwt_claims(token_use="id")))
+
+
+@pytest.mark.parametrize("name", ["create_order", "get_order", "list_orders", "wallet_api"])
+def test_every_api_handler_answers_401_to_an_id_token(aws, load_handler, name):
+    event = api_event(
+        {"items": [{"productId": "WIRELESS-MOUSE", "quantity": 1}]},
+        path_parameters={"id": "ORD-20261029-00000000"},
+        headers={"Idempotency-Key": "id-token-test"},
+        claims=jwt_claims(token_use="id"),
+        route_key="GET /wallet",
+    )
+
+    result = load_handler(name).lambda_handler(event, None)
+
+    assert result["statusCode"] == 401
+    assert "access token" in json.loads(result["body"])["error"]
+    assert aws.orders.scan()["Count"] == 0  # nothing was written
 
 
 def test_identity_ignores_headers_body_and_query():

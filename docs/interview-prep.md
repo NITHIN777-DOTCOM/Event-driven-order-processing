@@ -525,7 +525,8 @@ behind Cognito), carried as a signed token the API can verify without calling ba
   caches the pool's public keys and checks signature, issuer, audience and expiry; a bad token is a 401 before any
   Lambda runs (and before any Lambda cost). Each route in `local.api_routes` has an `auth` flag.
 - `src/common/auth.py` `caller_from(event)`: reads `requestContext.authorizer.jwt.claims`; no `sub` → 401 (fails
-  closed if a route ever lost its authorizer); no `email` claim (an access token) or `email_verified != "true"` → 403.
+  closed if a route ever lost its authorizer); `token_use != "access"` → 401 (step 2.0); no `email` claim or
+  `email_verified != "true"` → 403.
   Body fields like `customerEmail`, `userId`, `walletId` and `?email=` are ignored everywhere.
 - `create_order`: `userId`, `walletId = sub`, `customerEmail` = the verified claim; `gsi1pk = USER#<sub>`,
   `gsi1sk = <createdAt>#<orderId>` (the suffix keeps two orders in the same millisecond distinct and stably ordered);
@@ -545,8 +546,13 @@ behind Cognito), carried as a signed token the API can verify without calling ba
   line has the trigger source, client id and `sub`, never the email.
 - `aws_lambda_permission.cognito_pre_token`: principal `cognito-idp.amazonaws.com`, `source_arn` = this pool's ARN, so
   no other user pool (in any account) can invoke it.
-- `caller_from` checks `token_use`. Rollout: commit A accepted `access` and `id` while the frontend, scripts and CI
-  switched to the access token.
+- **`token_use` validation** in `caller_from`: `access` → continue; `id` → **401** "ID tokens are not accepted: send
+  the access token"; anything else → 401. This check is necessary, not decoration: an ID token from the same pool is
+  validly signed and its `aud` is one of our clients, so the JWT authorizer lets it through. Only the claim tells the
+  two apart.
+- Rollout in two commits so nothing broke in between: commit A deployed the trigger and accepted **both** token
+  types while the frontend, `scripts/auth_tokens.py` and CI switched to the access token; commit B (after A was green
+  and the live e2e passed) removed `id`.
 - The JWT authorizer needed no change: HTTP API authorizers match the audience list against `aud` (ID token) **or**
   `client_id` (access token, which has no `aud`).
 
@@ -555,6 +561,24 @@ behind Cognito), carried as a signed token the API can verify without calling ba
   referrers, extensions) and can't use refresh tokens; OAuth 2.0 Security BCP deprecates it. Code + PKCE swaps a
   one-time code for tokens over a back-channel POST, and PKCE stops a stolen code from being redeemed by anyone
   without the verifier. The `spa` client allows only `code`.
+- **Access token vs ID token for the API (step 2.0):** the two tokens have different audiences and purposes. The
+  **ID token** (OIDC) is a statement *to the client app* about who signed in: `aud` = the app's client id, plus
+  profile claims (name, email). The **access token** (OAuth 2.0) is a credential *for a resource server*: it carries
+  `scope` and `client_id` and is what an API is meant to authorize. Sending ID tokens to APIs blurs that line: any
+  service that accepts them accepts a token that was never issued for it, and it can't use scopes to limit what a
+  client may do. Step 1.2 sent the ID token only because Cognito puts the email nowhere else.
+- **Pre-token trigger vs the API looking the email up:** alternatives were calling Cognito `GetUser` / `AdminGetUser`
+  on every request (an extra network hop and a Cognito API quota on the hot path) or caching profiles in a table.
+  The trigger costs one tiny Lambda run per sign-in/refresh (not per request), keeps the API stateless, and the
+  claim is signed, so it's as trustworthy as `sub`. The price: one more Lambda in the sign-in path (if it fails,
+  sign-in fails; it makes no AWS calls so it's hard to break), the email in the token is as fresh as the last
+  refresh (≤ 60 min), and V2_0 needs the Essentials plan (V1 can only change ID tokens).
+- **Minimal claims:** the trigger adds only `email` and `email_verified`. Access tokens get sent to every API call and
+  logged by proxies more often than ID tokens; every extra claim is extra personal data in transit, and the API
+  doesn't need a name or phone number.
+- **Two-commit rollout vs a big bang:** switching the backend to "access only" in the same deploy as the clients
+  would have broken any browser tab still holding an ID-token-sending build until reload. Accepting both for one
+  deploy made the switch safe; the second commit then closed the old door.
 - **oidc-client-ts vs Amplify:** the app needs redirect, code exchange, refresh and sign-out. A standard OIDC client
   does exactly that and isn't tied to AWS; it added about 19 kB gzipped (bundle 70.7 → 90.1 kB). Amplify Auth
   brings much more (its own UI and API abstractions) than this needs.
@@ -609,9 +633,19 @@ behind Cognito), carried as a signed token the API can verify without calling ba
 ### Likely interview questions
 1. *Why PKCE if there's no client secret?* Exactly because there's none: anyone can see a public client's ID, so
    PKCE binds the code to the browser that started the login. A stolen code is useless without the verifier.
-2. *Why send the ID token and not the access token?* The API needs the verified email, which Cognito puts only in
-   the ID token. The OIDC purist answer is "access tokens for APIs": the alternative is the access token plus a
-   pre-token-generation Lambda that adds the email to it, at the cost of one more Lambda.
+2. *Which token does your API accept, and why?* Only the access token. The ID token is for the client app (its `aud`
+   is the app, it describes the user); the access token is the credential for APIs. Cognito access tokens normally
+   lack the email, so a pre-token-generation trigger (V2_0) adds `email` + `email_verified` to them. In step 1.2 the
+   API took ID tokens for exactly that reason; step 2.0 fixed it.
+10. *The JWT authorizer validated the token. Why do you also check `token_use`?* Because an ID token from the same
+   pool is also validly signed, unexpired and names our client (in `aud`), so it passes. HTTP API authorizers check
+   `aud` *or* `client_id`, so they can't tell the types apart; `token_use` can. Without the check, the "access tokens
+   only" rule would be a convention, not enforcement.
+11. *How does a pre-token-generation trigger work, and what can go wrong?* Cognito invokes it synchronously before it
+   signs tokens, on sign-in and on every refresh; the function returns `claimsToAddOrOverride` for the ID and/or
+   access token. Cognito waits up to 5 s; an error or timeout fails the sign-in. Reserved claims (e.g. `sub`, `iss`,
+   `client_id`, `token_use`) can't be overridden, so a trigger bug can't change who the user is.
+   Only this pool may invoke it (`source_arn` on the Lambda permission).
 3. *Where are the tokens stored, and what if there's an XSS bug?* sessionStorage; an XSS bug could read them. The
    damage is limited by 60-minute tokens and refresh-token rotation; the real fix is a BFF with HttpOnly cookies.
 4. *How does CI sign in without a browser?* As a real test user, via `AdminInitiateAuth` on a separate client. That
@@ -625,7 +659,7 @@ behind Cognito), carried as a signed token the API can verify without calling ba
    "who are you"; only the data can answer "is this order yours". Authentication at the edge, authorization next to
    the data.
 9. *What happens to tokens when the user signs out?* The refresh token is revoked at Cognito (token revocation is
-   on), local tokens are cleared, and the managed-login session cookie is ended via `/logout`. An already-issued ID
+   on), local tokens are cleared, and the managed-login session cookie is ended via `/logout`. An already-issued access
    token stays valid until it expires (≤ 60 min): JWT validation is stateless; that's the trade-off.
 
 ### Debugging story

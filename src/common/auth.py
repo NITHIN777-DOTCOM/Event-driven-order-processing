@@ -8,18 +8,18 @@ Identity never comes from the request body, query string or headers: a client ca
   userId = the "sub" claim  (Cognito's immutable user id; an email can change or be reused, sub can't)
   email  = the "email" claim, accepted only if "email_verified" is "true"
 
-Which token? (step 2.0) The API is meant to be called with the ACCESS token: that is the token OAuth issues
-for calling APIs. The ID token is for the client app (who signed in). Cognito's access tokens don't carry the
-email, so the pre-token-generation trigger (src/lambdas/pre_token) adds email + email_verified to them.
-During the rollout both token types are accepted; the "token_use" claim says which one arrived.
+Which token? (step 2.0) Only the ACCESS token. OAuth issues the access token for calling APIs; the ID token
+tells the client app who signed in and is not meant to be sent to an API. Both are signed by the same pool and
+both pass API Gateway's JWT authorizer (it checks "aud" on ID tokens and "client_id" on access tokens), so the
+"token_use" claim is what tells them apart: an ID token is answered with 401.
+Cognito's access tokens don't normally carry the email; the pre-token-generation trigger (src/lambdas/pre_token)
+adds email + email_verified to them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-
-ACCEPTED_TOKEN_USES = ("access", "id")  # transitional: commit B narrows this to access tokens only
 
 
 class Unauthorized(Exception):
@@ -47,7 +47,9 @@ def caller_from(event: dict[str, Any]) -> Caller:
     if not isinstance(sub, str) or not sub:
         # Only reachable if a route were deployed without the authorizer: fail closed.
         raise Unauthorized("Sign in required")
-    if claims.get("token_use") not in ACCEPTED_TOKEN_USES:
+    if claims.get("token_use") == "id":
+        raise Unauthorized("ID tokens are not accepted: send the access token in the Authorization header")
+    if claims.get("token_use") != "access":
         raise Unauthorized("Send a Cognito access token in the Authorization header")
     email = claims.get("email")
     if not isinstance(email, str) or not email:
