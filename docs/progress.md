@@ -3,8 +3,9 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.2 — checkout holds: DONE (2026-10-29).** Next: **step 2.3, multi-item orders with partial compensation.** Report: docs/evidence/upgrade-2.2-report.md.
-(Step-by-step notes for 2.1 and 2.2 are in the "Step 2.x" sections below.)
+**Upgrade step 2.3 — per-item fulfillment with partial refunds: IN PROGRESS (commit A, expand).** Step 2.2 is DONE
+(2026-10-29, report docs/evidence/upgrade-2.2-report.md).
+(Step-by-step notes for 2.1 to 2.3 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)
@@ -96,6 +97,25 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - Live e2e 26/26 (t-z), UI suite 8/8 (0 console errors; fake-clock expiry shots). Unit tests 217, 94%. Schedule lag 11.8 / 20.1 / 45.9 s (not
   second-precise; expiry is also logical). App stack 156 resources. Evidence: docs/evidence/upgrade-2.2-holds.md.
 - inventory items now carry `held`; seed_inventory.py resets it to 0. I5: seeded = stock + held + reserved.
+- Docs commit `2609948`: CI 40868893996 + Deploy 40869067633 both green (recorded here in step 2.3; the 2.2 report
+  said it was here before it was).
+
+### Step 2.3 (per-item fulfillment, partial refunds, write-offs)
+- Spec: reservation stays all-or-nothing; after payment an inline Map `FulfillItems` fulfils each line; an unavailable
+  line is refunded (DemoPay line refund) and written off; the order ends PARTIALLY_FULFILLED (all lines unavailable ->
+  full refund, FAILED). New invariants I6 (net = fulfilled lines) and I7 (refunds <= charge, once per line); I5 now
+  seeded = stock + held + reserved + sold + writtenOff.
+- Commit A (expand, NOT wired into the saga): Lambdas order-saga-fulfill-item / order-saga-write-off-lines, table
+  order-saga-write-offs, DemoPay line refund (idempotent per (intent, line), running `refundedAmount` cap on the CHARGE
+  record), refund_payment `lineIds` mode, per-line lineId + lineAmount stored by create_order, release_inventory
+  aware of sold / written-off lines, reserve_inventory returns `lines` (dropped by the old ResultSelector),
+  alarm order-saga-refund-or-write-off-errors, fulfillment metric filters + dashboard row.
+  seed_inventory.py also resets sold / writtenOff and writes `seededAt`; e2e I5 uses all five counters and checks
+  writtenOff against the write-off records since `seededAt`; scenario a asserts an old-definition COMPLETED order
+  moves nothing to `sold`. `scripts/fulfillment_check.py` = live direct-invoke check of the new pieces.
+  jsonata-python==0.7.1 pinned in requirements-dev.txt (Map summary expression tests, commit B).
+- Next: deploy A, run fulfillment_check.py AND the full e2e (old path unchanged), then commit B (Map + Choice +
+  PARTIALLY_FULFILLED + item_unavailable/simulateLine + frontend), then docs.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
@@ -178,7 +198,7 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
 ## Next (upgrade step 2.3)
-- Multi-item orders with partial compensation.
+- Per-item fulfillment with partial refunds: commit A in progress (see "Step 2.3" above).
 
 ## Known limitations / ideas (good viva points)
 - (Fixed in 1.2) Wallets/orders are keyed by the Cognito `sub`; the API has a JWT authorizer.

@@ -69,7 +69,7 @@ locals {
       }
     }
     refund_payment = {
-      description = "Saga COMPENSATION - refunds any charge through DemoPay's idempotent refund API and marks the payment intent REFUNDED"
+      description = "Saga COMPENSATION - refunds what is left of a charge, or single order lines, through DemoPay's idempotent refund API"
       environment = {
         ORDERS_TABLE      = aws_dynamodb_table.orders.name
         PAYMENTS_TABLE    = aws_dynamodb_table.payments.name
@@ -126,6 +126,21 @@ locals {
       environment = {
         HOLDS_TABLE     = aws_dynamodb_table.holds.name
         INVENTORY_TABLE = aws_dynamodb_table.inventory.name
+      }
+    }
+    fulfill_item = {
+      description = "Saga step (one Map iteration per order line) - picks one line after payment - reserved to sold - raises ItemUnavailable for a damaged line"
+      environment = {
+        ORDERS_TABLE    = aws_dynamodb_table.orders.name
+        INVENTORY_TABLE = aws_dynamodb_table.inventory.name
+      }
+    }
+    write_off_lines = {
+      description = "Saga step - writes off the units of lines that could not be fulfilled - reserved to writtenOff plus an audit record - idempotent per line"
+      environment = {
+        ORDERS_TABLE     = aws_dynamodb_table.orders.name
+        INVENTORY_TABLE  = aws_dynamodb_table.inventory.name
+        WRITE_OFFS_TABLE = aws_dynamodb_table.write_offs.name
       }
     }
     pre_token = {

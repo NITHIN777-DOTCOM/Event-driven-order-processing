@@ -40,7 +40,9 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
   v) last unit race    -> two users hold the last unit at the same moment: exactly one 201, one 409
   w) hold ownership    -> another user can't release (404) or see someone's hold
   x) I5                -> stock conservation for EVERY product at the end of the run: seeded stock =
-                          stock + held + reserved, and held = the units in ACTIVE holds
+                          stock + held + reserved + sold + writtenOff, held = the units in ACTIVE holds, and
+                          writtenOff = the units in this seed's write-off audit records. An order that completed on
+                          the pre-2.3 definition never moves anything to `sold`: its units stay in `reserved`.
 
 Auth: every API call carries a Cognito access token for test user A (or B), from auth_tokens.py. The API
 takes identity only from that token, so no request below sends an email or user id.
@@ -99,8 +101,11 @@ ssm = boto3.client("ssm", region_name=REGION)
 payments_table = ddb.Table(OUT["payments_table"])
 wallet_txns_table = ddb.Table(OUT["wallet_txns_table"])
 holds_table = ddb.Table(OUT["holds_table"])
+write_offs_table = ddb.Table(OUT["write_offs_table"])
 scheduler = boto3.client("scheduler", region_name=REGION)
 SEEDED_STOCK = {p["productId"]: p["stock"] for p in SEED_PRODUCTS}  # I5 baseline (run seed_inventory.py first)
+# When seed_inventory.py last reset the counters (the earliest seededAt; "" if seeded before step 2.3).
+SEEDED_AT = min((str(i.get("seededAt", "")) for i in inventory_table.scan(ProjectionExpression="seededAt")["Items"]), default="")
 SHORT_HOLD_SECONDS = 30
 cloudwatch = boto3.client("cloudwatch", region_name=REGION)
 RUN_STARTED = datetime.now(timezone.utc)
@@ -273,6 +278,7 @@ def count_log_lines(log_group: str, *terms: str, since_ms: int) -> int:
 def scenario_none() -> Scenario:
     s = Scenario("a", "simulate=none -> COMPLETED, stock decreased, wallet debited once")
     before = stock_of("MECH-KEYBOARD")
+    sold_before = fulfillment_counters("MECH-KEYBOARD")
     balance_before = wallet()["balance"]
     code, body = place_order("MECH-KEYBOARD", 1, "none")
     s.check(code == 202, f"POST /orders returned {code} (expected 202)")
@@ -284,6 +290,17 @@ def scenario_none() -> Scenario:
     s.check(statuses(order) == expected, f"statusHistory {' -> '.join(statuses(order))}")
     after = stock_of("MECH-KEYBOARD")
     s.check(after == (before[0] - 1, before[1] + 1), f"MECH-KEYBOARD stock {before[0]} -> {after[0]} (expected -1)")
+    # Step 2.3 commit A (expand): the saga doesn't fulfil per line yet, so the unit stays in `reserved` exactly as
+    # before and nothing moves to `sold` or `writtenOff`. The order already stores its server-priced lines.
+    s.check(
+        fulfillment_counters("MECH-KEYBOARD") == sold_before,
+        f"MECH-KEYBOARD (sold, writtenOff) {sold_before} -> {fulfillment_counters('MECH-KEYBOARD')} (expected unchanged)",
+    )
+    stored = orders_table.get_item(Key={"orderId": s.order_id}, ConsistentRead=True)["Item"]["items"]
+    s.check(
+        [(i.get("lineId"), i.get("lineAmount")) for i in stored] == [("L1", order.get("totalAmount"))],
+        f"stored lines {[(i.get('lineId'), i.get('lineAmount')) for i in stored]} (expected [('L1', {order.get('totalAmount')})])",
+    )
     s.check(execution(s)["status"] == "SUCCEEDED", f"execution {execution(s)['status']} (expected SUCCEEDED)")
     balance_after = wallet()["balance"]
     s.check(
@@ -970,6 +987,12 @@ def counters(product_id: str) -> tuple[int, int, int]:
     return int(item["stock"]), int(item.get("held", 0)), int(item["reserved"])
 
 
+def fulfillment_counters(product_id: str) -> tuple[int, int]:
+    """(sold, writtenOff) for a product (step 2.3). Absent on rows seeded before 2.3 = 0."""
+    item = inventory_table.get_item(Key={"productId": product_id}, ConsistentRead=True)["Item"]
+    return int(item.get("sold", 0)), int(item.get("writtenOff", 0))
+
+
 def stored_hold(hold_id: str) -> dict:
     return holds_table.get_item(Key={"holdId": hold_id}, ConsistentRead=True).get("Item") or {}
 
@@ -1152,8 +1175,23 @@ def finish_expiring_hold(s: Scenario, hold: dict) -> Scenario:
     return s
 
 
+def written_off_since(seeded_at: str) -> dict[str, int]:
+    """productId -> units in write-off audit records made since the last seed (the seed resets writtenOff to 0)."""
+    units: dict[str, int] = {}
+    kwargs: dict = {"FilterExpression": "writtenOffAt >= :t", "ExpressionAttributeValues": {":t": seeded_at}}
+    while True:
+        page = write_offs_table.scan(**kwargs)
+        for record in page["Items"]:
+            units[record["productId"]] = units.get(record["productId"], 0) + int(record["quantity"])
+        if "LastEvaluatedKey" not in page:
+            return units
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+
 def scenario_stock_conservation() -> Scenario:
-    s = Scenario("x", "I5 stock conservation for every product: seeded = stock + held + reserved; held = ACTIVE holds")
+    """I5 per product. `reserved` covers BOTH in-flight orders and orders that completed on the pre-2.3 definition
+    (that definition never moves a unit on to `sold`), so the sum below is right for old and new orders alike."""
+    s = Scenario("x", "I5 stock conservation for every product: seeded = stock + held + reserved + sold + writtenOff")
     active: dict[str, int] = {}
     kwargs: dict = {"FilterExpression": "#s = :active", "ExpressionAttributeNames": {"#s": "status"}, "ExpressionAttributeValues": {":active": "ACTIVE"}}
     while True:
@@ -1164,11 +1202,17 @@ def scenario_stock_conservation() -> Scenario:
         if "LastEvaluatedKey" not in page:
             break
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    audited = written_off_since(SEEDED_AT)
     broken = []
     for product, seeded in SEEDED_STOCK.items():
         stock, held, reserved = counters(product)
-        if stock + held + reserved != seeded or held != active.get(product, 0):
-            broken.append(f"{product}: {stock}+{held}+{reserved} vs {seeded}, ACTIVE holds {active.get(product, 0)}")
+        sold, written_off = fulfillment_counters(product)
+        if stock + held + reserved + sold + written_off != seeded or held != active.get(product, 0):
+            broken.append(
+                f"{product}: {stock}+{held}+{reserved}+{sold}+{written_off} vs {seeded}, ACTIVE holds {active.get(product, 0)}"
+            )
+        if written_off != audited.get(product, 0):
+            broken.append(f"{product}: writtenOff {written_off} but {audited.get(product, 0)} units in write-off records")
     s.check(not broken, f"I5 holds for all {len(SEEDED_STOCK)} products" if not broken else f"I5 BROKEN: {broken}")
     return s
 

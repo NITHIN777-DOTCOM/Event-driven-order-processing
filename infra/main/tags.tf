@@ -8,7 +8,7 @@ module "tags" {
   descriptions = {
     orders_table           = "Customer orders with current status and full statusHistory timeline"
     idempotency_table      = "Idempotency-Key to orderId map that prevents duplicate orders - expires after 24h via TTL"
-    inventory_table        = "Product catalogue with price - available stock - reserved quantity"
+    inventory_table        = "Product catalogue with price and stock counters - available - held - reserved - sold - writtenOff"
     wallets_table          = "DemoPay wallet balances - one per customer email - demo money only"
     wallet_txns_table      = "DemoPay ledger - DEBIT for payments - CREDIT for refunds - ADJUST for demo balance changes"
     frontend_bucket        = "Storefront static files - React build - served only through CloudFront"
@@ -16,7 +16,7 @@ module "tags" {
     outbox_dlq             = "Stream records the outbox pipe could not deliver to the orders queue - their orders are stuck in PENDING"
     outbox_pipe            = "Transactional outbox - orders table stream to orders queue"
     payments_table         = "Payment intents - one per order - id PI-orderId - REQUESTED then SUCCEEDED or FAILED or TIMED_OUT then maybe REFUNDED"
-    psp_transactions_table = "Mock provider DemoPay - its charge and refund records - one CHARGE and at most one REFUND per payment intent"
+    psp_transactions_table = "Mock provider DemoPay - one CHARGE per payment intent - REFUND records per intent or per order line - refunds capped at the charge"
     psp_dlq                = "Payment requests DemoPay gave up on - webhook unreachable or rejecting - money may have moved - investigate"
     psp_requests_queue     = "Payment requests to the mock provider DemoPay - DLQ after 5 receives"
     orders_dlq             = "Dead-letter queue for orders that failed to start the workflow 3 times"
@@ -27,5 +27,6 @@ module "tags" {
     holds_table            = "Checkout holds - stock set aside for one user for 10 minutes - ACTIVE then CONSUMED or RELEASED or EXPIRED - plus one USER pointer per user"
     holds_schedule_group   = "One-time schedules that expire checkout holds at their exact expiry time - created and deleted by order-saga-holds-api"
     client_ids_parameter   = "Cognito app client ids for the hold duration rule - storefront 600 s - automation client may ask for 30 to 600 s"
+    write_offs_table       = "Audit of written-off order lines - damaged or missing after payment - one item per orderId and lineId - units never back on sale"
   }
 }

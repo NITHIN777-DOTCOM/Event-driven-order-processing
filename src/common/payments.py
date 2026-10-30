@@ -59,16 +59,22 @@ def provider_delay_seconds(simulate: str) -> int:
     return random.randint(2, 5)
 
 
-def invoke_provider_refund(lambda_client: Any, function_name: str, intent_id: str) -> dict[str, Any]:
+def invoke_provider_refund(
+    lambda_client: Any, function_name: str, intent_id: str, line: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Call DemoPay's refund API (a synchronous, IAM-authorised Lambda invoke). Idempotent per intent.
 
     Returns {"refunded": bool, "alreadyRefunded": bool, "refundId", "amount", "paymentId"} or, when nothing was
-    charged, {"refunded": False, "reason": "nothing charged"}.
+    charged, {"refunded": False, "reason": "nothing charged"}. With `line` ({"lineId", "amount", "note"}) it refunds
+    that one order line instead, idempotent per (intent, line) and capped at the amount charged.
     """
+    request: dict[str, Any] = {"operation": "refund", "paymentIntentId": intent_id}
+    if line:
+        request.update(lineId=line["lineId"], amount=str(line["amount"]), note=line.get("note", ""))
     response = lambda_client.invoke(
         FunctionName=function_name,
         InvocationType="RequestResponse",
-        Payload=json.dumps({"operation": "refund", "paymentIntentId": intent_id}).encode(),
+        Payload=json.dumps(request).encode(),
     )
     payload = json.loads(response["Payload"].read() or b"{}")
     if response.get("FunctionError"):

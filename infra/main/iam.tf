@@ -145,8 +145,8 @@ data "aws_iam_policy_document" "refund_payment" {
     resources = [aws_dynamodb_table.payments.arn]
   }
   statement {
-    sid       = "RecordRefundOnOrder"
-    actions   = ["dynamodb:UpdateItem"]
+    sid       = "ReadOrderLinesAndRecordRefunds"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
   }
   statement {
@@ -187,9 +187,10 @@ data "aws_iam_policy_document" "request_payment" {
 data "aws_iam_policy_document" "payment_provider" {
   source_policy_documents = [data.aws_iam_policy_document.lambda_base["payment_provider"].json]
 
+  # UpdateItem: the charge record's running refund total (the I7 cap).
   statement {
     sid       = "OwnChargeAndRefundRecords"
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.psp_transactions.arn]
   }
   statement {
@@ -277,6 +278,43 @@ data "aws_iam_policy_document" "release_inventory" {
   }
 }
 
+# Per-item fulfillment (step 2.3): one line per call, reserved -> sold, the line marked on the order.
+data "aws_iam_policy_document" "fulfill_item" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["fulfill_item"].json]
+
+  statement {
+    sid       = "ReadOrderAndMarkLineFulfilled"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.orders.arn]
+  }
+  statement {
+    sid       = "MoveReservedToSold"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.inventory.arn]
+  }
+}
+
+# Write-offs: reserved -> writtenOff, the line marked on the order, an audit record (Put only: never edited).
+data "aws_iam_policy_document" "write_off_lines" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["write_off_lines"].json]
+
+  statement {
+    sid       = "ReadOrderAndMarkLineWrittenOff"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.orders.arn]
+  }
+  statement {
+    sid       = "MoveReservedToWrittenOff"
+    actions   = ["dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.inventory.arn]
+  }
+  statement {
+    sid       = "AppendWriteOffAuditRecord"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.write_offs.arn]
+  }
+}
+
 # Checkout holds (step 2.2). TransactWriteItems is authorised per item: Put/Update/Delete on holds (hold + pointer),
 # Update on inventory.
 data "aws_iam_policy_document" "holds_api" {
@@ -346,6 +384,8 @@ locals {
     payment_webhook   = data.aws_iam_policy_document.payment_webhook.json
     holds_api         = data.aws_iam_policy_document.holds_api.json
     hold_expiry       = data.aws_iam_policy_document.hold_expiry.json
+    fulfill_item      = data.aws_iam_policy_document.fulfill_item.json
+    write_off_lines   = data.aws_iam_policy_document.write_off_lines.json
     # The Cognito trigger touches no AWS resource: own logs + X-Ray only.
     pre_token = data.aws_iam_policy_document.lambda_base["pre_token"].json
   }

@@ -1,7 +1,8 @@
-"""Order domain helpers: status values and the shared "change status" DynamoDB update."""
+"""Order domain helpers: status values, order lines, and the shared "change status" DynamoDB update."""
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from common.timeutil import utc_now_iso
@@ -20,11 +21,53 @@ INVENTORY_RELEASED = "INVENTORY_RELEASED"  # compensation: reserved stock given 
 COMPLETED = "COMPLETED"  # terminal: success (written by the state machine itself)
 FAILED = "FAILED"  # terminal: failure (written by the state machine itself)
 
-TERMINAL_STATUSES = frozenset({COMPLETED, FAILED})
+PARTIALLY_FULFILLED = "PARTIALLY_FULFILLED"  # terminal: some lines delivered, the others refunded (step 2.3)
+
+TERMINAL_STATUSES = frozenset({COMPLETED, FAILED, PARTIALLY_FULFILLED})
 
 # History-only events: appended to statusHistory WITHOUT changing `status` (the order stays PENDING).
 DELIVERY_RETRY = "DELIVERY_RETRY"  # an SQS delivery attempt failed and SQS will retry it
 DEAD_LETTERED = "DEAD_LETTERED"  # final attempt failed; SQS moves the message to the DLQ
+ITEM_FULFILLED = "ITEM_FULFILLED"  # one line picked and packed (step 2.3)
+LINE_REFUNDED = "LINE_REFUNDED"  # one line's amount refunded to the wallet
+ITEM_WRITTEN_OFF = "ITEM_WRITTEN_OFF"  # one line's units written off (damaged / lost), not back on sale
+
+# Per-line fulfillment, stored on the order line as `fulfillment` (absent = reserved, not handled yet).
+LINE_FULFILLED = "FULFILLED"
+LINE_WRITTEN_OFF = "WRITTEN_OFF"
+
+
+def line_id_for(index: int) -> str:
+    """Line ids are positional and stable: the first line is L1. They name the line in refunds and write-offs."""
+    return f"L{index + 1}"
+
+
+def line_amount(item: dict[str, Any]) -> Decimal:
+    """What the customer paid for one line: quantity x the unit price the SERVER stored when the order was created."""
+    return (Decimal(item["quantity"]) * Decimal(str(item["unitPrice"]))).quantize(Decimal("0.01"))
+
+
+def order_lines(order: dict[str, Any]) -> list[dict[str, Any]]:
+    """The order's lines with their index, id and amount. Orders created before step 2.3 have no stored lineId or
+    lineAmount; for them both are derived exactly the same way, so every order can be fulfilled line by line."""
+    lines = []
+    for index, item in enumerate(order["items"]):
+        lines.append(
+            {
+                **item,
+                "index": index,
+                "lineId": item.get("lineId") or line_id_for(index),
+                "lineAmount": Decimal(str(item.get("lineAmount") or line_amount(item))),
+            }
+        )
+    return lines
+
+
+def find_line(order: dict[str, Any], line_id: str) -> dict[str, Any]:
+    for line in order_lines(order):
+        if line["lineId"] == line_id:
+            return line
+    raise KeyError(f"Order {order['orderId']} has no line {line_id}")
 
 
 def history_entry(status: str, detail: str, timestamp: str | None = None) -> dict[str, str]:

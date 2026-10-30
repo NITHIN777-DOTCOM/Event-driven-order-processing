@@ -158,3 +158,19 @@ output "holds_table" {
 output "holds_schedule_group" {
   value = aws_scheduler_schedule_group.holds.name
 }
+
+# --- Per-item fulfillment (fulfillment.tf) ----------------------------------------------------
+
+output "write_offs_table" {
+  value = aws_dynamodb_table.write_offs.name
+}
+
+output "fulfillment_function_names" {
+  description = "The step 2.3 Lambdas, for scripts/fulfillment_check.py (direct invokes, before they are wired into the saga)."
+  value = {
+    fulfill_item     = local.lambda_names["fulfill_item"]
+    write_off_lines  = local.lambda_names["write_off_lines"]
+    refund_payment   = local.lambda_names["refund_payment"]
+    payment_provider = local.lambda_names["payment_provider"]
+  }
+}

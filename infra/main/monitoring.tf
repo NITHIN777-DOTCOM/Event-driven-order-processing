@@ -236,6 +236,7 @@ locals {
     aws_cloudwatch_metric_alarm.psp_dlq_not_empty.arn,
     aws_cloudwatch_metric_alarm.webhook_signature_failures.arn,
     aws_cloudwatch_metric_alarm.hold_expiry_errors.arn,
+    aws_cloudwatch_metric_alarm.refund_or_write_off_errors.arn,
   ]
 }
 
@@ -289,6 +290,93 @@ resource "aws_cloudwatch_log_metric_filter" "hold_expiry_lag" {
     namespace = "OrderSaga"
     value     = "$.expiryLagMs"
     unit      = "Milliseconds"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Per-item fulfillment and partial refunds (step 2.3)
+# -----------------------------------------------------------------------------
+# PartialRefund and WriteOffLines retry, then FAIL the execution on purpose (it can be redriven from that state,
+# and both steps are idempotent per line). Without this alarm that failure would be silent: the customer is owed
+# money (or the stock books are wrong) and the order stays at PAYMENT_CAPTURED. It also covers the full-refund
+# compensation, whose Catch otherwise carries on quietly after its retries.
+resource "aws_cloudwatch_metric_alarm" "refund_or_write_off_errors" {
+  alarm_name          = "${var.project_prefix}-refund-or-write-off-errors"
+  alarm_description   = "A refund (full or per line) or a write-off failed: a customer may be owed money, or written-off stock may be miscounted. Check the refund-payment and write-off-lines logs (orderId, lineId on every line), fix the cause, then REDRIVE the failed execution in Step Functions: both steps are idempotent per line."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "errors"
+    expression  = "refund + writeoff"
+    label       = "Refund and write-off Lambda errors"
+    return_data = true
+  }
+  metric_query {
+    id = "refund"
+    metric {
+      namespace   = "AWS/Lambda"
+      metric_name = "Errors"
+      dimensions  = { FunctionName = local.lambda_names["refund_payment"] }
+      stat        = "Sum"
+      period      = 300
+    }
+  }
+  metric_query {
+    id = "writeoff"
+    metric {
+      namespace   = "AWS/Lambda"
+      metric_name = "Errors"
+      dimensions  = { FunctionName = local.lambda_names["write_off_lines"] }
+      stat        = "Sum"
+      period      = 300
+    }
+  }
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}
+
+# One count per fulfillment event: fulfilled / unavailable (fulfill_item), written_off (write_off_lines),
+# line_refunded / partially_fulfilled / all_unavailable (refund_payment). Metric OrderSaga/FulfillmentEvents.
+resource "aws_cloudwatch_log_metric_filter" "fulfillment_events" {
+  for_each = toset(["fulfill_item", "write_off_lines", "refund_payment"])
+
+  name           = "${var.project_prefix}-fulfillment-events-${replace(each.key, "_", "-")}"
+  log_group_name = aws_cloudwatch_log_group.lambda[each.key].name
+  pattern        = "{ $.fulfillmentEvent = * }"
+
+  metric_transformation {
+    name       = "FulfillmentEvents"
+    namespace  = "OrderSaga"
+    value      = "1"
+    dimensions = { Event = "$.fulfillmentEvent" }
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "written_off_units" {
+  name           = "${var.project_prefix}-written-off-units"
+  log_group_name = aws_cloudwatch_log_group.lambda["write_off_lines"].name
+  pattern        = "{ $.fulfillmentEvent = \"written_off\" }"
+
+  metric_transformation {
+    name      = "WrittenOffUnits"
+    namespace = "OrderSaga"
+    value     = "$.quantity"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "line_refund_amount" {
+  name           = "${var.project_prefix}-line-refund-amount"
+  log_group_name = aws_cloudwatch_log_group.lambda["refund_payment"].name
+  pattern        = "{ $.fulfillmentEvent = \"line_refunded\" }"
+
+  metric_transformation {
+    name      = "LineRefundAmount"
+    namespace = "OrderSaga"
+    value     = "$.amount"
   }
 }
 
@@ -543,6 +631,64 @@ locals {
         metrics = [
           ["AWS/Lambda", "Invocations", "FunctionName", local.hold_expiry_function_name, { stat = "Sum", label = "Invocations" }],
           ["AWS/Lambda", "Errors", "FunctionName", local.hold_expiry_function_name, { stat = "Sum", label = "Errors", color = "#d62728" }],
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
+  ]
+
+  fulfillment_widgets = [
+    {
+      type   = "metric"
+      x      = 0
+      y      = 59
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Fulfillment per 5 min: lines fulfilled / unavailable / written off, orders partially fulfilled"
+        region = var.region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [for event in ["fulfilled", "unavailable", "written_off", "partially_fulfilled", "all_unavailable"] :
+          ["OrderSaga", "FulfillmentEvents", "Event", event, { label = event }]
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
+    {
+      type   = "metric"
+      x      = 8
+      y      = 59
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Partial refunds (INR) and written-off units per 5 min"
+        region = var.region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [
+          ["OrderSaga", "LineRefundAmount", { label = "INR refunded per line", yAxis = "left" }],
+          ["OrderSaga", "WrittenOffUnits", { label = "units written off", yAxis = "right" }],
+        ]
+        yAxis = { left = { min = 0 }, right = { min = 0 } }
+      }
+    },
+    {
+      type   = "metric"
+      x      = 16
+      y      = 59
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Refund / write-off Lambda errors (should be 0; alarm at 1)"
+        region = var.region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [for key in ["refund_payment", "write_off_lines"] :
+          ["AWS/Lambda", "Errors", "FunctionName", local.lambda_names[key], { label = local.lambda_names[key] }]
         ]
         yAxis = { left = { min = 0 } }
       }
@@ -869,7 +1015,8 @@ locals {
       },
     ],
     local.payment_widgets,
-    local.hold_widgets
+    local.hold_widgets,
+    local.fulfillment_widgets
   )
 }
 

@@ -1,7 +1,7 @@
 """Seed the inventory table with the storefront catalogue (16 products in 5 categories).
 
 Idempotent: re-running it overwrites each product, which resets stock to its seed value and
-reserved and held to 0. The first 5 productIds are the original Phase 1 ones, so old orders and scripts
+reserved, held, sold and writtenOff to 0. The first 5 productIds are the original Phase 1 ones, so old orders and scripts
 keep working.
 
 Usage: python scripts/seed_inventory.py
@@ -9,6 +9,7 @@ Usage: python scripts/seed_inventory.py
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import boto3
@@ -136,6 +137,8 @@ PRODUCTS = [
 def main() -> None:
     outputs = load_outputs()
     table = boto3.resource("dynamodb", region_name=outputs["region"]).Table(outputs["inventory_table"])
+    # When the counters were reset; e2e_test.py's I5 compares writtenOff with the write-off records made since then.
+    seeded_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     with table.batch_writer() as batch:
         for product in PRODUCTS:
@@ -147,6 +150,9 @@ def main() -> None:
                     "rating": Decimal(product["rating"]),
                     "reserved": 0,
                     "held": 0,  # step 2.2: units in ACTIVE checkout holds
+                    "sold": 0,  # step 2.3: units in fulfilled order lines
+                    "writtenOff": 0,  # step 2.3: units of unavailable (damaged) lines, never back on sale
+                    "seededAt": seeded_at,
                     "imageKey": f"products/{product['productId'].lower()}.webp",
                 }
             )

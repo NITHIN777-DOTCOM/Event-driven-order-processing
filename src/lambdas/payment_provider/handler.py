@@ -6,7 +6,10 @@
    (5 receives, then order-saga-psp-dlq + an alarm).
 
 2. Direct invoke {"operation": "refund", "paymentIntentId"}  ->  DemoPay's refund API, used by our
-   compensation (refund_payment) and by the webhook's late-callback path. Idempotent.
+   compensation (refund_payment) and by the webhook's late-callback path. Idempotent. It refunds whatever of the
+   charge has not been refunded yet.
+   With "lineId" and "amount" (step 2.3) it refunds ONE order line: idempotent per (intent, line), and capped so
+   the running refund total can never exceed the amount charged (invariant I7).
 
 What DemoPay knows: the intent id, order id, wallet and amount. It never sees the Step Functions task token;
 the token stays inside our system (payments table), so the provider can't resume or fail our workflow directly.
@@ -16,6 +19,12 @@ Exactly-once money movement: DemoPay keeps its OWN records in order-saga-psp-tra
 ONE DynamoDB transaction, conditional on the record not existing yet. So a redelivered SQS message, a duplicate
 request or a concurrent run can't debit (or refund) twice: the second attempt finds the record and replays the
 outcome it already decided (same paymentId, same decision), including a decline.
+
+Refund cap: the CHARGE record keeps `refundedAmount`, the running total of every refund of that charge. Each refund
+adds to it in the same transaction, on the condition that the total before it is at most (charged - this refund).
+DynamoDB can't evaluate "a + b <= c" in a condition, so the limit (c - b) is computed here; the charged amount is
+immutable, so that is exact. Line refunds ("REFUND#<intent>#<lineId>") and the whole-remainder refund
+("REFUND#<intent>") all go through the same counter, so in any order and any interleaving the total is capped.
 
 Demo behaviour (the order's simulate flag travels in the request, like a test card number would):
   payment_declined       decline ("Card declined by issuer"); no money moves
@@ -75,8 +84,15 @@ class BalanceConflict(Exception):
     """The wallet kept changing under us. Raising lets SQS redeliver; the charge record makes that safe."""
 
 
+class RefundRejected(Exception):
+    """The refund would take the charge's refunded total above the amount charged (I7), or isn't valid at all.
+    A bug upstream, never a normal outcome: it surfaces as a Lambda error (and an alarm), not as money moved."""
+
+
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if event.get("operation") == "refund":
+        if event.get("lineId"):
+            return refund_line(event["paymentIntentId"], event["lineId"], Decimal(str(event["amount"])), event.get("note", ""))
         return refund(event["paymentIntentId"])
     return handle_sqs_batch(event)
 
@@ -236,54 +252,148 @@ def post_callback(body: bytes, secret: str) -> int:
 
 # --- 2. Refunds (direct invoke) ------------------------------------------------------------------
 def refund(intent_id: str) -> dict[str, Any]:
-    """Refund the charge of `intent_id`: exactly once. Safe to call before a charge, after, and repeatedly."""
+    """Refund what is left of the charge of `intent_id` (all of it, unless lines were refunded already): once.
+    Safe to call before a charge, after, and repeatedly."""
     log = logger.bind(paymentIntentId=intent_id, operation="refund")
-    charge = psp_table.get_item(Key={"pspTxnId": f"CHARGE#{intent_id}"}, ConsistentRead=True).get("Item")
-    if not charge or charge["outcome"] != SUCCEEDED:
-        log.info("Nothing was charged for this intent; nothing to refund", chargeOutcome=(charge or {}).get("outcome"))
+    charge = successful_charge(intent_id, log)
+    if not charge:
         return {"refunded": False, "reason": "nothing charged"}
     log = log.bind(orderId=charge["orderId"])
 
-    amount, wid = Decimal(charge["amount"]), charge["walletId"]
-    refund_item = {
-        "pspTxnId": f"REFUND#{intent_id}",
+    for _ in range(MAX_BALANCE_CONFLICTS):
+        done = psp_table.get_item(Key={"pspTxnId": f"REFUND#{intent_id}"}, ConsistentRead=True).get("Item")
+        if done:  # a repeat call: replay the refund that already happened
+            log.info("Already refunded; idempotent no-op", refundId=done["refundId"])
+            return refund_result(done, refunded=False)
+        already = refunded_so_far(charge)
+        remaining = Decimal(charge["amount"]) - already
+        if remaining <= 0:
+            log.info("Every line of this charge was refunded already; nothing left to refund", refundedAmount=already)
+            return {"refunded": False, "reason": "already refunded line by line"}
+        refund_item = refund_record(charge, f"REFUND#{intent_id}", remaining)
+        outcome = move_refund(charge, refund_item, f"Refund for {charge['orderId']}", log, already_refunded=already)
+        if outcome == "done":
+            return refund_result(refund_item, refunded=True)
+        if outcome == "duplicate":
+            done = psp_table.get_item(Key={"pspTxnId": refund_item["pspTxnId"]}, ConsistentRead=True)["Item"]
+            log.info("Already refunded; idempotent no-op", refundId=done["refundId"])
+            return refund_result(done, refunded=False)
+        charge = psp_table.get_item(Key={"pspTxnId": charge["pspTxnId"]}, ConsistentRead=True)["Item"]  # re-read, retry
+    raise BalanceConflict("Wallet is busy; retry the refund")
+
+
+def refund_line(intent_id: str, line_id: str, amount: Decimal, note: str = "") -> dict[str, Any]:
+    """Refund ONE order line of the charge: idempotent per (intent, line), never above what was charged (I7)."""
+    log = logger.bind(paymentIntentId=intent_id, operation="refund_line", lineId=line_id)
+    charge = successful_charge(intent_id, log)
+    if not charge:
+        return {"refunded": False, "reason": "nothing charged"}
+    log = log.bind(orderId=charge["orderId"])
+    if not Decimal("0") < amount <= Decimal(charge["amount"]):
+        raise RefundRejected(f"Line refund of {amount} is not between 0 and the charged {charge['amount']}")
+
+    refund_item = refund_record(charge, f"REFUND#{intent_id}#{line_id}", amount, lineId=line_id)
+    description = f"Refund for {charge['orderId']} line {line_id}" + (f" ({note})" if note else "")
+    for _ in range(MAX_BALANCE_CONFLICTS):
+        outcome = move_refund(charge, refund_item, description, log, cap=Decimal(charge["amount"]) - amount)
+        if outcome in ("done", "duplicate"):
+            record = refund_item
+            if outcome == "duplicate":
+                record = psp_table.get_item(Key={"pspTxnId": refund_item["pspTxnId"]}, ConsistentRead=True)["Item"]
+                log.info("Line already refunded; idempotent no-op", refundId=record["refundId"])
+            total = refunded_so_far(psp_table.get_item(Key={"pspTxnId": charge["pspTxnId"]}, ConsistentRead=True)["Item"])
+            return {
+                **refund_result(record, refunded=outcome == "done"),
+                "lineId": line_id,
+                "chargeAmount": str(charge["amount"]),
+                "chargeRefundedTotal": str(total),
+            }
+        if outcome == "over_cap":
+            raise RefundRejected(f"Refunding {amount} for line {line_id} would exceed the {charge['amount']} charged for {intent_id}")
+    raise BalanceConflict("Wallet is busy; retry the refund")
+
+
+def successful_charge(intent_id: str, log: StructuredLogger) -> dict[str, Any] | None:
+    charge = psp_table.get_item(Key={"pspTxnId": f"CHARGE#{intent_id}"}, ConsistentRead=True).get("Item")
+    if not charge or charge["outcome"] != SUCCEEDED:
+        log.info("Nothing was charged for this intent; nothing to refund", chargeOutcome=(charge or {}).get("outcome"))
+        return None
+    return charge
+
+
+def refunded_so_far(charge: dict[str, Any]) -> Decimal:
+    return Decimal(str(charge.get("refundedAmount", "0")))
+
+
+def refund_record(charge: dict[str, Any], key: str, amount: Decimal, **extra: Any) -> dict[str, Any]:
+    return {
+        "pspTxnId": key,
         "kind": "REFUND",
-        "paymentIntentId": intent_id,
+        "paymentIntentId": charge["paymentIntentId"],
         "orderId": charge["orderId"],
-        "walletId": wid,
+        "walletId": charge["walletId"],
         "amount": amount,
         "paymentId": charge["paymentId"],
         "refundId": f"RF-{uuid.uuid4().hex[:12]}",
         "createdAt": utc_now_iso(),
+        **extra,
     }
-    for _ in range(MAX_BALANCE_CONFLICTS):
-        before = Decimal(ensure_wallet(wallets_table, wid)["balance"])
-        after = before + amount
-        try:
-            dynamodb.meta.client.transact_write_items(
-                TransactItems=[
-                    balance_update(WALLETS_TABLE, wid, before, after),
-                    txn_put(
-                        WALLET_TXNS_TABLE, wid, CREDIT, amount, after, charge["orderId"],
-                        f"Refund for {charge['orderId']}", {"paymentIntentId": intent_id},
-                    ),
-                    {"Put": {"TableName": PSP_TABLE, "Item": refund_item, "ConditionExpression": "attribute_not_exists(pspTxnId)"}},
-                ]
-            )
-        except ClientError as err:
-            if err.response["Error"]["Code"] != "TransactionCanceledException":
-                raise
-            codes = cancellation_codes(err.response)
-            if len(codes) > 2 and codes[2] == "ConditionalCheckFailed":
-                done = psp_table.get_item(Key={"pspTxnId": refund_item["pspTxnId"]}, ConsistentRead=True)["Item"]
-                log.info("Already refunded; idempotent no-op", refundId=done["refundId"])
-                return refund_result(done, refunded=False)
-            if codes and codes[0] == "ConditionalCheckFailed":
-                continue
+
+
+def move_refund(
+    charge: dict[str, Any],
+    refund_item: dict[str, Any],
+    description: str,
+    log: StructuredLogger,
+    cap: Decimal | None = None,
+    already_refunded: Decimal | None = None,
+) -> str:
+    """ONE transaction: wallet credit + ledger CREDIT + refund record + the charge's running refund total.
+
+    The charge record is guarded by `cap` (a line refund: the total before must be <= cap) or by `already_refunded`
+    (the whole remainder: the total must still be exactly what we read). Returns "done", "duplicate" (this refund
+    record exists already), "over_cap", or "retry" (the wallet balance or the charge's total changed: re-read).
+    """
+    wid, amount = charge["walletId"], refund_item["amount"]
+    if cap is not None:
+        guard, guard_values = "attribute_not_exists(refundedAmount) OR refundedAmount <= :limit", {":limit": cap}
+    else:
+        guard, guard_values = "attribute_not_exists(refundedAmount) OR refundedAmount = :seen", {":seen": already_refunded}
+    before = Decimal(ensure_wallet(wallets_table, wid)["balance"])
+    after = before + amount
+    ledger_extra = {"paymentIntentId": charge["paymentIntentId"]}
+    if "lineId" in refund_item:
+        ledger_extra["lineId"] = refund_item["lineId"]
+    try:
+        dynamodb.meta.client.transact_write_items(
+            TransactItems=[
+                balance_update(WALLETS_TABLE, wid, before, after),
+                txn_put(WALLET_TXNS_TABLE, wid, CREDIT, amount, after, charge["orderId"], description, ledger_extra),
+                {"Put": {"TableName": PSP_TABLE, "Item": refund_item, "ConditionExpression": "attribute_not_exists(pspTxnId)"}},
+                {
+                    "Update": {
+                        "TableName": PSP_TABLE,
+                        "Key": {"pspTxnId": charge["pspTxnId"]},
+                        "UpdateExpression": "SET refundedAmount = if_not_exists(refundedAmount, :zero) + :amount",
+                        "ConditionExpression": guard,
+                        "ExpressionAttributeValues": {":zero": Decimal("0"), ":amount": amount, **guard_values},
+                    }
+                },
+            ]
+        )
+    except ClientError as err:
+        if err.response["Error"]["Code"] != "TransactionCanceledException":
             raise
-        log.info("Refunded", refundId=refund_item["refundId"], amount=amount, balanceAfter=after, walletId=wid)
-        return refund_result(refund_item, refunded=True)
-    raise BalanceConflict("Wallet is busy; retry the refund")
+        codes = cancellation_codes(err.response)
+        if len(codes) > 2 and codes[2] == "ConditionalCheckFailed":
+            return "duplicate"
+        if len(codes) > 3 and codes[3] == "ConditionalCheckFailed":
+            return "over_cap" if cap is not None else "retry"
+        if codes and codes[0] == "ConditionalCheckFailed":
+            return "retry"
+        raise
+    log.info("Refunded", refundId=refund_item["refundId"], amount=amount, balanceAfter=after, walletId=wid)
+    return "done"
 
 
 def refund_result(item: dict[str, Any], refunded: bool) -> dict[str, Any]:

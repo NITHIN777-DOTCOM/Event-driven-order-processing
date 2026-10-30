@@ -42,6 +42,7 @@ os.environ.update(
     EXPIRY_FUNCTION_ARN=f"arn:aws:lambda:{REGION}:123456789012:function:test-hold-expiry",
     SCHEDULER_ROLE_ARN="arn:aws:iam::123456789012:role/test-holds-scheduler-role",
     CLIENT_IDS_PARAMETER="/test/auth/client-ids",
+    WRITE_OFFS_TABLE="test-write-offs",
 )
 WEBHOOK_SECRET = "test-webhook-secret-0123456789abcdef"
 SPA_CLIENT, AUTOMATION_CLIENT = "test-client", "test-automation-client"
@@ -125,6 +126,12 @@ def aws():
             AttributeDefinitions=[{"AttributeName": "holdId", "AttributeType": "S"}],
             BillingMode="PAY_PER_REQUEST",
         )
+        write_offs = ddb.create_table(
+            TableName="test-write-offs",
+            KeySchema=[{"AttributeName": "orderId", "KeyType": "HASH"}, {"AttributeName": "lineId", "KeyType": "RANGE"}],
+            AttributeDefinitions=[{"AttributeName": "orderId", "AttributeType": "S"}, {"AttributeName": "lineId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
         for product in PRODUCTS:
             inventory.put_item(Item=product)
 
@@ -163,6 +170,7 @@ def aws():
             payments=payments,
             psp=psp,
             holds=holds,
+            write_offs=write_offs,
             scheduler=scheduler,
             sqs=sqs,
             queue_url=queue_url,

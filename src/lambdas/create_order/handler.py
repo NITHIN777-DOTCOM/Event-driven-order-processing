@@ -46,7 +46,7 @@ from botocore.exceptions import ClientError
 from common.auth import Caller, Forbidden, Unauthorized, caller_from
 from common.http import BadRequest, get_header, parse_json_body, response
 from common.logger import StructuredLogger, get_logger
-from common.orders import PENDING, cancellation_codes, history_entry
+from common.orders import PENDING, cancellation_codes, history_entry, line_amount, line_id_for
 from common.timeutil import utc_now_iso
 from common.tracing import instrument_aws_sdk
 from common.wallet import wallet_id_for
@@ -236,13 +236,14 @@ def check_hold(request: dict[str, Any], caller: Caller) -> None:
 
 
 def price_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Attach the product name and current unit price from the inventory table.
+    """Attach the product name and current unit price from the inventory table, and number the lines.
 
     Prices always come from the server and never from the client, so the client can't
-    change what it pays.
+    change what it pays. Each line also stores its id (L1, L2, ...) and its amount (quantity x unit price):
+    a partial refund (step 2.3) refunds exactly that stored amount, never a figure sent by anyone later.
     """
     priced, unknown = [], []
-    for item in items:
+    for index, item in enumerate(items):
         product = inventory_table.get_item(Key={"productId": item["productId"]}).get("Item")
         if product is None:
             unknown.append(item["productId"])
@@ -253,6 +254,8 @@ def price_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "name": product["name"],
                 "quantity": item["quantity"],
                 "unitPrice": product["price"],
+                "lineId": line_id_for(index),
+                "lineAmount": line_amount({"quantity": item["quantity"], "unitPrice": product["price"]}),
             }
         )
     if unknown:
@@ -267,7 +270,7 @@ def new_order_id() -> str:
 
 def build_order(request: dict[str, Any], idempotency_key: str, caller: Caller) -> dict[str, Any]:
     items = price_items(request["items"])
-    total = sum((Decimal(i["quantity"]) * i["unitPrice"] for i in items), Decimal("0"))
+    total = sum((i["lineAmount"] for i in items), Decimal("0"))  # the order total is the sum of its lines
     now = utc_now_iso()
     order_id = new_order_id()
     return {

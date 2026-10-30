@@ -1037,7 +1037,108 @@ to exactly (100, 0, 0) but found (99, 0, 1). The stock invariant check (x) passe
 lost. Scenario l had ordered a desk mat during u's 30 s window. The fix was in the test: compare what the hold
 controls (held back to its earlier value; stock + reserved unchanged), not the whole counter.
 
-## 12. Known gaps (and where they get fixed)
+## 12. Per-item fulfillment and partial refunds
+
+### What
+After the payment succeeds, each order line is fulfilled on its own. If one line can't be fulfilled (for example
+it is found damaged in the warehouse), only that line is refunded and written off. The rest of the order ships, and
+the order ends **PARTIALLY_FULFILLED**.
+- Lambda `order-saga-fulfill-item`: picks ONE line per call (`reserved` → `sold`). It raises `ItemUnavailable`
+  for a damaged line (demo: `simulate: "item_unavailable"`, `simulateLine` 1..n or `"all"`, default the last line).
+- Lambda `order-saga-write-off-lines`: moves the failed lines' units `reserved` → `writtenOff`, never back on sale,
+  and writes an audit record to the new table `order-saga-write-offs` (orderId, lineId, productId, quantity, reason,
+  writtenOffAt).
+- DemoPay line refund: `{"operation": "refund", "paymentIntentId", "lineId", "amount"}`. It is idempotent per
+  (intent, line), and capped so the running refund total can never exceed the charge.
+  `order-saga-refund-payment` with `{"orderId", "lineIds"}` refunds those lines at their **stored** amounts.
+- Orders store per-line prices at creation: `lineId` (L1, L2, ...), `unitPrice` and `lineAmount` = quantity ×
+  unit price, all from the inventory table. The total is the sum of the lines.
+- Inventory counters per product: `stock`, `held`, `reserved`, `sold`, `writtenOff`.
+- Saga (commit B): an inline Map `FulfillItems` over the lines; then a Choice: all fulfilled → COMPLETED; some →
+  PartialRefund → WriteOffLines → PARTIALLY_FULFILLED; none → full refund + write off all → FAILED.
+
+### Why (the problem it solves)
+Reservation is still atomic and all-or-nothing, which is right *before* payment: the customer pays for a
+basket that is fully in stock, or for nothing. But some failures happen only *after* payment, in the warehouse, and
+they hit one item, not the whole basket. Failing and refunding the whole order for one dented box loses a sale and
+annoys the customer. Real shops ship what they can and refund the rest. The hard part is the money: every rupee
+refunded must match exactly the lines that didn't ship, even with retries, re-runs and concurrent iterations.
+
+### How
+**Prices are fixed at creation.** `create_order` writes each line's `lineAmount` from the server's price. A
+refund always uses that stored amount, never a figure from the client or from the state machine's input, so
+nobody can change what is refunded later.
+
+**One line per Lambda call, idempotent per line.** `fulfill_item` runs ONE transaction: the line's `fulfillment =
+FULFILLED` (+ ITEM_FULFILLED in the history), conditional on the line not being handled yet, together with
+`reserved - q, sold + q` (conditional on `reserved >= q`). A retry finds the line handled and reports FULFILLED
+again without moving stock. Up to MaxConcurrency lines of the same order update the same order item at once, so
+DynamoDB can cancel one with `TransactionConflict`. The Lambda retries that with jitter and raises a retryable
+`FulfillmentTransientError` only if the conflicts keep coming.
+
+**Partial refund: idempotent and capped (I7).** DemoPay's CHARGE record keeps `refundedAmount`, the running
+total. A line refund is ONE transaction: wallet credit + ledger CREDIT + refund record `REFUND#<intent>#<lineId>`
+(`attribute_not_exists`, so once per line) + `refundedAmount += amount`. That last part is conditional on
+`refundedAmount <= charged - amount`. DynamoDB can't evaluate `a + b <= c` in a condition, but the charge is
+immutable, so the limit `c - b` is computed in code and the check is exact. The old whole-charge refund now means
+"refund what is left". It goes through the same counter (guarded by "the total is still what I read"), so line and
+whole refunds in any order and any interleaving can't exceed the charge.
+
+**Write-off accounting.** A written-off unit is not available stock; it is a loss. `write_off_lines` puts the
+audit record (`attribute_not_exists`, so it doubles as the idempotency record), moves `reserved` → `writtenOff`,
+and marks the line WRITTEN_OFF, all in one transaction. A FULFILLED line can never be written off (it fails loudly).
+If a later step compensates the whole order, ReleaseInventory takes FULFILLED lines back from `sold` and leaves
+written-off units where they are.
+
+**Invariants** (checked by the e2e run for every order and product):
+> **I5** seeded stock = `stock` + `held` + `reserved` + `sold` + `writtenOff`, and `writtenOff` = the units in
+> write-off records. An order that completed on the pre-2.3 definition keeps its units in `reserved`.
+> **I6** net charge = the sum of the FULFILLED line amounts (COMPLETED: the total; FAILED: 0).
+> **I7** refunds of an intent never exceed the charge; each line is refunded at most once.
+
+**Rollout (expand → migrate).** Commit A deployed the Lambdas, the line refund, the write-off table and per-line
+prices, but nothing in the saga called them. The changed live functions (create_order, reserve_inventory,
+release_inventory, DemoPay refund) stayed backward compatible: reserve_inventory's new `lines` output is dropped
+by the old definition's ResultSelector, and release_inventory's per-line logic only applies when a line has been
+fulfilled or written off. `scripts/fulfillment_check.py` drove the new pieces by direct invoke on a real order, and the full
+e2e suite re-ran to prove the old path unchanged. Commit B switches the state machine. Executions that are already
+running keep the definition they started with.
+
+### Trade-offs / alternatives considered
+| Option | Why not (here) |
+|---|---|
+| Fail and refund the whole order when one line fails | Simple, but loses the sale of everything that *could* ship. |
+| Per-item reservation (reserve what you can) | Moves partial outcomes before payment, where the customer can still choose. All-or-nothing reservation is the clearer contract. |
+| **Distributed Map** | For thousands of items or S3 inputs: child executions, more cost, more moving parts. An order has ≤ 20 lines: inline is enough. |
+| One Lambda fulfilling all lines in a loop | One crash mid-loop leaves partial state and no per-line retry/visibility in the console. |
+| Refund amounts passed in the state | The state is input that a bug or a redrive could change. Stored line amounts are the single source of truth. |
+| Return written-off units to stock | Damaged goods would be sold again; the books would hide a real loss. |
+
+### Numbers
+None recorded yet (filled in from the commit A check and the commit B e2e run).
+
+### Likely interview questions
+1. *Why not fail the whole order?* The failure happened after payment and affects one item; the others are
+   fine. Partial fulfillment keeps the sale and refunds exactly what didn't ship (I6).
+2. *Inline vs Distributed Map?* Inline runs the iterations inside the same execution: no child executions, history
+   counted in the parent (≤ 25,000 events), at most 40 iterations running at once. Distributed Map is for huge fan-outs (S3
+   inputs, up to 10,000 parallel children). An order has at most 20 lines.
+3. *What if the partial refund fails?* It is retried (it is idempotent per line, so retrying is safe). If it
+   still fails, the execution FAILS on purpose: the order stays PAYMENT_CAPTURED, and the alarm
+   `order-saga-refund-or-write-off-errors` fires. After the fix, an operator **redrives** the execution from the
+   failed state. The lines already refunded are no-ops; only the missing ones move money.
+4. *What if fulfillment retries after a refund?* A refunded line is written off, and fulfill_item refuses a
+   WRITTEN_OFF line (`ItemUnavailable`), so it can't be sold after its money went back. A FULFILLED line can't be
+   written off. Each line moves exactly once: FULFILLED or WRITTEN_OFF, never both.
+5. *How can refunds never exceed the charge, even concurrently?* One running total on the charge record, updated
+   in the same transaction as the money, conditional on the limit. Two concurrent refunds serialize: the second
+   sees the first one's total.
+
+### Debugging story
+None recorded yet.
+
+
+## 13. Known gaps (and where they get fixed)
 
 ### What
 Design limits found and documented, each with a planned fix.
@@ -1061,7 +1162,8 @@ claiming there are no gaps.
 - **A charge whose callback never arrives** (webhook down for longer than DemoPay's 5 retries) leaves a debit for a
   FAILED order until someone redrives `order-saga-psp-dlq` (the alarm says so). Fix: a scheduled reconciliation job
   that asks the provider about intents in TIMED_OUT/FAILED and refunds any charge it finds.
-- Compensation failures are recorded in the execution (`refundError`/`releaseError`) but not alerted on.
+- Compensation failures are recorded in the execution (`refundError`/`releaseError`). Since step 2.3, refund and
+  write-off Lambda errors raise the alarm `order-saga-refund-or-write-off-errors`; ReleaseInventory errors still don't.
 - HTTP API has no X-Ray; the SFN segment is missing from the map (section 7).
 
 ### Trade-offs / alternatives considered

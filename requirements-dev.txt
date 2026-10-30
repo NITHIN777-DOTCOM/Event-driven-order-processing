@@ -5,3 +5,5 @@ moto
 pytest-cov
 # UI evidence (scripts/capture_ui.py); then run: python -m playwright install chromium
 playwright
+# Step 2.3: evaluates the state machine's JSONata expressions (the FulfillItems summary) in unit tests
+jsonata-python==0.7.1

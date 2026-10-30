@@ -26,7 +26,7 @@ from botocore.exceptions import ClientError
 
 from common.holds import ACTIVE, EXPIRED, consume_items, delete_schedule, end_hold, is_overdue, lost_the_race
 from common.logger import StructuredLogger, get_logger
-from common.orders import OUT_OF_STOCK, RESERVED, cancellation_codes, status_update
+from common.orders import OUT_OF_STOCK, RESERVED, cancellation_codes, order_lines, status_update
 from common.tracing import instrument_aws_sdk
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
@@ -84,6 +84,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "totalAmount": f"{order['totalAmount']:.2f}",
         "itemsSummary": format_items(order),
         "simulate": order.get("simulate", "none"),
+        # The fulfillment Map iterates over these (step 2.3): one iteration per line.
+        "lines": [{"lineId": line["lineId"], "productId": line["productId"], "quantity": line["quantity"]} for line in order_lines(order)],
     }
 
 
