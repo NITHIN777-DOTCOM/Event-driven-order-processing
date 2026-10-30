@@ -10,7 +10,8 @@ Evidence referenced below:
 `docs/evidence/e2e-failure-tests.md` (latest e2e run, 8/8, 2026-10-22 13:21 UTC),
 `docs/evidence/phase3-monitoring.md`, `docs/evidence/phase5-cicd.md`, `docs/evidence/upgrade-1.1-outbox.md`,
 `docs/evidence/upgrade-1.2-auth.md`, `docs/evidence/upgrade-2.0-access-tokens.md`,
-`docs/evidence/upgrade-2.1-async-payment.md`.
+`docs/evidence/upgrade-2.1-async-payment.md`, `docs/evidence/upgrade-2.2-holds.md`,
+`docs/evidence/upgrade-2.3-fulfillment.md`.
 
 ---
 
@@ -1135,7 +1136,20 @@ for good (they were never fulfilled per line), which is why I5 sums all five cou
 | Return written-off units to stock | Damaged goods would be sold again; the books would hide a real loss. |
 
 ### Numbers
-None recorded yet (filled in from the commit A check and the commit B e2e run).
+From `docs/evidence/upgrade-2.3-fulfillment.md` (2026-10-30, ap-south-1):
+- Commit A in isolation (`fulfillment_check.py`) **19/19**. Order ₹42,385 = 3 stored lines; L1 + L3 fulfilled
+  concurrently; L2 written off and refunded twice → **one** CREDIT ₹26,990. The I7 probe (refund ₹42,385 more) was
+  `RefundRejected`. Net ₹15,395 = L1 + L3.
+- Full e2e on commit A (old definition): **26/26**. Old-path COMPLETED orders moved nothing to `sold`.
+- Commit B e2e: **29/29** (a–z plus za–zc; first run 28/29, see the debugging story). za: 1 DEBIT ₹14,994 + 1
+  CREDIT ₹6,499 (line 2) → **net ₹8,495 = lines 1 + 3 (I6)**. zb: 2 CREDITs, net ₹0, intent REFUNDED. zc: hold
+  consumed once. I1–I7 were checked for every order.
+- Inline Map duration: **0.14–0.23 s** for 1–3 lines; executions 3.2–6.2 s end to end (the webhook dominates).
+- A running execution finished on its old definition (started 4.1 s before the update, ended 6.8 s after).
+- Rollout: A 15 added / 22 changed / 0 destroyed; B 0 / 20 / 0; B fix 0 / 1 / 0. Nothing removed.
+- Unit tests 266, coverage 93%. The ASL's JSONata is evaluated in tests with jsonata-python.
+- States entered per execution (= billed Standard transitions): old definition 5; one-line COMPLETED 9 (+4: Map,
+  FulfillItem, SummarizeFulfillment, Choice); 3-line PARTIALLY_FULFILLED 14. Added idle cost: $0.
 
 ### Likely interview questions
 1. *Why not fail the whole order?* The failure happened after payment and affects one item; the others are
@@ -1155,8 +1169,17 @@ None recorded yet (filled in from the commit A check and the commit B e2e run).
    sees the first one's total.
 
 ### Debugging story
-None recorded yet.
+**A new counter broke an old test.** B's first live run was 28/29. Scenario u (a 30 s hold expires) expected the
+desk mat's "stock + reserved" to be back at 100 and found 99. I5 passed in the same run, so no unit was lost.
+Scenario l buys a desk mat during u's window, and since B that unit ends in `sold`, a counter u's sum didn't include.
+That's the same root cause as 2.2's u failure: a test asserted on shared state it didn't own. The fix sums every
+counter except `held`. Lesson: when you add a state to a conservation law, grep every test that adds up the old states.
 
+**The proof that wasn't.** To show that running executions keep their definition, `inflight_check.py` placed slow
+orders during B's deploy, and the result was "0 executions straddled the update". The probe product (USB-MIC) is
+seeded with only 18 units. It ran out 1.5 min before the update, so every execution failed in 0.3 s at
+ReserveInventory. The check was re-run, with a 100-unit product and a definition-to-definition comparison, during the
+next deploy (also a real definition change), and passed. Report the inconclusive run as inconclusive.
 
 ## 13. Known gaps (and where they get fixed)
 

@@ -3,8 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.3 — per-item fulfillment with partial refunds: IN PROGRESS (commit A, expand).** Step 2.2 is DONE
-(2026-10-29, report docs/evidence/upgrade-2.2-report.md).
+**Upgrade step 2.3 — per-item fulfillment with partial refunds: DONE (2026-10-30).** Next: **step 2.4, mid-saga
+cancellation.** Report: docs/evidence/upgrade-2.3-report.md.
 (Step-by-step notes for 2.1 to 2.3 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
@@ -126,7 +126,15 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   "Delivered / Cancelled — refunded", "Partially fulfilled" badge. e2e: a/y/z now expect sold; new za/zb/zc; I3
   per line; I6/I7 for every order. capture_ui: partial order + wallet credit. scripts/inflight_check.py.
   Plan: 0 added, 20 changed, 0 destroyed. Unit tests 266, 93%.
-- Next: deploy B (run inflight_check.py during it), seed, full e2e, capture_ui, then the docs commit.
+- B `89f355f`: CI 41032228377 + Deploy 41032444445 green (0 added, 20 changed, 0 destroyed). Live e2e 28/29 (u: test
+  summed stock + reserved, l's desk mat now ends in sold; I5 passed), then 29/29 after the fix. inflight_check during
+  B: inconclusive (probe product USB-MIC has 18 units, ran out before the update).
+- B fix `e464e66`: wallet shows refund notes; e2e u pool = all counters but held; inflight_check MECH-KEYBOARD + generic
+  definition compare; Map comment. CI 41034908817 + Deploy 41035114664 green (0 added, 1 changed). inflight_check
+  PASS (ORD-20261030-62b512cd started 4.1 s before the update, finished on the old definition). UI suite 9/9, 0
+  console errors. Evidence: docs/evidence/upgrade-2.3-fulfillment.md (+ upgrade-2.3/).
+- Executions per order: old definition 5 states, 1 line 9, 3-line partial 14. Map 0.14-0.23 s.
+- Known nit: the write-off feed row repeats the item name (the reason is fulfill_item's message).
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
@@ -208,8 +216,8 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   Evidence: docs/evidence/phase5-cicd.md.
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
-## Next (upgrade step 2.3)
-- Per-item fulfillment with partial refunds: commit A in progress (see "Step 2.3" above).
+## Next (upgrade step 2.4)
+- Mid-saga cancellation.
 
 ## Known limitations / ideas (good viva points)
 - (Fixed in 1.2) Wallets/orders are keyed by the Cognito `sub`; the API has a JWT authorizer.

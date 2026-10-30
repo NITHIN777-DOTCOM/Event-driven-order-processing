@@ -107,8 +107,13 @@ flowchart LR
    POSTs a signed callback to `POST /webhooks/payment`. `payment_webhook` verifies the HMAC, moves the intent to
    SUCCEEDED and the order to PAYMENT_CAPTURED, and calls `SendTaskSuccess` (or `SendTaskFailure("PaymentDeclined")`).
    No callback within 120 s → `MarkPaymentTimedOut` → compensation → FAILED "payment timeout".
-7. **MarkOrderCompleted** and **NotifyCustomer** call DynamoDB and SNS **directly from the state machine**, with no Lambda in between.
-8. Every step appends `{status, timestamp, detail}` to the order's `statusHistory`. The tracker polls `GET /orders/{id}` every 1.5 s and turns that history into the live feed.
+7. **FulfillItems** (inline Map, up to 5 lines at once) picks each order line on its own with `order-saga-fulfill-item`
+   (reserved → sold). A line found damaged after payment is caught **inside its own iteration**, so the rest still
+   ships: only that line is refunded (DemoPay line refund, at the price stored on the order, capped at the charge)
+   and written off (reserved → writtenOff + an audit record), and the order ends **PARTIALLY_FULFILLED**. If no line
+   can be fulfilled, every line is refunded and written off and the order FAILS ("all items unavailable").
+8. **MarkOrderCompleted** and **NotifyCustomer** call DynamoDB and SNS **directly from the state machine**, with no Lambda in between.
+9. Every step appends `{status, timestamp, detail}` to the order's `statusHistory`. The tracker polls `GET /orders/{id}` every 1.5 s and turns that history into the live feed.
 
 ---
 
@@ -120,7 +125,27 @@ stateDiagram-v2
   ReserveInventory --> RequestPayment
   ReserveInventory --> DescribeFailure: OutOfStock or other error, nothing to undo
   RequestPayment --> RequestPayment: PaymentTransientError, retry 2s 4s 8s
-  RequestPayment --> MarkOrderCompleted: webhook SendTaskSuccess
+  RequestPayment --> FulfillItems: webhook SendTaskSuccess
+  state FulfillItems {
+    [*] --> FulfillItem: one iteration per order line
+    FulfillItem --> FulfillItem: FulfillmentTransientError, retry
+    FulfillItem --> LineUnavailable: ItemUnavailable or any error, caught per line
+    FulfillItem --> [*]: FULFILLED
+    LineUnavailable --> [*]: UNAVAILABLE + reason
+  }
+  FulfillItems --> SummarizeFulfillment
+  SummarizeFulfillment --> FulfillmentOutcome
+  FulfillmentOutcome --> MarkOrderCompleted: all lines fulfilled
+  FulfillmentOutcome --> PartialRefund: some lines unavailable
+  FulfillmentOutcome --> RefundAllLines: no line fulfilled
+  PartialRefund --> WriteOffLines
+  WriteOffLines --> MarkOrderPartiallyFulfilled
+  MarkOrderPartiallyFulfilled --> NotifyCustomerPartial
+  NotifyCustomerPartial --> OrderPartiallyFulfilled
+  OrderPartiallyFulfilled --> [*]
+  RefundAllLines --> WriteOffAllLines
+  WriteOffAllLines --> DescribeAllUnavailable
+  DescribeAllUnavailable --> MarkOrderFailed
   RequestPayment --> RefundPayment: PaymentDeclined (webhook) or retries exhausted
   RequestPayment --> MarkPaymentTimedOut: States.Timeout, no callback in 120 s
   MarkPaymentTimedOut --> RefundPayment
@@ -135,6 +160,12 @@ stateDiagram-v2
   NotifyCustomerFailure --> OrderFailed
   OrderFailed --> [*]
 ```
+
+Reservation stays **all-or-nothing** (before payment the customer gets the whole basket or nothing); fulfillment is
+**per line** (after payment, one damaged item shouldn't cancel the rest). Every line moves exactly once, to FULFILLED
+or WRITTEN_OFF; the refund steps take only line ids and read the amounts from the order. PartialRefund and
+WriteOffLines retry and then fail the execution on purpose (alarm `order-saga-refund-or-write-off-errors`, then a
+redrive: both are idempotent per line).
 
 Compensation runs in **reverse order**: refund first, then release stock. Both steps are idempotent (`RefundPayment` goes through DemoPay's idempotent refund and is a no-op if nothing was charged), so retries are always safe. `DescribeFailure` is a JSONata Pass state that turns a Lambda error into a readable reason such as *"PaymentDeclined: Insufficient wallet balance: ₹1,000 available, ₹5,999 needed"*. Definition: [`statemachine/order_saga.asl.json`](statemachine/order_saga.asl.json).
 
@@ -151,6 +182,8 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | Payment arrives after the timeout | Refunded automatically; the order stays FAILED; net charge 0 | The webhook finds the intent TIMED_OUT and calls DemoPay's idempotent refund (intent → REFUNDED) |
 | Duplicate or forged webhook | A duplicate is a 200 no-op; a bad, stale or missing signature is a 401, logged and alarmed | Intent state machine with conditional writes; HMAC-SHA256 over `timestamp.body`, ±5 min; `order-saga-webhook-signature-failures` alarm |
 | Payment provider down | Requests retried by SQS (5 receives), then dead-lettered; ops alarm emails | `order-saga-psp-requests` → `order-saga-psp-dlq`; alarm `order-saga-psp-dlq-not-empty` |
+| Item damaged after payment | That line refunded and written off; the rest delivered; order PARTIALLY_FULFILLED; email lists the refunded items | Inline Map with a Catch per iteration; DemoPay line refund idempotent per (intent, line) and capped by a running `refundedAmount` (I7); write-off audit record per (order, line) |
+| Every item damaged | Every line refunded (intent REFUNDED) and written off; order FAILED "all items unavailable" | `FulfillmentOutcome` Choice → RefundAllLines → WriteOffAllLines |
 | Out of stock | Order FAILED; no compensation needed | Reservation is one all-or-nothing transaction; `Catch OutOfStock` skips release |
 | Duplicate click or retry | Same order returned (`200`, `duplicate: true`); no second order | `Idempotency-Key` record written in the same transaction as the order (24 h TTL) |
 | Duplicate SQS delivery | Ignored; exactly one execution | Conditional PENDING → PROCESSING update; execution name = `orderId` |
@@ -191,8 +224,8 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 
 ## Testing & evidence
 
-- **217 unit tests, 94% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
-- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **26/26 scenarios passed** against the deployed system, signed in as two Cognito test users, including DemoPay ledger checks and money invariants, the transactional outbox, per-user isolation, the payment webhook and checkout holds.
+- **266 unit tests, 93% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
+- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **29/29 scenarios passed** against the deployed system, signed in as two Cognito test users, including DemoPay ledger checks and money invariants, the transactional outbox, per-user isolation, the payment webhook, checkout holds and per-item fulfillment with partial refunds (money invariants I1–I7 for every order).
 
 | # | Scenario | Result |
 |---|---|---|
@@ -219,7 +252,10 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | u | 30 s hold released by its EventBridge Scheduler schedule (lag 11.8–45.9 s measured); schedule deletes itself | PASS |
 | v | Two users race for the last unit → exactly one 201, one 409 | PASS |
 | w | B can't see or release A's hold (404) | PASS |
-| x | I5 stock conservation for all 16 products: seeded = stock + held + reserved | PASS |
+| x | I5 stock conservation for all 16 products: seeded = stock + held + reserved + sold + writtenOff | PASS |
+| za | 3 lines, line 2 damaged after payment → PARTIALLY_FULFILLED; 1 CREDIT for line 2 only; net = lines 1 + 3 (I6) | PASS |
+| zb | every line damaged → FAILED "all items unavailable"; every line refunded and written off; net ₹0 | PASS |
+| zc | checkout hold + damaged last line → hold consumed once, PARTIALLY_FULFILLED | PASS |
 | y | Order with its hold → hold CONSUMED, stock taken once; B can't use A's hold (400) | PASS |
 | z | Order after its hold expired → reserved afresh, hold stays EXPIRED | PASS |
 
