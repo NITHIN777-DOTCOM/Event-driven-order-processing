@@ -1078,15 +1078,15 @@ def scenario_hold_lifecycle() -> Scenario:
     return s
 
 
-def start_short_hold() -> tuple[Scenario, dict, tuple[int, int, int]]:
+def start_short_hold() -> tuple[Scenario, dict, tuple[int, ...]]:
     s = Scenario("u", f"{SHORT_HOLD_SECONDS} s hold expired by its EventBridge Scheduler schedule, stock restored", user=LOW_BALANCE_USER)
-    before = counters("DESK-MAT")
+    before = five_counters("DESK-MAT")
     code, hold = post_hold([("DESK-MAT", 3)], user=LOW_BALANCE_USER, duration=SHORT_HOLD_SECONDS)
     s.check(code == 201 and hold.get("durationSeconds") == SHORT_HOLD_SECONDS, f"POST /holds (automation client, {SHORT_HOLD_SECONDS} s) -> {code}")
     return s, hold, before
 
 
-def finish_short_hold(s: Scenario, hold: dict, before: tuple[int, int, int]) -> Scenario:
+def finish_short_hold(s: Scenario, hold: dict, before: tuple[int, ...]) -> Scenario:
     hold_id = hold.get("holdId", "")
     deadline = time.time() + SHORT_HOLD_SECONDS + 240
     item = stored_hold(hold_id)
@@ -1098,10 +1098,12 @@ def finish_short_hold(s: Scenario, hold: dict, before: tuple[int, int, int]) -> 
     lag = int(item.get("expiryLagMs", -1)) / 1000
     s.check(0 <= lag <= 120, f"released {lag:.1f} s after expiresAt {item.get('expiresAt')} (EventBridge Scheduler precision)")
     # Scenario l orders a DESK-MAT during this hold's window, so compare what the hold controls: its 3 units left
-    # `held` and went back to the pool (stock + reserved), whatever other orders did with the pool meanwhile.
-    after = counters("DESK-MAT")
-    s.check(after[1] == before[1] and after[0] + after[2] == before[0] + before[2],
-            f"DESK-MAT (stock, held, reserved) {before} -> {after}: the 3 held units went back (held {after[1]}, stock + reserved {after[0] + after[2]})")
+    # `held` and went back to the pool, whatever other orders did with the pool meanwhile. Since step 2.3 the pool is
+    # stock + reserved + sold + writtenOff (l's unit is fulfilled: reserved -> sold).
+    after = five_counters("DESK-MAT")
+    pool_before, pool_after = sum(before) - before[1], sum(after) - after[1]
+    s.check(after[1] == before[1] and pool_after == pool_before,
+            f"DESK-MAT (stock, held, reserved, sold, writtenOff) {before} -> {after}: the 3 held units went back (held {after[1]}, pool {pool_after})")
     s.check(not schedule_exists(hold_id), "schedule deleted itself after firing (ActionAfterCompletion DELETE)")
     s.timeline = [
         {"timestamp": item.get("createdAt", ""), "status": "ACTIVE", "detail": f"{hold_id}: 3 x DESK-MAT held for {SHORT_HOLD_SECONDS} s"},

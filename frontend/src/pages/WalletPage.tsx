@@ -141,6 +141,10 @@ export function WalletPage() {
                           ) : (
                             <span className="text-muted">{t.note}</span>
                           )}
+                          {/* A refund says what it was for, e.g. "Refund for ORD-… line L2 (1 x Desk Mat)" (step 2.3). */}
+                          {t.orderId && t.type === "CREDIT" && t.note && (
+                            <span className="mt-0.5 block text-xs text-muted">{t.note}</span>
+                          )}
                         </td>
                         <td className="px-3 py-3">
                           <StatusPill tone={TYPE[t.type].tone} label={TYPE[t.type].label} />

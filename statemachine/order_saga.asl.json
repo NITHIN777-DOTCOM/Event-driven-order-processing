@@ -164,7 +164,7 @@
     },
     "FulfillItems": {
       "Type": "Map",
-      "Comment": "Inline Map, one iteration per order line (up to 5 at once): Lambda order-saga-fulfill-item picks the line (reserved -> sold). Each iteration catches its OWN errors and returns {lineId, status: FULFILLED | UNAVAILABLE, reason}, so one damaged item can never fail the whole Map or the order.",
+      "Comment": "Inline Map, one iteration per order line (up to 5 at once): Lambda order-saga-fulfill-item picks the line (reserved -> sold). Each iteration catches its OWN errors and returns {lineId, status: FULFILLED | UNAVAILABLE, reason}, so one damaged item can never fail the whole Map or the order. Runs only after the payment succeeded; reservation before it stays all-or-nothing.",
       "ItemsPath": "$.order.lines",
       "ItemSelector": {
         "orderId.$": "$.orderId",

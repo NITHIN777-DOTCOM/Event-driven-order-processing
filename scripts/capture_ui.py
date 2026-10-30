@@ -210,7 +210,8 @@ class Run:
         self.record("Item damaged (partial refund)", order_id, f"{result}; CREDITs {[c['amount'] for c in credits]} (L2 = {line_amount})", 1)
         self.results[-1]["ok"] &= result == "Order partially fulfilled" and [c["amount"] for c in credits] == [line_amount]
         page.goto(base + "/wallet")
-        expect(page.get_by_text(re.compile(rf"Refund for {order_id} line L2"))).to_be_visible()
+        credit_row = page.locator("tbody tr", has_text=order_id).filter(has_text="Refund").first
+        expect(credit_row).to_contain_text(re.compile(r"Refund for .* line L2"))  # the ledger note says which item
         self.shot(page, "desktop-10c-wallet-partial-credit")
 
         # 4) REAL decline: set the wallet to ₹1,000 in the UI, then buy a ₹5,999 microphone.

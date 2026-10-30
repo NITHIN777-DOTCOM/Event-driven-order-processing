@@ -1,6 +1,6 @@
-"""Step 2.3 commit B: do executions that are RUNNING when the state machine is updated finish on the OLD definition?
+"""Do executions that are RUNNING when the state machine is updated finish on the OLD definition? (step 2.3)
 
-    python scripts/inflight_check.py      # start it just before (or while) the Deploy job applies commit B
+    python scripts/inflight_check.py      # start it right after pushing a commit that changes the definition
 
 Step Functions keeps each Standard execution on the definition it started with. This script proves it live:
 it places a payment_flaky order (the payment fails twice and is retried 2 s + 4 s later, so the execution runs for
@@ -9,9 +9,9 @@ it waits for every order to finish, reads the update time (updateDate of the def
 from DescribeStateMachineForExecution), and sorts the executions:
 
   straddled  started BEFORE the update and still running after it. Expected: DescribeStateMachineForExecution
-             returns the OLD definition (no FulfillItems state), the history never enters FulfillItems, and the
-             unit stays in `reserved` (no ITEM_FULFILLED), exactly the pre-2.3 behaviour.
-  after      started after the update: they run FulfillItems and move the unit to `sold`.
+             returns exactly the definition captured when this script started (the old one), not the new one.
+  after      started after the update: they use the new definition.
+The FulfillItems / ITEM_FULFILLED columns show what each definition did (commit B: old = no per-line fulfillment).
 
 Results are printed and written to docs/evidence/upgrade-2.3/inflight-definition.md. Exit code 1 if no execution
 straddled the update (start it earlier) or if any straddling one used the new definition.
@@ -27,14 +27,18 @@ from pathlib import Path
 from e2e_test import OUT, USER, place_order, sfn, wait_for_terminal
 
 EVIDENCE_FILE = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "upgrade-2.3" / "inflight-definition.md"
-PRODUCT = "USB-MIC"  # placed one unit at a time; plenty of stock
+PRODUCT = "MECH-KEYBOARD"  # one unit per order, ~6 orders a minute: seeded with 100 (run seed_inventory.py after)
 INTERVAL_SECONDS = 10
 MAX_WAIT_SECONDS = 20 * 60
 STATE_MACHINE = OUT["state_machine_arn"]
 
 
+def current() -> dict:
+    return sfn.describe_state_machine(stateMachineArn=STATE_MACHINE)
+
+
 def revision() -> str:
-    return sfn.describe_state_machine(stateMachineArn=STATE_MACHINE)["revisionId"]
+    return current()["revisionId"]
 
 
 def execution_arn(order_id: str) -> str:
@@ -52,7 +56,8 @@ def entered_states(arn: str) -> list[str]:
 
 
 def main() -> int:
-    baseline = revision()
+    old_definition = current()
+    baseline = old_definition["revisionId"]
     print(f"Definition revision {baseline}. Placing a payment_flaky order every {INTERVAL_SECONDS} s until it changes...")
     order_ids: list[str] = []
     deadline = time.monotonic() + MAX_WAIT_SECONDS
@@ -85,17 +90,17 @@ def main() -> int:
             continue  # placed but never started before the deadline (shouldn't happen)
         started, stopped = execution["startDate"], execution.get("stopDate")
         used = sfn.describe_state_machine_for_execution(executionArn=arn)
-        uses_map = '"FulfillItems"' in used["definition"]
+        on_old = used["definition"] == old_definition["definition"]
         ran_map = "FulfillItems" in entered_states(arn)
         fulfilled = any(h["status"] == "ITEM_FULFILLED" for h in order.get("statusHistory", []))
         if started < updated_at and (stopped is None or stopped > updated_at):
             kind = "straddled"
             straddled += 1
-            straddled_ok &= not uses_map and not ran_map and not fulfilled
+            straddled_ok &= on_old
         else:
             kind = "before" if started < updated_at else "after"
         rows.append((order_id, kind, f"{started:%H:%M:%S.%f}"[:-3], f"{stopped:%H:%M:%S.%f}"[:-3] if stopped else "-",
-                     order.get("status"), "new" if uses_map else "old", ran_map, fulfilled))
+                     order.get("status"), "old" if on_old else "new", ran_map, fulfilled))
 
     print(f"\n{'orderId':<24}{'window':<11}{'started':<14}{'stopped':<14}{'status':<11}{'definition':<12}{'Map ran':<9}ITEM_FULFILLED")
     for row in rows:
