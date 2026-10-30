@@ -98,7 +98,7 @@ def main() -> int:
         for order_id, _, user in placed:
             if order_id not in final:
                 status = http_json("GET", f"{api}/orders/{order_id}", headers=auth_header(user))[1].get("status")
-                if status in ("COMPLETED", "FAILED"):
+                if status in ("COMPLETED", "PARTIALLY_FULFILLED", "FAILED", "CANCELLED"):  # every terminal status
                     final[order_id] = status
         if len(final) < len(placed):
             time.sleep(3)

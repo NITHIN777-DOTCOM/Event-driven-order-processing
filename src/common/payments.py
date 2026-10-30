@@ -69,17 +69,20 @@ def provider_delay_seconds(simulate: str) -> int:
 
 
 def invoke_provider_refund(
-    lambda_client: Any, function_name: str, intent_id: str, line: dict[str, Any] | None = None
+    lambda_client: Any, function_name: str, intent_id: str, line: dict[str, Any] | None = None, note: str = ""
 ) -> dict[str, Any]:
     """Call DemoPay's refund API (a synchronous, IAM-authorised Lambda invoke). Idempotent per intent.
 
     Returns {"refunded": bool, "alreadyRefunded": bool, "refundId", "amount", "paymentId"} or, when nothing was
     charged, {"refunded": False, "reason": "nothing charged"}. With `line` ({"lineId", "amount", "note"}) it refunds
-    that one order line instead, idempotent per (intent, line) and capped at the amount charged.
+    that one order line instead, idempotent per (intent, line) and capped at the amount charged. `note` says why
+    (e.g. "order cancelled"); the customer sees it on the wallet CREDIT.
     """
     request: dict[str, Any] = {"operation": "refund", "paymentIntentId": intent_id}
     if line:
         request.update(lineId=line["lineId"], amount=str(line["amount"]), note=line.get("note", ""))
+    elif note:
+        request["note"] = note
     response = lambda_client.invoke(
         FunctionName=function_name,
         InvocationType="RequestResponse",

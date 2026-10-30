@@ -5,7 +5,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ApiError, getOrder } from "../api";
+import { ApiError, cancelOrder, getOrder } from "../api";
 import { formatDateTime, formatDuration, formatPrice, formatTime, scenarioLabel } from "../format";
 import { deriveSteps, finishedAt, isTerminal, trackerTitle, type Step } from "../tracker";
 import type { FeedRow, Order, OrderItem } from "../types";
@@ -126,11 +126,87 @@ const ROW_STYLE: Record<FeedRow["level"], string> = {
 function Message({ text }: { text: string }) {
   return (
     <>
-      {text.split(/\b(PARTIALLY_FULFILLED|COMPLETED|FAILED)\b/).map((part, index) =>
+      {text.split(/\b(PARTIALLY_FULFILLED|COMPLETED|FAILED|CANCELLED)\b/).map((part, index) =>
         index % 2 === 1 ? <strong key={index} className="font-semibold">{part}</strong> : part,
       )}
     </>
   );
+}
+
+/** What a 409 from the cancel API means, in the customer's words. */
+const CANCEL_REFUSED: Record<string, string> = {
+  TOO_LATE_TO_CANCEL: "Too late to cancel: the warehouse has already started packing this order.",
+  NOT_CANCELLABLE: "This order was placed before cancelling was available, so it can't be cancelled.",
+  NOT_CANCELLABLE_YET: "The order is still being set up. Try again in a second.",
+  CANCEL_DISABLED: "Cancelling orders is switched off right now.",
+};
+
+/**
+ * The Cancel button, with a confirm step. Shown only while the API reports the order inside the cancel window
+ * (canCancel); the API still decides for real, so a refusal (409) is shown as a friendly message.
+ */
+function CancelOrder({ order }: { order: Order }) {
+  const [stage, setStage] = useState<"idle" | "confirm" | "sending" | "sent">("idle");
+  const [refusal, setRefusal] = useState<string | null>(null);
+
+  if (refusal) {
+    return (
+      <p className="card p-4 text-[15px] text-bad" role="alert" data-testid="cancel-refused">
+        {refusal}
+      </p>
+    );
+  }
+  if (stage === "sent" || order.cancelRequestedAt) {
+    return order.status === "CANCELLED" ? null : (
+      <p className="card p-4 text-[15px] text-muted-strong" role="status" data-testid="cancel-requested">
+        Cancellation requested. Refunding and returning the stock…
+      </p>
+    );
+  }
+  if (!order.canCancel) return null;
+
+  const send = async () => {
+    setStage("sending");
+    try {
+      await cancelOrder(order.orderId);
+      setStage("sent"); // the poll picks up CANCEL_REQUESTED, then CANCELLED
+    } catch (err) {
+      const code = err instanceof ApiError ? err.message : "";
+      setRefusal(CANCEL_REFUSED[code] ?? `Couldn't cancel the order: ${(err as Error).message}`);
+    }
+  };
+
+  if (stage === "idle") {
+    return (
+      <button type="button" className="btn-secondary w-full" onClick={() => setStage("confirm")} data-testid="cancel-order">
+        Cancel order
+      </button>
+    );
+  }
+  return (
+    <div className="card p-4" role="group" aria-label="Confirm cancellation">
+      <p className="text-[15px] font-semibold">Cancel this order?</p>
+      <p className="mt-1 text-sm text-muted">
+        {order.paidAmount !== undefined
+          ? `The ${formatPrice(order.paidAmount)} you paid goes back to your DemoPay wallet.`
+          : "Nothing will be charged; a payment still in flight is refunded automatically."}
+      </p>
+      <div className="mt-3 flex gap-3">
+        <button type="button" className="btn-primary" disabled={stage === "sending"} onClick={send} data-testid="confirm-cancel">
+          {stage === "sending" ? "Cancelling…" : "Yes, cancel"}
+        </button>
+        <button type="button" className="btn-secondary" disabled={stage === "sending"} onClick={() => setStage("idle")}>
+          Keep order
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** "Cancelled — refunded ₹X" or "Cancelled — nothing charged". */
+function cancelledSummary(order: Order): string {
+  const refund = order.refundedAmount ?? 0;
+  return refund > 0 ? `Cancelled — refunded ${formatPrice(refund)}` : "Cancelled — nothing charged";
 }
 
 function FeedList({ rows }: { rows: FeedRow[] }) {
@@ -246,6 +322,11 @@ export function Tracker() {
             {order.simulate !== "none" && <> · scenario: {scenarioLabel(order.simulate)}</>}
           </p>
           {order.failureReason && <p className="mt-2 text-[15px] text-bad">{order.failureReason}</p>}
+          {order.status === "CANCELLED" && (
+            <p className="mt-2 text-[15px] font-semibold text-muted-strong" data-testid="cancelled-summary">
+              {cancelledSummary(order)}
+            </p>
+          )}
         </div>
         <StatusPill tone={pill.tone} label={pill.label} />
       </div>
@@ -276,6 +357,7 @@ export function Tracker() {
 
         {/* Sidebar */}
         <aside className="space-y-6">
+          <CancelOrder order={order} />
           <section className="card p-6" aria-labelledby="items-title">
             <h2 id="items-title" className="section-title mb-4">
               Items
@@ -313,7 +395,8 @@ export function Tracker() {
             )}
             {isTerminal(order) && !order.deadLettered && (
               <p className="mt-4 text-sm text-muted">
-                {{ COMPLETED: "Confirmation", PARTIALLY_FULFILLED: "Partial delivery", FAILED: "Failure" }[order.status] ?? "Status"} email sent via SNS
+                {{ COMPLETED: "Confirmation", PARTIALLY_FULFILLED: "Partial delivery", FAILED: "Failure", CANCELLED: "Cancellation" }[order.status] ?? "Status"}{" "}
+                email sent via SNS
                 <br />
                 <span className="text-muted-strong">for {order.customerEmail}</span>
               </p>

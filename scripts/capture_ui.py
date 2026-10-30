@@ -12,6 +12,8 @@ Checkout holds (step 2.2): every checkout must show the 10-minute countdown, the
 and a separate browser context with Playwright's fake clock jumps past the 10 minutes to capture "Your hold expired".
 Per-item fulfillment (step 2.3): a 2-item order whose last item is found damaged after payment must end "Order
 partially fulfilled" with that item "Cancelled — refunded ₹X", and the wallet must show exactly one partial CREDIT.
+Cancellation (step 2.4): a "Slow warehouse" order is cancelled from the tracker once it is paid (Cancel -> confirm ->
+"Order cancelled", "Cancelled — refunded ₹X"), and the wallet must show exactly one CREDIT of the total, "order cancelled".
 Desktop (1440 px) and mobile (360 px) screenshots and docs/evidence/ui/README.md are written.
 """
 
@@ -30,7 +32,7 @@ from auth_tokens import auth_header, credentials
 from tf_outputs import load_outputs
 
 OUT_DIR = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "ui"
-TERMINAL_TITLES = re.compile(r"Order completed|Order partially fulfilled|Order failed|Stuck in the dead-letter queue")
+TERMINAL_TITLES = re.compile(r"Order completed|Order partially fulfilled|Order failed|Order cancelled|Stuck in the dead-letter queue")
 NAME = "Asha Rao"
 USER = "a"  # Cognito test user (create_test_users.py); the wallet and orders are this account's
 DESKTOP = {"width": 1440, "height": 900}
@@ -213,6 +215,33 @@ class Run:
         credit_row = page.locator("tbody tr", has_text=order_id).filter(has_text="Refund").first
         expect(credit_row).to_contain_text(re.compile(r"Refund for .* line L2"))  # the ledger note says which item
         self.shot(page, "desktop-10c-wallet-partial-credit")
+
+        # 3c) Step 2.4: cancel after payment, while the warehouse waits 10 s before it starts.
+        self.add_from_listing(page, "Felt and Leather Desk Mat")
+        order_id = self.checkout(page, "Slow warehouse (cancel after payment)")
+        cancel_button = page.get_by_test_id("cancel-order")
+        expect(cancel_button).to_be_visible(timeout=20_000)
+        for _ in range(40):  # cancel once it is paid, to show the full refund
+            if self.api_json("GET", f"/orders/{order_id}")["status"] == "PAYMENT_CAPTURED":
+                break
+            page.wait_for_timeout(500)
+        self.shot(page, "desktop-10d-tracker-cancel-button")
+        cancel_button.click()
+        expect(page.get_by_test_id("confirm-cancel")).to_be_visible()
+        self.shot(page, "desktop-10e-tracker-cancel-confirm")
+        page.get_by_test_id("confirm-cancel").click()
+        result = self.wait_terminal(page)
+        summary = page.get_by_test_id("cancelled-summary")
+        expect(summary).to_have_text(re.compile(r"^Cancelled — refunded ₹[\d,]+$"))
+        self.shot(page, "desktop-10f-tracker-cancelled")
+        total = self.api_json("GET", f"/orders/{order_id}")["totalAmount"]
+        credits = self.credits(order_id)
+        self.record("Cancel after payment", order_id, f"{result}; {summary.inner_text()}; CREDITs {[c['amount'] for c in credits]}", 1)
+        self.results[-1]["ok"] &= result == "Order cancelled" and [c["amount"] for c in credits] == [total]
+        page.goto(base + "/wallet")
+        credit_row = page.locator("tbody tr", has_text=order_id).filter(has_text="Refund").first
+        expect(credit_row).to_contain_text("order cancelled")
+        self.shot(page, "desktop-10g-wallet-cancel-refund")
 
         # 4) REAL decline: set the wallet to ₹1,000 in the UI, then buy a ₹5,999 microphone.
         page.goto(base + "/wallet")

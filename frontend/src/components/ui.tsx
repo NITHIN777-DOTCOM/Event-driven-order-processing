@@ -26,6 +26,8 @@ export function orderPill(status: string, deadLettered?: boolean | null): { tone
   if (status === "COMPLETED") return { tone: "ok", label: "Completed" };
   if (status === "PARTIALLY_FULFILLED") return { tone: "retry", label: "Partially fulfilled" };
   if (status === "FAILED") return { tone: "bad", label: "Failed" };
+  if (status === "CANCELLED") return { tone: "pending", label: "Cancelled" };
+  if (status === "CANCEL_REQUESTED") return { tone: "retry", label: "Cancelling" };
   if (status === "PENDING") return { tone: "pending", label: "Pending" };
   return { tone: "pending", label: "Processing" };
 }

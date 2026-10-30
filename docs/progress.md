@@ -258,3 +258,16 @@ Step 2.3 is DONE (2026-10-30, report docs/evidence/upgrade-2.3-report.md).
   run the tests with `.venv\Scripts\python -m pytest --cov=src`.
 - `terraform.tfvars` files are gitignored; copy them from `*.tfvars.example` on a new machine.
 - In Git Bash, set `MSYS_NO_PATHCONV=1` before AWS CLI calls that take `/aws/...` log group names.
+
+### Step 2.4 resume point (2026-10-30, session cut by usage limit)
+- Commit A `eb9a4ab` live: CI 41043851030 + Deploy 41044113358 green (16 added, 22 changed, 0 destroyed).
+- A e2e run 1: 28/29. Only g failed: the poison message WAS in the DLQ (27 msgs, never purged) but a single
+  10-message peek missed it. Probe fixed (`dlq_has`, 15 peeks). Re-run of the e2e + capture_ui on A was started in
+  the background (logs in the session scratchpad); check its result first.
+- Still to do on A: the legacy migration dry-run, then WAIT for "APPLY", then `--apply` + `--check`.
+- Commit B (uncommitted): ASL cancel branch, the cancel-aware Choice before MarkOrderFailed + unit tests, feed rows +
+  write-off nit, get_order canCancel, frontend (Cancel button/confirm/409 messages, Cancelled badge, summary),
+  wallet CREDIT note "(order cancelled)", script terminal statuses, e2e zd-zi (incl. a 20-order race) + I8/I9,
+  inflight_check for 2.4. Unit suite green, 93% coverage; frontend tsc OK.
+- Left for B: capture_ui cancel screenshots, remove the timeout-cancel item from interview-prep Known gaps, show
+  B's plan + IAM diff (new SFN dynamodb:GetItem) and WAIT for APPLY, push, inflight_check during Deploy, full e2e.

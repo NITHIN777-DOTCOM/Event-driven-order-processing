@@ -18,7 +18,7 @@ from common.auth import Forbidden, Unauthorized, caller_from
 from common.feed import build_feed, console_links
 from common.http import response
 from common.logger import get_logger
-from common.orders import public_lines
+from common.orders import CANCELLABLE_STATUSES, public_lines
 from common.tracing import instrument_aws_sdk
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
@@ -62,6 +62,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     # its state (FULFILLED / WRITTEN_OFF) and refund.
     body["items"] = public_lines(order)
     body["feed"] = build_feed(order)
+    # Step 2.4: whether the tracker shows the Cancel button. The cancel API decides for real (one conditional write);
+    # this only hides the button when it would certainly be refused.
+    body["canCancel"] = (
+        order.get("cancellable") is True and order["status"] in CANCELLABLE_STATUSES and "cancelRequestedAt" not in order
+    )
     body["consoleLinks"] = console_links(order, REGION, ORDERS_TABLE, WORKFLOW_LOG_GROUP)
 
     log.info("Order returned", status=order["status"])

@@ -102,7 +102,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if event.get("operation") == "refund":
         if event.get("lineId"):
             return refund_line(event["paymentIntentId"], event["lineId"], Decimal(str(event["amount"])), event.get("note", ""))
-        return refund(event["paymentIntentId"])
+        return refund(event["paymentIntentId"], event.get("note", ""))
     if event.get("operation") == "void":
         return void(event)
     return handle_sqs_batch(event)
@@ -285,9 +285,9 @@ def post_callback(body: bytes, secret: str) -> int:
 
 
 # --- 2. Refunds (direct invoke) ------------------------------------------------------------------
-def refund(intent_id: str) -> dict[str, Any]:
+def refund(intent_id: str, note: str = "") -> dict[str, Any]:
     """Refund what is left of the charge of `intent_id` (all of it, unless lines were refunded already): once.
-    Safe to call before a charge, after, and repeatedly."""
+    Safe to call before a charge, after, and repeatedly. `note` (why) goes on the wallet CREDIT."""
     log = logger.bind(paymentIntentId=intent_id, operation="refund")
     charge = successful_charge(intent_id, log)
     if not charge:
@@ -305,7 +305,8 @@ def refund(intent_id: str) -> dict[str, Any]:
             log.info("Every line of this charge was refunded already; nothing left to refund", refundedAmount=already)
             return {"refunded": False, "reason": "already refunded line by line"}
         refund_item = refund_record(charge, f"REFUND#{intent_id}", remaining)
-        outcome = move_refund(charge, refund_item, f"Refund for {charge['orderId']}", log, already_refunded=already)
+        description = f"Refund for {charge['orderId']}" + (f" ({note})" if note else "")
+        outcome = move_refund(charge, refund_item, description, log, already_refunded=already)
         if outcome == "done":
             return refund_result(refund_item, refunded=True)
         if outcome == "duplicate":

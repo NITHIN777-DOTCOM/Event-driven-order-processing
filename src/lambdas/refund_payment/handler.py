@@ -89,7 +89,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         void = invoke_provider_void(lambda_client, PROVIDER_FUNCTION, intent)
         log.info("Payment intent voided at DemoPay" if void.get("voided") else "DemoPay had already decided the intent", outcome=void.get("outcome"))
 
-    refund = invoke_provider_refund(lambda_client, PROVIDER_FUNCTION, intent_id)
+    refund = invoke_provider_refund(lambda_client, PROVIDER_FUNCTION, intent_id, note="order cancelled" if cancelled else "")
     if not money_returned(refund):
         log.info("Nothing was charged; nothing to refund", intentStatus=intent["status"], **cancel_event(cancelled, "nothing_charged"))
         return {"orderId": order_id, "refunded": False, "refundedAmount": "0.00", "reason": refund.get("reason", "nothing charged")}

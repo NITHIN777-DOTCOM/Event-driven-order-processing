@@ -154,3 +154,34 @@ def test_per_item_fulfillment_rows():
         ("DynamoDB", "Order marked PARTIALLY_FULFILLED: 1 of 2 items delivered - INR 3499.00 refunded for the unavailable items", "retry"),
         ("SNS", "Partial delivery email sent", "info"),
     ]
+
+
+def test_write_off_row_names_the_item_once():
+    detail = "1 x Desk Mat (line L2) written off: Desk Mat (line L2) was found damaged in the warehouse (simulated)"
+
+    assert feed(entry("ITEM_WRITTEN_OFF", detail))[0]["message"] == (
+        "Unavailable: 1 x Desk Mat (line L2) written off: found damaged in the warehouse (simulated)"
+    )
+
+
+def test_cancellation_rows():
+    rows = feed(
+        entry("FULFILLING", "Fulfillment started"),
+        entry("CANCEL_REQUESTED", "Cancellation requested by the customer: changed my mind"),
+        entry("CANCEL_REJECTED", "Cancel request rejected: the order was already FULFILLING"),
+        entry("CANCELLED", "Cancelled by the customer - INR 5097.00 refunded to the DemoPay wallet"),
+    )
+
+    assert [(r["service"], r["message"], r["level"]) for r in rows] == [
+        ("Lambda · fulfillment", "Fulfillment started: the order can no longer be cancelled", "info"),
+        ("API Gateway", "Cancellation requested by the customer: changed my mind", "retry"),
+        ("API Gateway", "Cancel rejected (too late): the order was already FULFILLING", "error"),
+        ("DynamoDB", "Order marked CANCELLED: ₹5,097 refunded to the DemoPay wallet", "retry"),
+        ("SNS", "Cancellation email sent", "info"),
+    ]
+
+
+def test_cancelled_with_nothing_charged():
+    rows = feed(entry("CANCELLED", "Cancelled by the customer - nothing was charged"))
+
+    assert rows[0]["message"] == "Order marked CANCELLED: nothing was charged"

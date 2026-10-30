@@ -341,7 +341,7 @@ def payments(aws, load_handler, monkeypatch):
     webhook = load_handler("payment_webhook")
     fake_sfn = FakeSfn()
     monkeypatch.setattr(webhook, "sfn", fake_sfn)
-    monkeypatch.setattr(webhook, "invoke_provider_refund", lambda _client, _fn, intent_id: provider.refund(intent_id))
+    monkeypatch.setattr(webhook, "invoke_provider_refund", lambda _client, _fn, intent_id, note="": provider.refund(intent_id, note))
 
     sent: list[dict] = []
 

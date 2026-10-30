@@ -46,6 +46,18 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
                           REFUNDED, net 0), every line written off
   zc) hold + partial   -> an order placed with a checkout hold, last line damaged: the hold is consumed once
                           (stock moved once, at hold time), the rest sold, the damaged line written off
+  zd) cancel while waiting for payment (payment_slow: DemoPay answers after 20 s) -> 202, B gets 404, a repeat
+                          is the same 202, CANCELLED "nothing was charged", DemoPay's delayed charge finds the intent
+                          VOIDED, stock back, a cancel after the end -> 200 with refundedAmount 0
+  ze) cancel after payment (fulfillment_slow: 10 s before the warehouse starts) -> CANCELLED, the whole charge
+                          refunded (wallet CREDIT "order cancelled"), stock back, never FULFILLING
+  zf) cancel during fulfillment (fulfillment_slow, after BeginFulfillment) -> 409 TOO_LATE_TO_CANCEL, COMPLETED,
+                          one CANCEL_REJECTED history entry even for two refused requests
+  zg) cancel a COMPLETED order (scenario a's) -> 409 TOO_LATE_TO_CANCEL, order unchanged
+  zh) cancel an order placed from a checkout hold -> CANCELLED, hold CONSUMED, its stock back exactly once
+  zi) RACE: 20 payment_manual orders; for each, the cancel API and DemoPay's charge (invoked directly at the same
+                          moment) race. Every order has exactly one winner (I9): CANCELLED with net 0 and its unit back,
+                          or COMPLETED (the cancel refused with 409) with one DEBIT
   x) I5                -> stock conservation for EVERY product at the end of the run: seeded stock =
                           stock + held + reserved + sold + writtenOff, held = the units in ACTIVE holds, and
                           writtenOff = the units in this seed's write-off audit records. An order that completed on
@@ -67,6 +79,8 @@ against the money invariants, using the wallet ledger (order-saga-wallet-txns) a
   I6  net charge = the sum of the FULFILLED line amounts (COMPLETED: the total; PARTIALLY_FULFILLED: the
       delivered lines; FAILED: 0)
   I7  refunds never exceed the charge
+  I8  CANCELLED -> net charge 0, its stock released (INVENTORY_RELEASED), no line fulfilled
+  I9  cancel and payment never both win: an order with a cancel request is CANCELLED and never reached FULFILLING
 
 The poison, payment_timeout and payment_late orders and the 30 s hold are placed FIRST, so their minutes of waiting
 (SQS retries, the 120 s payment timeout, the ~150 s late callback) overlap the other scenarios.
@@ -85,6 +99,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -117,6 +132,8 @@ wallet_txns_table = ddb.Table(OUT["wallet_txns_table"])
 holds_table = ddb.Table(OUT["holds_table"])
 write_offs_table = ddb.Table(OUT["write_offs_table"])
 scheduler = boto3.client("scheduler", region_name=REGION)
+lambda_client = boto3.client("lambda", region_name=REGION)
+psp_table = ddb.Table(OUT["psp_transactions_table"])
 SEEDED_STOCK = {p["productId"]: p["stock"] for p in SEED_PRODUCTS}  # I5 baseline (run seed_inventory.py first)
 # When seed_inventory.py last reset the counters (the earliest seededAt; "" if seeded before step 2.3).
 SEEDED_AT = min((str(i.get("seededAt", "")) for i in inventory_table.scan(ProjectionExpression="seededAt")["Items"]), default="")
@@ -213,7 +230,7 @@ def wait_for_terminal(order_id: str, timeout: int = 90, user: str = USER) -> dic
     order: dict = {}
     while time.monotonic() < deadline:
         order = get_order(order_id, user)
-        if order.get("status") in ("COMPLETED", "PARTIALLY_FULFILLED", "FAILED"):
+        if order.get("status") in ("COMPLETED", "PARTIALLY_FULFILLED", "FAILED", "CANCELLED"):
             return order
         time.sleep(2)
     return order
@@ -300,7 +317,8 @@ def scenario_none() -> Scenario:
     order = wait_for_terminal(s.order_id)
     s.timeline = order.get("statusHistory", [])
     s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
-    expected = ["PENDING", "PROCESSING", "RESERVED", "PAYMENT_PENDING", "PAYMENT_CAPTURED", "ITEM_FULFILLED", "COMPLETED"]
+    # Step 2.4: FULFILLING (BeginFulfillment, the point after which a cancel is refused) comes before the lines.
+    expected = ["PENDING", "PROCESSING", "RESERVED", "PAYMENT_PENDING", "PAYMENT_CAPTURED", "FULFILLING", "ITEM_FULFILLED", "COMPLETED"]
     s.check(statuses(order) == expected, f"statusHistory {' -> '.join(statuses(order))}")
     after = stock_of("MECH-KEYBOARD")
     s.check(after == (before[0] - 1, before[1]), f"MECH-KEYBOARD (stock, reserved) {before} -> {after} (expected stock -1)")
@@ -482,29 +500,71 @@ def scenario_low_balance() -> Scenario:
     return s
 
 
-def start_poison() -> tuple[Scenario, float]:
-    s = Scenario("g", "poison message -> DLQ after 3 receives, order stays PENDING")
+def dlq_count() -> int:
+    """Messages in the orders DLQ (visible + in flight). Approximate per SQS, exact once the queue is quiet."""
+    attributes = sqs.get_queue_attributes(
+        QueueUrl=OUT["dlq_url"], AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"]
+    )["Attributes"]
+    return int(attributes["ApproximateNumberOfMessages"]) + int(attributes["ApproximateNumberOfMessagesNotVisible"])
+
+
+def start_poison() -> tuple[Scenario, float, int]:
+    s = Scenario("g", "poison message -> DLQ after 3 receives (DLQ count +1, message found), order stays PENDING")
+    dlq_before = dlq_count()  # the DLQ is never purged: the new message is found by counting, then by a full sweep
     code, body = place_order("WIRELESS-MOUSE", 1, "poison")
     s.check(code == 202, f"POST /orders returned {code} (expected 202)")
     s.order_id = body.get("orderId")
-    return s, time.monotonic()
+    return s, time.monotonic(), dlq_before
 
 
-def finish_poison(s: Scenario, started: float) -> Scenario:
-    found_after = None
+DLQ_SWEEP_HIDE_SECONDS = 30
+
+
+def dlq_sweep_for(order_id: str) -> tuple[bool, int]:
+    """Receive DLQ messages until this order's message is found or every message has been seen once.
+
+    Each receive hides what it returned for DLQ_SWEEP_HIDE_SECONDS, so the next receive can only return messages
+    not seen yet: the sweep is complete, not a random sample. Nothing is deleted; at the end every message is made
+    visible again at once (visibility 0), so the DLQ stays exactly as it was for the console demo.
+    Returns (found, distinct messages seen)."""
+    seen: dict[str, str] = {}  # messageId -> receipt handle
+    found, empty = False, 0
+    total = dlq_count()
+    try:
+        while not found and len(seen) < total and empty < 3:
+            messages = sqs.receive_message(
+                QueueUrl=OUT["dlq_url"], MaxNumberOfMessages=10, VisibilityTimeout=DLQ_SWEEP_HIDE_SECONDS, WaitTimeSeconds=2
+            ).get("Messages", [])
+            empty = 0 if messages else empty + 1
+            for m in messages:
+                seen[m["MessageId"]] = m["ReceiptHandle"]
+                found = found or json.loads(m["Body"]).get("orderId") == order_id
+    finally:
+        handles = list(seen.values())
+        for i in range(0, len(handles), 10):
+            sqs.change_message_visibility_batch(
+                QueueUrl=OUT["dlq_url"],
+                Entries=[{"Id": str(n), "ReceiptHandle": h, "VisibilityTimeout": 0} for n, h in enumerate(handles[i : i + 10])],
+            )
+    return found, len(seen)
+
+
+def finish_poison(s: Scenario, started: float, dlq_before: int) -> Scenario:
+    arrived_after = None
     while time.monotonic() - started < DLQ_TIMEOUT_SECONDS:
-        # Peek only: VisibilityTimeout=0 leaves the message visible in the DLQ for the console demo.
-        response = sqs.receive_message(
-            QueueUrl=OUT["dlq_url"], MaxNumberOfMessages=10, VisibilityTimeout=0, WaitTimeSeconds=10
-        )
-        if any(json.loads(m["Body"]).get("orderId") == s.order_id for m in response.get("Messages", [])):
-            found_after = time.monotonic() - started
+        if dlq_count() > dlq_before:
+            arrived_after = time.monotonic() - started
             break
         time.sleep(5)
+    time.sleep(5)  # let the approximate count settle before asserting it exactly
+    dlq_after = dlq_count()
     s.check(
-        found_after is not None,
-        f"message found in order-saga-orders-dlq after {found_after:.0f}s" if found_after else "message NOT in DLQ within 5 min",
+        dlq_after == dlq_before + 1,
+        f"order-saga-orders-dlq count {dlq_before} -> {dlq_after} after {arrived_after:.0f}s (expected +1)"
+        if arrived_after else f"order-saga-orders-dlq count {dlq_before} -> {dlq_after}: no new message within 5 min",
     )
+    found, swept = dlq_sweep_for(s.order_id)
+    s.check(found, f"this order's message found in the DLQ (swept {swept} of {dlq_after} messages, none deleted)")
 
     order = get_order(s.order_id)
     s.timeline = order.get("statusHistory", [])
@@ -928,6 +988,8 @@ EXPECTED_INTENT = {
     "p": "TIMED_OUT", "q": "REFUNDED", "r": "SUCCEEDED", "s": "SUCCEEDED", "y": "SUCCEEDED", "z": "SUCCEEDED",
     # step 2.3: a partly refunded intent stays SUCCEEDED (with refundedAmount); refunding every line makes it REFUNDED
     "za": "SUCCEEDED", "zb": "REFUNDED", "zc": "SUCCEEDED",
+    # step 2.4: cancelled before DemoPay charged -> the intent was abandoned (FAILED); after it charged -> REFUNDED
+    "zd": "FAILED", "ze": "REFUNDED", "zf": "SUCCEEDED", "zh": "FAILED",
 }
 FINAL_INTENT_STATUSES = {"SUCCEEDED", "FAILED", "TIMED_OUT", "REFUNDED"}
 
@@ -966,10 +1028,11 @@ def line_amount(item: dict) -> Decimal:
     return item.get("lineAmount") or (Decimal(item["quantity"]) * item["unitPrice"]).quantize(Decimal("0.01"))
 
 
-def check_money(s: Scenario) -> None:
-    """Money invariants I1-I4 for this scenario's order (see the module docstring)."""
-    order = orders_table.get_item(Key={"orderId": s.order_id}, ConsistentRead=True)["Item"]
-    entries = ledger_for(s.order_id, s.user)
+def check_money(s: Scenario, order_id: str | None = None, expected_intent: set | None = None) -> None:
+    """Money invariants I1-I4, I6-I9 for this scenario's order, or for `order_id` (the race checks 20 orders)."""
+    order_id = order_id or s.order_id
+    order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+    entries = ledger_for(order_id, s.user)
     debits = [e["amount"] for e in entries if e["type"] == "DEBIT"]
     credits = [e["amount"] for e in entries if e["type"] == "CREDIT"]
     net = sum(debits) - sum(credits)
@@ -984,12 +1047,23 @@ def check_money(s: Scenario) -> None:
     expected_net = fulfilled_amount(order)
     s.check(net == expected_net, f"I6 {order['status']} -> net ₹{net} = fulfilled lines ₹{expected_net}")
     s.check(sum(credits) <= sum(debits), f"I7 refunds ₹{sum(credits)} <= charged ₹{sum(debits)}")
-    intent = intent_of(s.order_id)
+    history = statuses(order)
+    if order["status"] == "CANCELLED":
+        s.check(
+            net == 0 and "INVENTORY_RELEASED" in history and "ITEM_FULFILLED" not in history,
+            f"I8 CANCELLED -> net ₹{net}, stock released: {'INVENTORY_RELEASED' in history}, no line fulfilled: {'ITEM_FULFILLED' not in history}",
+        )
+    if "cancelRequestedAt" in order or "FULFILLING" in history:
+        s.check(
+            ("cancelRequestedAt" in order) != ("FULFILLING" in history) and ("cancelRequestedAt" not in order or order["status"] == "CANCELLED"),
+            f"I9 one winner: cancel requested {'cancelRequestedAt' in order}, FULFILLING {'FULFILLING' in history}, status {order['status']}",
+        )
+    intent = intent_of(order_id)
     status = intent["status"] if intent else None
-    expected = EXPECTED_INTENT[s.key]
+    expected = expected_intent if expected_intent is not None else {EXPECTED_INTENT[s.key]}
     s.check(
-        (status is None or status in FINAL_INTENT_STATUSES) and status == expected,
-        f"I4 intent PI-{s.order_id}: {status or 'none (payment never requested)'} (expected {expected or 'none'})",
+        (status is None or status in FINAL_INTENT_STATUSES) and status in expected,
+        f"I4 intent PI-{order_id}: {status or 'none (payment never requested)'} (expected {' or '.join(sorted(str(e) for e in expected))})",
     )
     s.money = f"{status or '-'} · {ledger}"
 
@@ -1309,6 +1383,235 @@ def scenario_hold_then_partial() -> Scenario:
     return s
 
 
+# --------------------------------------------------------------------------------------------
+# Step 2.4: customer cancellation mid-saga
+# --------------------------------------------------------------------------------------------
+def cancel(order_id: str, user: str = USER, reason: str = "changed my mind (e2e)") -> tuple[int, dict]:
+    return http_json("POST", f"{API}/orders/{order_id}/cancel", {"reason": reason}, auth_header(user))
+
+
+def wait_for_status(order_id: str, wanted: set[str], timeout: float = 40, user: str = USER) -> dict:
+    """Poll GET /orders/{id} quickly (the cancel windows are 10-20 s) until the status is one of `wanted`."""
+    deadline = time.monotonic() + timeout
+    order: dict = {}
+    while time.monotonic() < deadline:
+        order = get_order(order_id, user)
+        if order.get("status") in wanted:
+            return order
+        time.sleep(0.5)
+    return order
+
+
+def charge_record(order_id: str) -> dict:
+    return psp_table.get_item(Key={"pspTxnId": f"CHARGE#PI-{order_id}"}, ConsistentRead=True).get("Item") or {}
+
+
+def all_counters(product_id: str) -> tuple[int, ...]:
+    """(stock, held, reserved, sold, writtenOff): a cancelled order must leave every one as it was."""
+    return counters(product_id) + fulfillment_counters(product_id)
+
+
+def check_cancelled(s: Scenario, order: dict, product: str, before: tuple[int, ...]) -> None:
+    history = statuses(order)
+    s.check(order.get("status") == "CANCELLED", f"order status {order.get('status')} (expected CANCELLED)")
+    s.check({"CANCEL_REQUESTED", "INVENTORY_RELEASED", "CANCELLED"} <= set(history) and "FULFILLING" not in history,
+            f"statusHistory {' -> '.join(history)}")
+    s.check(all_counters(product) == before, f"{product} (stock, held, reserved, sold, writtenOff) {before} -> {all_counters(product)} (expected unchanged)")
+    info, entered = execution(s), states_entered(s)
+    s.check(info["status"] == "SUCCEEDED" and entered[-1:] == ["OrderCancelled"], f"execution {info['status']}, last state {entered[-1:]} (expected OrderCancelled)")
+    s.check({"RefundWhatIsLeft", "CancelReleaseInventory", "MarkOrderCancelled", "NotifyCustomerCancelled"} <= set(entered),
+            "cancel branch ran: RefundWhatIsLeft -> CancelReleaseInventory -> MarkOrderCancelled -> NotifyCustomerCancelled")
+
+
+def scenario_cancel_while_waiting() -> Scenario:
+    s = Scenario("zd", "cancel while waiting for payment -> CANCELLED, nothing charged, DemoPay's late charge voided; B 404; repeats idempotent")
+    product = "ANC-HEADPHONES"
+    before = all_counters(product)
+    code, body = place_order(product, 1, "payment_slow")
+    s.check(code == 202, f"POST /orders -> {code}")
+    s.order_id = body.get("orderId")
+    placed_at = time.monotonic()
+    order = wait_for_status(s.order_id, {"PAYMENT_PENDING"})
+    s.check(order.get("status") == "PAYMENT_PENDING" and order.get("canCancel") is True, f"waiting for DemoPay: {order.get('status')}, canCancel {order.get('canCancel')}")
+
+    code, _ = cancel(s.order_id, user=LOW_BALANCE_USER)
+    s.check(code == 404, f"user B cancels A's order -> {code} (expected 404, exactly like a missing order)")
+    code, first = cancel(s.order_id)
+    s.check(code == 202 and first.get("status") == "CANCEL_REQUESTED", f"POST /orders/{{id}}/cancel -> {code} {first}")
+    code, again = cancel(s.order_id)
+    s.check(code == 202 and again.get("cancelRequestedAt") == first.get("cancelRequestedAt"), f"repeated cancel -> {code}, same request {again.get('cancelRequestedAt')}")
+
+    order = wait_for_terminal(s.order_id, timeout=60)
+    s.timeline = order.get("statusHistory", [])
+    check_cancelled(s, order, product, before)
+    detail = next((h["detail"] for h in s.timeline if h["status"] == "CANCELLED"), "")
+    s.check(detail.endswith("nothing was charged"), f"CANCELLED detail {detail!r}")
+    # DemoPay's own request was delayed 20 s: when it arrives, the voided intent must not be charged.
+    time.sleep(max(0.0, 30 - (time.monotonic() - placed_at)))
+    charge = charge_record(s.order_id)
+    s.check(charge.get("outcome") == "VOIDED", f"DemoPay CHARGE record {charge.get('outcome')} (expected VOIDED: never charged)")
+    code, done = cancel(s.order_id)
+    s.check(code == 200 and done.get("status") == "CANCELLED" and Decimal(str(done.get("refundedAmount"))) == 0,
+            f"cancel after the end -> {code} {done}")
+    return s
+
+
+def scenario_cancel_after_payment() -> Scenario:
+    s = Scenario("ze", "cancel after payment, before fulfillment -> CANCELLED, full refund (one CREDIT), stock back")
+    product = "4K-MONITOR"
+    before = all_counters(product)
+    code, body = place_order(product, 1, "fulfillment_slow")
+    s.check(code == 202, f"POST /orders -> {code}")
+    s.order_id = body.get("orderId")
+    order = wait_for_status(s.order_id, {"PAYMENT_CAPTURED"})
+    s.check(order.get("status") == "PAYMENT_CAPTURED" and order.get("canCancel") is True, f"paid, warehouse waiting: {order.get('status')}, canCancel {order.get('canCancel')}")
+    code, first = cancel(s.order_id)
+    s.check(code == 202, f"POST /orders/{{id}}/cancel -> {code} {first}")
+
+    order = wait_for_terminal(s.order_id, timeout=60)
+    s.timeline = order.get("statusHistory", [])
+    check_cancelled(s, order, product, before)
+    total = Decimal(str(order.get("totalAmount")))
+    s.check(Decimal(str(order.get("refundedAmount"))) == total, f"refundedAmount {order.get('refundedAmount')} (expected the total {total})")
+    detail = next((h["detail"] for h in s.timeline if h["status"] == "CANCELLED"), "")
+    s.check(f"INR {total:.2f} refunded" in detail, f"CANCELLED detail {detail!r}")
+    notes = [e.get("note") for e in ledger_for(s.order_id, s.user) if e["type"] == "CREDIT"]
+    s.check(notes == [f"Refund for {s.order_id} (order cancelled)"], f"wallet CREDIT notes {notes}")
+    code, done = cancel(s.order_id)
+    s.check(code == 200 and Decimal(str(done.get("refundedAmount"))) == total, f"cancel twice -> {code} {done} (same answer, no second refund)")
+    return s
+
+
+def scenario_cancel_during_fulfillment() -> Scenario:
+    s = Scenario("zf", "cancel during fulfillment -> 409 TOO_LATE_TO_CANCEL, the order still COMPLETES, one CANCEL_REJECTED entry")
+    code, body = place_order("LOWPRO-KEYBOARD", 1, "fulfillment_slow")
+    s.check(code == 202, f"POST /orders -> {code}")
+    s.order_id = body.get("orderId")
+    order = wait_for_status(s.order_id, {"FULFILLING"}, timeout=60)
+    s.check(order.get("status") == "FULFILLING" and order.get("canCancel") is False, f"packing: {order.get('status')}, canCancel {order.get('canCancel')}")
+    code, refused = cancel(s.order_id)
+    s.check(code == 409 and refused == {"error": "TOO_LATE_TO_CANCEL", "status": "FULFILLING"}, f"cancel -> {code} {refused}")
+    code, _ = cancel(s.order_id)
+    s.check(code == 409, f"cancel again -> {code} (expected 409)")
+    order = wait_for_terminal(s.order_id, timeout=60)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED: the refusal changed nothing)")
+    s.check(statuses(order).count("CANCEL_REJECTED") == 1, f"CANCEL_REJECTED entries: {statuses(order).count('CANCEL_REJECTED')} (expected 1)")
+    return s
+
+
+def scenario_cancel_completed(order_id: str) -> Scenario:
+    s = Scenario("zg", "cancel a COMPLETED order -> 409 TOO_LATE_TO_CANCEL, order unchanged", order_id=order_id)
+    before = get_order(order_id)
+    code, refused = cancel(order_id)
+    s.check(code == 409 and refused == {"error": "TOO_LATE_TO_CANCEL", "status": "COMPLETED"}, f"cancel -> {code} {refused}")
+    after = get_order(order_id)
+    s.check(after.get("status") == "COMPLETED" and after.get("canCancel") is False, f"status {after.get('status')}, canCancel {after.get('canCancel')}")
+    added = statuses(after)[len(statuses(before)):]
+    s.check(statuses(after)[: len(statuses(before))] == statuses(before) and set(added) <= {"CANCEL_REJECTED"},
+            f"history only gained {added or 'nothing'} (a CANCEL_REJECTED entry at most)")
+    return s
+
+
+def scenario_cancel_held_order() -> Scenario:
+    s = Scenario("zh", "cancel an order placed from a checkout hold -> CANCELLED, hold consumed, stock back exactly once")
+    product = "LAPTOP-STAND"
+    before = all_counters(product)
+    code, hold = post_hold([(product, 1)])
+    hold_id = hold.get("holdId", "")
+    s.check(code == 201, f"POST /holds -> {code} {hold_id}")
+    code, body = place_order(product, 1, "payment_slow", hold_id=hold_id)
+    s.check(code == 202, f"POST /orders with holdId -> {code}")
+    s.order_id = body.get("orderId")
+    order = wait_for_status(s.order_id, {"PAYMENT_PENDING"})
+    s.check(f"from checkout hold {hold_id}" in reserved_detail(order), f"RESERVED detail: {reserved_detail(order)!r}")
+    code, _ = cancel(s.order_id)
+    s.check(code == 202, f"cancel -> {code}")
+    order = wait_for_terminal(s.order_id, timeout=60)
+    s.timeline = order.get("statusHistory", [])
+    check_cancelled(s, order, product, before)  # stock, held, reserved all exactly as before the hold
+    item = stored_hold(hold_id)
+    s.check(item.get("status") == "CONSUMED" and item.get("orderId") == s.order_id, f"hold {item.get('status')} by {item.get('orderId')} (expected CONSUMED by this order: never released a 2nd time)")
+    s.check(current_hold() is None and not schedule_exists(hold_id), "no current hold, no expiry schedule left")
+    return s
+
+
+RACE_ORDERS = 20
+RACE_PRODUCT = "WIRELESS-EARBUDS"
+
+
+def trigger_charge(order_id: str) -> dict:
+    """Do what DemoPay does when a queued payment_manual request is processed: charge, then call our webhook."""
+    stored = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+    request = {
+        "paymentIntentId": f"PI-{order_id}", "orderId": order_id, "walletId": stored["walletId"],
+        "amount": str(stored["totalAmount"]), "currency": stored.get("currency", "INR"),
+        "simulate": "payment_manual", "manualTrigger": True,
+    }
+    event = {"Records": [{"messageId": f"race-{order_id}", "body": json.dumps(request), "attributes": {"ApproximateReceiveCount": "1"}}]}
+    response = lambda_client.invoke(FunctionName=OUT["cancellation_function_names"]["payment_provider"], Payload=json.dumps(event).encode())
+    return json.loads(response["Payload"].read() or b"{}")
+
+
+def scenario_cancel_race() -> Scenario:
+    """Fire the cancel API and DemoPay's charge at the same moment for each of 20 orders (the cancel delayed by
+    0-950 ms, so both orders of arrival happen), then check that each order has exactly one winner."""
+    import threading
+
+    s = Scenario("zi", f"RACE x{RACE_ORDERS}: cancel API vs DemoPay charge at the same moment -> exactly one winner per order (I8, I9)")
+    before = all_counters(RACE_PRODUCT)
+    placed = [place_order(RACE_PRODUCT, 1, "payment_manual") for _ in range(RACE_ORDERS)]
+    s.check(all(code == 202 for code, _ in placed), f"POST /orders x{RACE_ORDERS} -> {sorted({code for code, _ in placed})}")
+    order_ids = [body.get("orderId") for _, body in placed]
+    for order_id in order_ids:  # every saga is paused on its payment token, DemoPay holding the request
+        status = wait_for_status(order_id, {"PAYMENT_PENDING"}).get("status")
+        if status != "PAYMENT_PENDING":
+            s.check(False, f"{order_id} never reached PAYMENT_PENDING ({status})")
+    s.order_id = order_ids[0]
+
+    def racer(index: int, order_id: str, side: str, barrier: threading.Barrier):
+        barrier.wait()
+        if side == "cancel":
+            time.sleep((index % 20) * 0.05)
+            return order_id, side, cancel(order_id)
+        return order_id, side, trigger_charge(order_id)
+
+    barriers = {order_id: threading.Barrier(2) for order_id in order_ids}
+    jobs = [(i, oid, side) for i, oid in enumerate(order_ids) for side in ("cancel", "charge")]
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        answers = list(pool.map(lambda job: racer(*job, barriers[job[1]]), jobs))
+    cancel_codes = {oid: result[0] for oid, side, result in answers if side == "cancel"}
+
+    outcomes: dict[str, int] = {}
+    completed = 0
+    for order_id in order_ids:
+        order = wait_for_terminal(order_id, timeout=90)
+        stored = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+        history, status, code = statuses(order), order.get("status"), cancel_codes[order_id]
+        if status == "COMPLETED":
+            completed += 1
+            kind = "payment won, cancel refused (409)"
+            s.check(code == 409 and "cancelRequestedAt" not in stored, f"{order_id} COMPLETED: cancel answered {code} (expected 409)")
+        elif status == "CANCELLED":
+            charged = any(e["type"] == "DEBIT" for e in ledger_for(order_id, s.user))
+            kind = ("cancel won, nothing charged" if not charged
+                    else "paid first, then cancelled (saga refund)" if "PAYMENT_CAPTURED" in history
+                    else "cancel won, late charge refunded by the webhook")
+            s.check(code == 202, f"{order_id} CANCELLED: cancel answered {code} (expected 202)")
+        else:
+            kind = f"unexpected {status}"
+            s.check(False, f"{order_id} ended {status} (expected CANCELLED or COMPLETED)")
+        outcomes[kind] = outcomes.get(kind, 0) + 1
+        check_money(s, order_id, {"SUCCEEDED"} if status == "COMPLETED" else {"FAILED", "REFUNDED"})
+
+    after = all_counters(RACE_PRODUCT)
+    expected = (before[0] - completed, before[1], before[2], before[3] + completed, before[4])
+    s.check(after == expected, f"{RACE_PRODUCT} (stock, held, reserved, sold, writtenOff) {before} -> {after} (expected {expected}: only the {completed} COMPLETED orders sold a unit)")
+    s.money = "; ".join(f"{n} x {kind}" for kind, n in sorted(outcomes.items()))
+    print(f"  race outcomes: {s.money}")
+    return s
+
+
 def written_off_since(seeded_at: str) -> dict[str, int]:
     """productId -> units in write-off audit records made since the last seed (the seed resets writtenOff to 0)."""
     units: dict[str, int] = {}
@@ -1355,7 +1658,7 @@ def main() -> int:
     started = time.monotonic()
     set_wallet(USER)  # DemoPay: start every run from ₹10,00,000
     print("Placing poison order first (it needs ~3 min of SQS retries)...")
-    poison, poison_started = start_poison()
+    poison, poison_started, dlq_before = start_poison()
     print(f"  poison order {poison.order_id}")
     print("Placing payment_timeout and payment_late orders (they finish after 2-3 min)...")
     timeout_order, timeout_before = start_slow(
@@ -1392,6 +1695,9 @@ def main() -> int:
         scenario_order_consumes_hold,
         scenario_partial_fulfillment,
         scenario_all_unavailable,
+        scenario_cancel_while_waiting,
+        scenario_cancel_after_payment,
+        scenario_cancel_during_fulfillment,
     ):
         result = run()
         print(f"[{'PASS' if result.passed else 'FAIL'}] {result.key}) {result.title}  {result.order_id}")
@@ -1400,12 +1706,14 @@ def main() -> int:
                 print(f"      FAIL: {text}")
         results.append(result)
 
+    results.append(scenario_cancel_completed(next(r for r in results if r.key == "a").order_id))
+    print(f"[{'PASS' if results[-1].passed else 'FAIL'}] zg) {results[-1].title}  {results[-1].order_id}")
     crash = next(r for r in results if r.key == "i")
     results.append(scenario_modify_does_not_restart(crash.order_id))
     print(f"[{'PASS' if results[-1].passed else 'FAIL'}] j) {results[-1].title}  {crash.order_id}")
 
     print("Waiting for the poison message to reach the DLQ (up to 5 min from placement)...")
-    results.append(finish_poison(poison, poison_started))
+    results.append(finish_poison(poison, poison_started, dlq_before))
     print(f"[{'PASS' if results[-1].passed else 'FAIL'}] g) {poison.title}  {poison.order_id}")
 
     print("Waiting for the payment timeout and the late callback's refund...")
@@ -1415,10 +1723,13 @@ def main() -> int:
     results.append(finish_short_hold(short_hold, short_hold_body, short_hold_before))
     results.append(finish_expiring_hold(expiring, expiring_body))
     results.append(scenario_hold_then_partial())  # after z: user A may hold only one cart at a time
+    results.append(scenario_cancel_held_order())  # after zc, for the same reason
+    print("Racing cancel against payment for 20 orders...")
+    results.append(scenario_cancel_race())
     results.append(scenario_last_unit_race())
     results.append(scenario_stock_conservation())
 
-    print("Checking the money invariants I1-I4, I6, I7 for every order...")
+    print("Checking the money invariants I1-I4, I6-I9 for every order...")
     for r in results:
         if r.key in EXPECTED_INTENT and r.order_id:
             check_money(r)

@@ -6,15 +6,15 @@ After each order the DemoPay ledger was checked through `GET /wallet`.
 
 | Scenario | orderId | Tracker result | Wallet DEBITs (expected) |
 |---|---|---|---|
-| Normal | `ORD-20261030-e0821e87` | Order completed; balance 1,000,000 -> 996,501; hold consumed: True | 1 (1) ✓ |
-| Payment glitch (retries) | `ORD-20261030-65f9b274` | Order completed | 1 (1) ✓ |
-| Payment declined | `ORD-20261030-6dccab85` | Order failed | 0 (0) ✓ |
-| Item damaged (partial refund) | `ORD-20261030-e9c97701` | Order partially fulfilled; CREDITs [1799] (L2 = 1799) | 1 (1) ✓ |
-| Low balance (real decline) | `ORD-20261030-01cc1794` | Order failed | 0 (0) ✓ |
-| Duplicate test (3 requests) | `ORD-20261030-cafed609` | Order completed · 1 order | 1 (1) ✓ |
-| Late payment (auto-refund) | `ORD-20261030-03b0a661` | Order failed; refund row shown: True | 1 (1) ✓ |
-| Poison message (to DLQ) | `ORD-20261030-aa0f18bd` | Stuck in the dead-letter queue | 0 (0) ✓ |
-| Checkout hold: expired, held again, released on leaving | `-` | HOLD-20261030-aeb4bf2ed1 -> HOLD-20261030-fb2b2e70fc; released: True | 0 (0) ✓ |
+| Normal | `ORD-20261030-0a3942e3` | Order completed; balance 1,000,000 -> 996,501; hold consumed: True | 1 (1) ✓ |
+| Payment glitch (retries) | `ORD-20261030-000d7d88` | Order completed | 1 (1) ✓ |
+| Payment declined | `ORD-20261030-51a1bdcc` | Order failed | 0 (0) ✓ |
+| Item damaged (partial refund) | `ORD-20261030-99c1539b` | Order partially fulfilled; CREDITs [1799] (L2 = 1799) | 1 (1) ✓ |
+| Low balance (real decline) | `ORD-20261030-6ddffc4f` | Order failed | 0 (0) ✓ |
+| Duplicate test (3 requests) | `ORD-20261030-1ec3ba8d` | Order completed · 1 order | 1 (1) ✓ |
+| Late payment (auto-refund) | `ORD-20261030-3770ba81` | Order failed; refund row shown: True | 1 (1) ✓ |
+| Poison message (to DLQ) | `ORD-20261030-9d978920` | Stuck in the dead-letter queue | 0 (0) ✓ |
+| Checkout hold: expired, held again, released on leaving | `-` | HOLD-20261030-a27867137b -> HOLD-20261030-048d4d2da8; released: True | 0 (0) ✓ |
 
 Browser console errors during the run: 0
 

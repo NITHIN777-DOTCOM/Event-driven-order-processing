@@ -18,7 +18,7 @@ AMOUNT = Decimal("5097.00")
 @pytest.fixture
 def refund(load_handler, payments, monkeypatch):
     handler = load_handler("refund_payment")
-    monkeypatch.setattr(handler, "invoke_provider_refund", lambda _client, _fn, intent_id: payments.provider.refund(intent_id))
+    monkeypatch.setattr(handler, "invoke_provider_refund", lambda _client, _fn, intent_id, note="": payments.provider.refund(intent_id, note))
     return handler
 
 

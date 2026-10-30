@@ -10,7 +10,9 @@ export type Simulate =
   | "payment_late"
   | "webhook_duplicate"
   | "webhook_bad_signature"
-  | "item_unavailable";
+  | "item_unavailable"
+  | "payment_slow"
+  | "fulfillment_slow";
 
 export interface Product {
   productId: string;
@@ -102,9 +104,20 @@ export interface Order {
   released?: boolean;
   paidAmount?: number;
   refunded?: boolean;
-  refundedAmount?: number; // the sum of the line refunds (step 2.3)
+  refundedAmount?: number; // the sum of the line refunds (step 2.3), or the cancellation refund (step 2.4)
+  cancelRequestedAt?: string;
+  cancelledAt?: string;
+  canCancel?: boolean; // step 2.4: the order is inside the cancel window (the API still decides for real)
   feed: FeedRow[];
   consoleLinks: ConsoleLinks;
+}
+
+/** POST /orders/{id}/cancel: 202 while the saga runs the cancel branch, 200 once the order is CANCELLED. */
+export interface CancelResponse {
+  orderId: string;
+  status: string;
+  cancelRequestedAt?: string;
+  refundedAmount?: number;
 }
 
 export interface OrderSummary {

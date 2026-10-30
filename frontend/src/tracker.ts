@@ -9,6 +9,7 @@
  * On failure the failing step turns red. When compensation ran (INVENTORY_RELEASED), a
  * "Stock released" step replaces "Confirmed", because the order will never be confirmed.
  * A PARTIALLY_FULFILLED order (some lines refunded after payment) ends on "Partly delivered".
+ * A CANCELLED order (step 2.4) ends on "Stock released", and its "Paid" step says whether it was refunded.
  */
 import { ordinal } from "./format";
 import type { HistoryEntry, Order } from "./types";
@@ -24,7 +25,7 @@ export interface Step {
   note?: string;
 }
 
-export const TERMINAL_STATUSES = ["COMPLETED", "PARTIALLY_FULFILLED", "FAILED"];
+export const TERMINAL_STATUSES = ["COMPLETED", "PARTIALLY_FULFILLED", "FAILED", "CANCELLED"];
 
 export const isTerminal = (order: Order) => TERMINAL_STATUSES.includes(order.status) || Boolean(order.deadLettered);
 
@@ -73,6 +74,10 @@ function paidStep(order: Order, h: HistoryEntry[], failedAt?: string): Step {
   const attempts = order.paymentAttempts ?? 1;
   const note = attempts > 1 ? `${ordinal(attempts)} attempt` : undefined;
   const captured = find(h, "PAYMENT_CAPTURED");
+  if (order.status === "CANCELLED") {
+    const refund = order.refundedAmount ?? 0;
+    return { key: "paid", label: "Paid", state: "compensated", time: captured?.timestamp, note: refund > 0 ? "refunded" : "nothing charged" };
+  }
   if (captured) return { key: "paid", label: "Paid", state: "done", time: captured.timestamp, note };
 
   const declined = find(h, "PAYMENT_DECLINED");
@@ -96,6 +101,8 @@ export function trackerTitle(order: Order): string {
   if (order.status === "COMPLETED") return "Order completed";
   if (order.status === "PARTIALLY_FULFILLED") return "Order partially fulfilled";
   if (order.status === "FAILED") return "Order failed";
+  if (order.status === "CANCELLED") return "Order cancelled";
+  if (order.status === "CANCEL_REQUESTED") return "Cancelling…";
   return "Processing…";
 }
 

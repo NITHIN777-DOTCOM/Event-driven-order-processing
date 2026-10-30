@@ -61,3 +61,22 @@ def test_malformed_id_returns_400(aws, handler):
     result = handler.lambda_handler(api_event(path_parameters={"id": "../etc/passwd"}), None)
 
     assert result["statusCode"] == 400
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        ({"status": "PAYMENT_PENDING", "cancellable": True}, True),
+        ({"status": "PAYMENT_CAPTURED", "cancellable": True}, True),
+        ({"status": "PAYMENT_PENDING"}, False),  # started on the old definition: no cancel branch to run
+        ({"status": "FULFILLING", "cancellable": True}, False),  # too late
+        ({"status": "PENDING", "cancellable": True}, False),  # not reserved yet
+        ({"status": "CANCEL_REQUESTED", "cancellable": True, "cancelRequestedAt": "2026-10-30T10:00:00.000Z"}, False),
+    ],
+)
+def test_can_cancel_only_inside_the_window(aws, handler, overrides, expected):
+    order = seed_order(aws.orders, **overrides)
+
+    body = json.loads(handler.lambda_handler(api_event(path_parameters={"id": order["orderId"]}), None)["body"])
+
+    assert body["canCancel"] is expected

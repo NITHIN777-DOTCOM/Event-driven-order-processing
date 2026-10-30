@@ -494,6 +494,12 @@ data "aws_iam_policy_document" "sfn" {
     actions   = ["dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
   }
+  # Step 2.4: CheckCancelBeforeFailing reads ONE attribute (cancelRequestedAt) of the order before marking it FAILED.
+  statement {
+    sid       = "CheckForCancelBeforeFailing"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.orders.arn]
+  }
   statement {
     sid       = "MarkPaymentTimedOut"
     actions   = ["dynamodb:UpdateItem"]

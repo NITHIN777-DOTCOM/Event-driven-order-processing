@@ -9,8 +9,11 @@ Rows are returned oldest first. The UI shows them newest first.
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
+
+from common.money import format_inr
 
 # Service labels shown in the feed.
 API = "API Gateway"
@@ -31,6 +34,9 @@ _ATTEMPT = re.compile(r"[Aa]ttempt (\d+)")
 _COUNT = re.compile(r"for (\d+) product")
 _AVAILABLE = re.compile(r"(₹[\d,.]+) available")
 _ATTEMPT_SUFFIX = re.compile(r" \(attempt \d+\)$")
+# "1 x Desk Mat (line L2) written off: Desk Mat (line L2) was found damaged ..." -> the reason repeats the item.
+_WRITE_OFF = re.compile(r"^(?P<head>\d+ x (?P<item>.+?) written off): (?P<reason>.*)$")
+_INR = re.compile(r"INR (\d+(?:\.\d+)?)")
 
 
 def _attempt(detail: str) -> int | None:
@@ -46,6 +52,23 @@ def _reason(order: dict[str, Any]) -> str:
 
 def _plural(count: int, word: str) -> str:
     return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def _write_off_message(detail: str) -> str:
+    """'1 x Desk Mat (line L2) written off: found damaged in the warehouse', without the item named twice."""
+    match = _WRITE_OFF.match(detail)
+    if not match:
+        return detail
+    reason = match.group("reason")
+    if reason.startswith(match.group("item")):
+        reason = reason[len(match.group("item")):].strip()
+        reason = reason[4:] if reason.startswith("was ") else reason
+    return f"{match.group('head')}: {reason}"
+
+
+def _rupees(text: str) -> str:
+    """'INR 5097.00' (the state machine's States.Format) -> '₹5,097'."""
+    return _INR.sub(lambda m: format_inr(Decimal(m.group(1))), text)
 
 
 def rows_for(entry: dict[str, Any], order: dict[str, Any]) -> list[dict[str, Any]]:
@@ -101,7 +124,16 @@ def rows_for(entry: dict[str, Any], order: dict[str, Any]) -> list[dict[str, Any
     if status == "LINE_REFUNDED":  # "₹1,598 refunded to DemoPay for 2 x Desk Mat (line L2)"
         return [row(PAYMENT, detail.replace("refunded to DemoPay", "refunded to wallet"), "retry")]
     if status == "ITEM_WRITTEN_OFF":  # "1 x Desk Mat (line L2) written off: <reason>"
-        return [row(WAREHOUSE, "Unavailable: " + detail, "error")]
+        return [row(WAREHOUSE, "Unavailable: " + _write_off_message(detail), "error")]
+    if status == "FULFILLING":  # step 2.4: BeginFulfillment, the point of no return
+        return [row(WAREHOUSE, "Fulfillment started: the order can no longer be cancelled")]
+    if status == "CANCEL_REQUESTED":  # "Cancellation requested by the customer: <reason>"
+        return [row(API, detail or "Cancellation requested by the customer", "retry")]
+    if status == "CANCEL_REJECTED":  # "Cancel request rejected: the order was already FULFILLING"
+        return [row(API, detail.replace("Cancel request rejected:", "Cancel rejected (too late):"), "error")]
+    if status == "CANCELLED":  # "Cancelled by the customer - INR 5097.00 refunded to the DemoPay wallet" / "- nothing was charged"
+        outcome = _rupees(detail.split(" - ", 1)[-1]) if " - " in detail else "cancelled by the customer"
+        return [row(DATABASE, f"Order marked CANCELLED: {outcome}", "retry"), row(EMAIL, "Cancellation email sent")]
     if status == "PARTIALLY_FULFILLED":
         return [row(DATABASE, f"Order marked PARTIALLY_FULFILLED: {detail}", "retry"), row(EMAIL, "Partial delivery email sent")]
     if status == "COMPLETED":

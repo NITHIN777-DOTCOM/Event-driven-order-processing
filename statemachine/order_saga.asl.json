@@ -1,15 +1,16 @@
 {
-  "Comment": "Order saga: reserve inventory, request payment from the provider and PAUSE until its signed webhook resumes the saga (task token, 120 s timeout), then FULFIL each order line on its own (inline Map). All lines delivered: COMPLETED. Some lines unavailable: refund just those lines, write them off, PARTIALLY_FULFILLED. None: refund and write off everything, FAILED. If payment fails or times out it compensates in reverse order: refund through the provider, release the stock, mark the order FAILED with a reason. Every outcome notifies the customer.",
+  "Comment": "Order saga: reserve inventory, request payment from the provider and PAUSE until its signed webhook resumes the saga (task token, 120 s timeout), then BEGIN FULFILLMENT (the point after which the customer can no longer cancel) and fulfil each order line on its own (inline Map). All lines delivered: COMPLETED. Some lines unavailable: refund just those lines, write them off, PARTIALLY_FULFILLED. None: refund and write off everything, FAILED. If payment fails or times out it compensates in reverse order: refund through the provider, release the stock, mark the order FAILED with a reason. CUSTOMER CANCELLATION (until fulfillment starts): the cancel API fails the payment wait with OrderCancelled, or BeginFulfillment finds the cancel; both go to the cancel branch: void the payment and refund what is left, release the stock, CANCELLED. A failing order that the customer cancelled meanwhile also ends CANCELLED. Every outcome notifies the customer.",
   "StartAt": "ReserveInventory",
   "States": {
     "ReserveInventory": {
       "Type": "Task",
-      "Comment": "Lambda order-saga-reserve-inventory: decrements stock for every item in ONE DynamoDB transaction (all or nothing) and marks the order RESERVED. Throws OutOfStock if any item is short.",
+      "Comment": "Lambda order-saga-reserve-inventory: decrements stock for every item in ONE DynamoDB transaction (all or nothing) and marks the order RESERVED. Throws OutOfStock if any item is short. Passes cancellable=true, so the order is stamped as running on a definition with a cancel branch (step 2.4).",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
         "FunctionName": "${reserve_inventory_function_arn}",
         "Payload": {
-          "orderId.$": "$.orderId"
+          "orderId.$": "$.orderId",
+          "cancellable": true
         }
       },
       "ResultSelector": {
@@ -54,7 +55,7 @@
     },
     "RequestPayment": {
       "Type": "Task",
-      "Comment": "Lambda order-saga-request-payment stores THIS task token on payment intent PI-<orderId> and asks DemoPay to charge (SQS, 2-5 s). The saga then waits: payment_webhook calls SendTaskSuccess (paid) or SendTaskFailure PaymentDeclined. No callback within 120 s -> States.Timeout -> MarkPaymentTimedOut. PaymentTransientError (payment_flaky) is retried 2 s, 4 s, 8 s; each retry gets a new token.",
+      "Comment": "Lambda order-saga-request-payment stores THIS task token on payment intent PI-<orderId> and asks DemoPay to charge (SQS, 2-5 s). The saga then waits: payment_webhook calls SendTaskSuccess (paid) or SendTaskFailure PaymentDeclined. No callback within 120 s -> States.Timeout -> MarkPaymentTimedOut. PaymentTransientError (payment_flaky) is retried 2 s, 4 s, 8 s; each retry gets a new token. OrderCancelled (the customer cancelled: SendTaskFailure from the cancel API, or request_payment refusing a cancelled order) is caught separately and goes to the cancel branch.",
       "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
       "Parameters": {
         "FunctionName": "${request_payment_function_arn}",
@@ -97,6 +98,13 @@
         },
         {
           "ErrorEquals": [
+            "OrderCancelled"
+          ],
+          "ResultPath": "$.error",
+          "Next": "RefundWhatIsLeft"
+        },
+        {
+          "ErrorEquals": [
             "PaymentDeclined"
           ],
           "ResultPath": "$.error",
@@ -110,7 +118,7 @@
           "Next": "RefundPayment"
         }
       ],
-      "Next": "FulfillItems"
+      "Next": "WarehouseSpeed"
     },
     "MarkPaymentTimedOut": {
       "Type": "Task",
@@ -161,6 +169,84 @@
       },
       "ResultPath": "$.error",
       "Next": "RefundPayment"
+    },
+    "WarehouseSpeed": {
+      "Type": "Choice",
+      "Comment": "DEMO ONLY: simulate=fulfillment_slow waits 10 s before the warehouse starts (time to cancel a paid order). Every other order goes straight on.",
+      "Choices": [
+        {
+          "Variable": "$.order.simulate",
+          "StringEquals": "fulfillment_slow",
+          "Next": "WaitBeforeFulfillment"
+        }
+      ],
+      "Default": "BeginFulfillment"
+    },
+    "WaitBeforeFulfillment": {
+      "Type": "Wait",
+      "Comment": "DEMO ONLY (fulfillment_slow): the order is paid and still cancellable for these 10 s.",
+      "Seconds": 10,
+      "Next": "BeginFulfillment"
+    },
+    "BeginFulfillment": {
+      "Type": "Task",
+      "Comment": "Lambda order-saga-begin-fulfillment: ONE conditional write PAYMENT_CAPTURED -> FULFILLING, only if the customer has not cancelled. Returns outcome FULFILLING (from now on a cancel gets 409) or CANCEL_REQUESTED (the customer won: cancel branch). Retries, no Catch: on a real failure the execution fails loudly (alarm order-saga-cancellation-errors) and can be redriven.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${begin_fulfillment_function_arn}",
+        "Payload": {
+          "orderId.$": "$.orderId"
+        }
+      },
+      "ResultSelector": {
+        "outcome.$": "$.Payload.outcome"
+      },
+      "ResultPath": "$.fulfillmentStart",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "CancelledBeforeFulfillment"
+    },
+    "CancelledBeforeFulfillment": {
+      "Type": "Choice",
+      "Comment": "The customer cancelled after paying but before the warehouse started -> refund everything (cancel branch). Otherwise fulfil (fulfillment_slow first waits 10 s more while FULFILLING, so a late cancel gets 409).",
+      "Choices": [
+        {
+          "Variable": "$.fulfillmentStart.outcome",
+          "StringEquals": "CANCEL_REQUESTED",
+          "Next": "RefundWhatIsLeft"
+        },
+        {
+          "Variable": "$.order.simulate",
+          "StringEquals": "fulfillment_slow",
+          "Next": "WaitWhilePacking"
+        }
+      ],
+      "Default": "FulfillItems"
+    },
+    "WaitWhilePacking": {
+      "Type": "Wait",
+      "Comment": "DEMO ONLY (fulfillment_slow): FULFILLING for 10 s, so a cancel now is rejected with 409 TOO_LATE_TO_CANCEL.",
+      "Seconds": 10,
+      "Next": "FulfillItems"
     },
     "FulfillItems": {
       "Type": "Map",
@@ -497,7 +583,7 @@
       "QueryLanguage": "JSONata",
       "Comment": "Sets error AllItemsUnavailable and a readable failureReason, then joins the normal failure path (MarkOrderFailed, notify).",
       "Output": "{% $merge([$states.input, {'error': {'Error': 'AllItemsUnavailable', 'Cause': 'all items unavailable'}, 'failureReason': 'AllItemsUnavailable: all items unavailable - ' & $states.input.order.currency & ' ' & $states.input.lineRefund.refundedAmount & ' refunded to your DemoPay wallet and every line written off'}]) %}",
-      "Next": "MarkOrderFailed"
+      "Next": "CheckCancelBeforeFailing"
     },
     "MarkOrderCompleted": {
       "Type": "Task",
@@ -669,7 +755,55 @@
       "QueryLanguage": "JSONata",
       "Comment": "Builds a readable failureReason such as 'PaymentDeclined: Card declined by issuer (simulated)' from the caught error. A Lambda error's Cause is a JSON string, so its errorMessage is extracted.",
       "Output": "{% $merge([$states.input, {'failureReason': $states.input.error.Error & ': ' & ($contains($states.input.error.Cause, 'errorMessage') ? $parse($states.input.error.Cause).errorMessage : $states.input.error.Cause)}]) %}",
-      "Next": "MarkOrderFailed"
+      "Next": "CheckCancelBeforeFailing"
+    },
+    "CheckCancelBeforeFailing": {
+      "Type": "Task",
+      "Comment": "Direct DynamoDB GetItem (no Lambda): did the customer cancel while this order was failing (e.g. the 120 s payment timeout fired just as they cancelled, so SendTaskFailure found the token already closed)? A cancel the API accepted (202) must end CANCELLED, not FAILED.",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Parameters": {
+        "TableName": "${orders_table_name}",
+        "Key": {
+          "orderId": {
+            "S.$": "$.orderId"
+          }
+        },
+        "ProjectionExpression": "cancelRequestedAt",
+        "ConsistentRead": true
+      },
+      "ResultPath": "$.cancelCheck",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.cancelCheckError",
+          "Next": "MarkOrderFailed"
+        }
+      ],
+      "Next": "CancelledWhileFailing"
+    },
+    "CancelledWhileFailing": {
+      "Type": "Choice",
+      "Comment": "cancelRequestedAt present -> the cancel branch (every step is idempotent, so what compensation already did is a no-op: the void still stops a late charge). Otherwise FAILED as before.",
+      "Choices": [
+        {
+          "Variable": "$.cancelCheck.Item.cancelRequestedAt",
+          "IsPresent": true,
+          "Next": "RefundWhatIsLeft"
+        }
+      ],
+      "Default": "MarkOrderFailed"
     },
     "MarkOrderFailed": {
       "Type": "Task",
@@ -739,6 +873,173 @@
       "Comment": "Saga ended in failure after compensation. The execution shows as FAILED in the console, with the reason as its Cause.",
       "Error": "OrderFailed",
       "CausePath": "$.failureReason"
+    },
+    "RefundWhatIsLeft": {
+      "Type": "Task",
+      "Comment": "CANCEL BRANCH - Lambda order-saga-refund-payment (cancelled mode): voids the payment intent at DemoPay (a charge still queued there takes nothing), then refunds whatever is left of a charge that did happen (once, never above the charge: I7). A no-op when nothing was charged. Retries, no Catch: a failure stops the execution (alarm order-saga-refund-or-write-off-errors) and it is redriven from here.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${refund_payment_function_arn}",
+        "Payload": {
+          "orderId.$": "$.orderId",
+          "cancelled": true
+        }
+      },
+      "ResultSelector": {
+        "refunded.$": "$.Payload.refunded",
+        "refundedAmount.$": "$.Payload.refundedAmount"
+      },
+      "ResultPath": "$.cancelRefund",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "CancelReleaseInventory"
+    },
+    "CancelReleaseInventory": {
+      "Type": "Task",
+      "Comment": "CANCEL BRANCH - Lambda order-saga-release-inventory: every reserved unit back to available stock, exactly once (idempotent; a checkout hold was consumed at reservation, so its expiry can't release it again). Retries, no Catch (alarm order-saga-cancellation-errors, then redrive).",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${release_inventory_function_arn}",
+        "Payload": {
+          "orderId.$": "$.orderId"
+        }
+      },
+      "ResultSelector": {
+        "released.$": "$.Payload.released"
+      },
+      "ResultPath": "$.release",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "DescribeCancellation"
+    },
+    "DescribeCancellation": {
+      "Type": "Pass",
+      "QueryLanguage": "JSONata",
+      "Comment": "Builds the history detail and the email line: 'refunded INR X' or 'nothing was charged'.",
+      "Output": "{% ( $amount := $number($states.input.cancelRefund.refundedAmount); $money := $states.input.order.currency & ' ' & $states.input.cancelRefund.refundedAmount; $merge([$states.input, {'cancellation': $amount > 0 ? {'detail': 'Cancelled by the customer - ' & $money & ' refunded to the DemoPay wallet', 'emailLine': 'We refunded ' & $money & ' to your DemoPay wallet.'} : {'detail': 'Cancelled by the customer - nothing was charged', 'emailLine': 'Nothing was charged. If a payment was still being processed, it is refunded to your DemoPay wallet automatically.'}}]) ) %}",
+      "Next": "MarkOrderCancelled"
+    },
+    "MarkOrderCancelled": {
+      "Type": "Task",
+      "Comment": "Direct DynamoDB UpdateItem (no Lambda): status CANCELLED (terminal, distinct from FAILED), cancelledAt, and CANCELLED appended to statusHistory with what was refunded.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${orders_table_name}",
+        "Key": {
+          "orderId": {
+            "S.$": "$.orderId"
+          }
+        },
+        "UpdateExpression": "SET #status = :status, cancelledAt = :now, updatedAt = :now, statusHistory = list_append(statusHistory, :entry)",
+        "ConditionExpression": "attribute_exists(orderId)",
+        "ExpressionAttributeNames": {
+          "#status": "status"
+        },
+        "ExpressionAttributeValues": {
+          ":status": {
+            "S": "CANCELLED"
+          },
+          ":now": {
+            "S.$": "$$.State.EnteredTime"
+          },
+          ":entry": {
+            "L": [
+              {
+                "M": {
+                  "status": {
+                    "S": "CANCELLED"
+                  },
+                  "timestamp": {
+                    "S.$": "$$.State.EnteredTime"
+                  },
+                  "detail": {
+                    "S.$": "$.cancellation.detail"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "ResultPath": null,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "NotifyCustomerCancelled"
+    },
+    "NotifyCustomerCancelled": {
+      "Type": "Task",
+      "Comment": "Direct SNS Publish integration (no Lambda): tells the customer the order was cancelled and what was refunded.",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${notifications_topic_arn}",
+        "Subject.$": "States.Format('Order {} is CANCELLED', $.orderId)",
+        "Message.$": "States.Format('Hi {},\n\nYour order {} has been cancelled, as you asked.\n\nItems:\n{}\n\n{}\n\nThe items are back in stock for other customers.\n\nOrder Saga.', $.order.customerName, $.orderId, $.order.itemsSummary, $.cancellation.emailLine)"
+      },
+      "ResultSelector": {
+        "messageId.$": "$.MessageId"
+      },
+      "ResultPath": "$.notification",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "OrderCancelled"
+    },
+    "OrderCancelled": {
+      "Type": "Succeed",
+      "Comment": "Saga finished: cancelled by the customer before fulfillment, nothing kept from the payment, stock back, customer notified."
     }
   }
 }

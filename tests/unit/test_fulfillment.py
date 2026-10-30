@@ -70,8 +70,8 @@ def refund(load_handler, payments, monkeypatch):
     """refund_payment whose DemoPay calls (whole or per line) go straight to the provider handler."""
     handler = load_handler("refund_payment")
 
-    def call_provider(_client, _fn, intent_id, line=None):
-        request = {"operation": "refund", "paymentIntentId": intent_id}
+    def call_provider(_client, _fn, intent_id, line=None, note=""):
+        request = {"operation": "refund", "paymentIntentId": intent_id, **({"note": note} if note else {})}
         if line:
             request.update(lineId=line["lineId"], amount=str(line["amount"]), note=line.get("note", ""))
         return payments.provider.lambda_handler(request, None)

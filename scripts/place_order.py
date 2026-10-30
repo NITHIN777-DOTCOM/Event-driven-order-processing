@@ -26,7 +26,7 @@ import uuid
 from auth_tokens import LABELS, auth_header
 from tf_outputs import load_outputs
 
-TERMINAL_STATUSES = {"COMPLETED", "FAILED"}
+TERMINAL_STATUSES = {"COMPLETED", "PARTIALLY_FULFILLED", "FAILED", "CANCELLED"}
 SIMULATE_MODES = [
     "none", "payment_declined", "payment_flaky", "out_of_stock", "poison",
     "payment_timeout", "payment_late", "webhook_duplicate", "webhook_bad_signature",

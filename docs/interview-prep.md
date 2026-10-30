@@ -1225,6 +1225,11 @@ the cancel branch. If the token was already answered (the webhook got there firs
 SendTaskFailure returns `TaskTimedOut` / `InvalidToken`: the race was lost or is already handled, not a crash.
 request_payment also refuses to run for a cancelled order (`OrderCancelled`), and its status writes are conditional,
 so a cancel that lands mid-request is never overwritten by PAYMENT_PENDING.
+A cancel can also land at the very moment the 120 s payment timeout fires: SendTaskFailure then finds the token
+timed out and the saga takes the timeout path. So no failure path goes straight to MarkOrderFailed: it first reads
+the order (`CheckCancelBeforeFailing`, a direct consistent `dynamodb:getItem` of `cancelRequestedAt`), and a Choice
+sends a cancel-requested order to the cancel branch instead: void/refund what's left, release the stock, CANCELLED.
+A unit test walks that path through the real definition (`test_saga_definition.py`).
 
 **The four interleavings.**
 1. Cancel, then webhook: the capture transaction fails on the order condition, so the intent stays REQUESTED. The
@@ -1318,10 +1323,6 @@ claiming there are no gaps.
   write-off Lambda errors raise the alarm `order-saga-refund-or-write-off-errors`; since step 2.4, ReleaseInventory,
   BeginFulfillment and cancel-API errors raise `order-saga-cancellation-errors`.
 - HTTP API has no X-Ray; the SFN segment is missing from the map (section 7).
-- **A cancel at the exact moment the 120 s payment timeout fires**: SendTaskFailure finds the token already timed
-  out, so the saga takes the timeout path and the order ends FAILED (net ₹0, stock released) although the cancel
-  was accepted (202). Money and stock are right; only the final status is FAILED, not CANCELLED. Fix: a Choice
-  before MarkOrderFailed that marks a cancel-requested order CANCELLED instead.
 
 ### Trade-offs / alternatives considered
 - Sweeper vs nothing: a sweeper adds a scheduled job and a "how old is stuck?" threshold, but it's the only safety

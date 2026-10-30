@@ -120,7 +120,11 @@ def test_only_transient_errors_are_retried_inside_an_iteration():
 
 # --- Wiring -------------------------------------------------------------------------------------------
 def test_fulfillment_runs_after_payment_over_the_reserved_lines():
-    assert STATES["RequestPayment"]["Next"] == "FulfillItems"
+    # Step 2.4: payment -> (demo Wait) -> BeginFulfillment (the point of no return) -> FulfillItems.
+    assert STATES["RequestPayment"]["Next"] == "WarehouseSpeed"
+    assert STATES["WarehouseSpeed"]["Default"] == "BeginFulfillment"
+    assert STATES["BeginFulfillment"]["Next"] == "CancelledBeforeFulfillment"
+    assert STATES["CancelledBeforeFulfillment"]["Default"] == "FulfillItems"
     assert STATES["ReserveInventory"]["ResultSelector"]["lines.$"] == "$.Payload.lines"
     assert STATES["FulfillItems"]["ItemsPath"] == "$.order.lines"
     assert STATES["FulfillItems"]["ItemProcessor"]["ProcessorConfig"] == {"Mode": "INLINE"}
@@ -134,8 +138,9 @@ def test_partial_and_full_paths():
     assert STATES["NotifyCustomerPartial"]["Next"] == "OrderPartiallyFulfilled"
     assert STATES["OrderPartiallyFulfilled"]["Type"] == "Succeed"
     assert [STATES["RefundAllLines"]["Next"], STATES["WriteOffAllLines"]["Next"], STATES["DescribeAllUnavailable"]["Next"]] == [
-        "WriteOffAllLines", "DescribeAllUnavailable", "MarkOrderFailed",
+        "WriteOffAllLines", "DescribeAllUnavailable", "CheckCancelBeforeFailing",
     ]
+    assert STATES["CancelledWhileFailing"]["Default"] == "MarkOrderFailed"  # FAILED unless a cancel was requested
 
 
 @pytest.mark.parametrize("name", ["PartialRefund", "WriteOffLines", "RefundAllLines", "WriteOffAllLines"])
@@ -158,3 +163,133 @@ def test_all_unavailable_fails_with_a_readable_reason():
 
     assert output["error"]["Error"] == "AllItemsUnavailable"
     assert output["failureReason"].startswith("AllItemsUnavailable: all items unavailable - INR 5097.00 refunded")
+
+
+# --- step 2.4: customer cancellation -----------------------------------------------------------------------
+def _get(data: dict, path: str):
+    """A plain "$.a.b" JSONPath read; None when any part is missing."""
+    for part in path.removeprefix("$.").split("."):
+        if not isinstance(data, dict) or part not in data:
+            return None
+        data = data[part]
+    return data
+
+
+def _matches(rule: dict, data: dict) -> bool:
+    """The Choice operators the saga uses."""
+    if "And" in rule:
+        return all(_matches(r, data) for r in rule["And"])
+    if "Or" in rule:
+        return any(_matches(r, data) for r in rule["Or"])
+    if "Not" in rule:
+        return not _matches(rule["Not"], data)
+    value = _get(data, rule["Variable"])
+    if "IsPresent" in rule:
+        return (value is not None) is rule["IsPresent"]
+    if "StringEquals" in rule:
+        return value == rule["StringEquals"]
+    if "NumericEquals" in rule:
+        return value == rule["NumericEquals"]
+    raise AssertionError(f"operator not handled by this walker: {rule}")
+
+
+def _set(data: dict, path: str, value) -> dict:
+    keys = path.removeprefix("$.").split(".")
+    target = data
+    for key in keys[:-1]:
+        target = target.setdefault(key, {})
+    target[keys[-1]] = value
+    return data
+
+
+def walk(start: str, state_input: dict, task_results: dict[str, dict]) -> tuple[list[str], dict]:
+    """Follow the REAL definition from `start` to a Succeed/Fail state.
+
+    Choices are evaluated, JSONata Pass states are run, and each Task's result is taken from `task_results`
+    (stored at its ResultPath), so a test states only what the AWS calls would return.
+    """
+    path, data, name = [], json.loads(json.dumps(state_input)), start
+    while True:
+        path.append(name)
+        state = STATES[name]
+        if state["Type"] in ("Succeed", "Fail"):
+            return path, data
+        if state["Type"] == "Choice":
+            name = next((r["Next"] for r in state["Choices"] if _matches(r, data)), state.get("Default"))
+            continue
+        if state["Type"] == "Pass" and "Output" in state:
+            data = evaluate(state["Output"], data)
+        elif state["Type"] == "Task" and state.get("ResultPath"):
+            data = _set(data, state["ResultPath"], task_results.get(name, {}))
+        name = state["Next"]
+
+
+TIMED_OUT = {
+    "orderId": "ORD-1",
+    "order": {"customerName": "Asha", "currency": "INR", "totalAmount": 5097, "itemsSummary": "1 x Desk Mat"},
+    "error": {"Error": "States.Timeout", "Cause": "payment timeout"},
+}
+
+
+def _timeout_catcher() -> str:
+    return next(c["Next"] for c in STATES["RequestPayment"]["Catch"] if c["ErrorEquals"] == ["States.Timeout"])
+
+
+def test_payment_timeout_on_a_cancelled_order_ends_cancelled_not_failed():
+    """The 120 s timeout fires after the customer cancelled (e.g. the cancel API died before SendTaskFailure)."""
+    path, data = walk(
+        _timeout_catcher(),
+        TIMED_OUT,
+        {
+            "CheckCancelBeforeFailing": {"Item": {"cancelRequestedAt": {"S": "2026-10-30T10:00:00.000Z"}}},
+            "RefundWhatIsLeft": {"refunded": False, "refundedAmount": "0.00"},
+        },
+    )
+
+    assert path[-1] == "OrderCancelled"
+    assert "MarkOrderFailed" not in path
+    # Void/refund what is left, then the stock goes back, then the order is marked CANCELLED and the customer told.
+    cancel_steps = [s for s in path if s in ("RefundWhatIsLeft", "CancelReleaseInventory", "MarkOrderCancelled", "NotifyCustomerCancelled")]
+    assert cancel_steps == ["RefundWhatIsLeft", "CancelReleaseInventory", "MarkOrderCancelled", "NotifyCustomerCancelled"]
+    assert data["cancellation"]["detail"] == "Cancelled by the customer - nothing was charged"
+
+
+def test_payment_timeout_without_a_cancel_still_fails_as_before():
+    path, _ = walk(_timeout_catcher(), TIMED_OUT, {"CheckCancelBeforeFailing": {}})  # GetItem: no cancelRequestedAt
+
+    assert "MarkOrderFailed" in path and "RefundWhatIsLeft" not in path
+
+
+def test_order_cancelled_from_the_payment_wait_goes_straight_to_the_cancel_branch():
+    catcher = next(c for c in STATES["RequestPayment"]["Catch"] if c["ErrorEquals"] == ["OrderCancelled"])
+    catchers = [c["ErrorEquals"] for c in STATES["RequestPayment"]["Catch"]]
+
+    assert catcher["Next"] == "RefundWhatIsLeft"
+    assert catchers.index(["OrderCancelled"]) < catchers.index(["States.ALL"])  # never swallowed by States.ALL
+
+
+def test_cancel_seen_by_begin_fulfillment_takes_the_cancel_branch():
+    path, data = walk(
+        "CancelledBeforeFulfillment",
+        {**TIMED_OUT, "fulfillmentStart": {"outcome": "CANCEL_REQUESTED"}},
+        {"RefundWhatIsLeft": {"refunded": True, "refundedAmount": "5097.00"}},
+    )
+
+    assert path[-1] == "OrderCancelled" and "FulfillItems" not in path
+    assert data["cancellation"]["detail"] == "Cancelled by the customer - INR 5097.00 refunded to the DemoPay wallet"
+    assert data["cancellation"]["emailLine"] == "We refunded INR 5097.00 to your DemoPay wallet."
+
+
+def test_reservation_stamps_new_orders_as_cancellable():
+    assert STATES["ReserveInventory"]["Parameters"]["Payload"]["cancellable"] is True
+
+
+@pytest.mark.parametrize("name", ["BeginFulfillment", "CheckCancelBeforeFailing", "RefundWhatIsLeft", "CancelReleaseInventory", "MarkOrderCancelled", "NotifyCustomerCancelled"])
+def test_every_cancel_step_retries(name):
+    assert any("States.ALL" in r["ErrorEquals"] for r in STATES[name]["Retry"])
+
+
+def test_if_the_cancel_check_itself_fails_the_order_still_ends_failed():
+    catch = STATES["CheckCancelBeforeFailing"]["Catch"]
+
+    assert catch == [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.cancelCheckError", "Next": "MarkOrderFailed"}]

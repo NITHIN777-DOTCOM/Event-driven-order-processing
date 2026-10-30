@@ -268,7 +268,8 @@ def refund_late_payment(intent: dict[str, Any], callback: dict[str, Any], log: S
     if cancelled and not intent.get("sagaResumedAt"):
         resume(intent, "failure", callback, log)  # OrderCancelled, in case the cancel API never got to answer it
     log.warning("LATE success callback: the saga no longer waits for this payment; refunding it", intentStatus=intent["status"], cancelled=cancelled)
-    refund = invoke_provider_refund(lambda_client, PROVIDER_FUNCTION, intent["paymentIntentId"])
+    note = "order cancelled" if cancelled else "payment confirmed too late"
+    refund = invoke_provider_refund(lambda_client, PROVIDER_FUNCTION, intent["paymentIntentId"], note=note)
     if not money_returned(refund):
         # DemoPay says nothing was charged after all (it only reported success): nothing to give back.
         log.error("Late success callback, but DemoPay has no charge to refund", refund=refund)

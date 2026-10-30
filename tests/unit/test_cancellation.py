@@ -10,7 +10,7 @@ from decimal import Decimal
 
 import pytest
 
-from conftest import USER_B, FakeSfn, api_event, jwt_claims, ledger, psp_request, seed_order, sqs_event
+from conftest import USER_A, USER_B, FakeSfn, api_event, jwt_claims, ledger, psp_request, seed_order, sqs_event
 from test_fulfillment import SEEDED, assert_i5, counters
 from test_request_payment import RecordingSqs
 
@@ -41,8 +41,8 @@ def refund(load_handler, payments, monkeypatch):
     """refund_payment whose DemoPay calls (refund, line refund, void) go straight to the provider handler."""
     handler = load_handler("refund_payment")
 
-    def call_refund(_client, _fn, intent_id, line=None):
-        request = {"operation": "refund", "paymentIntentId": intent_id}
+    def call_refund(_client, _fn, intent_id, line=None, note=""):
+        request = {"operation": "refund", "paymentIntentId": intent_id, **({"note": note} if note else {})}
         if line:
             request.update(lineId=line["lineId"], amount=str(line["amount"]), note=line.get("note", ""))
         return payments.provider.lambda_handler(request, None)
@@ -161,6 +161,9 @@ def test_payment_first_then_cancel_before_fulfillment_refunds_everything(aws, sa
     assert result["refunded"] is True and Decimal(result["refundedAmount"]) == TOTAL
     assert ledger(aws) == [("DEBIT", TOTAL), ("CREDIT", TOTAL)]
     assert_i8(aws)
+    # The wallet says what the CREDIT was for.
+    credit = next(t for t in aws.wallet_txns.query(KeyConditionExpression="walletId = :w", ExpressionAttributeValues={":w": USER_A})["Items"] if t["type"] == "CREDIT")
+    assert credit["note"] == f"Refund for {ORDER_ID} (order cancelled)"
 
 
 def test_payment_and_fulfillment_first_then_cancel_is_too_late_and_the_order_carries_on(aws, saga, cancel):

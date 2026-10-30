@@ -70,7 +70,7 @@ def main() -> int:
     started = time.monotonic()
     while time.monotonic() < deadline:
         order = http_json("GET", f"{api}/orders/{order_id}", headers=auth)[1]
-        if order.get("status") in ("COMPLETED", "FAILED"):
+        if order.get("status") in ("COMPLETED", "PARTIALLY_FULFILLED", "FAILED", "CANCELLED"):  # every terminal status
             break
         time.sleep(2)
     elapsed = time.monotonic() - started

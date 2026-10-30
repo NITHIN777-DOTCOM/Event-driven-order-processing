@@ -148,8 +148,9 @@ locals {
       environment = {
         ORDERS_TABLE   = aws_dynamodb_table.orders.name
         PAYMENTS_TABLE = aws_dynamodb_table.payments.name
-        # Expand step (2.4 commit A): deployed switched OFF (503) until the state machine has its cancel branch.
-        CANCEL_ENABLED = "false"
+        # Switched on in step 2.4 commit B, in the same apply as the state machine's cancel branch. Orders whose
+        # execution runs an older definition are still refused (no `cancellable` stamp: 409 NOT_CANCELLABLE).
+        CANCEL_ENABLED = "true"
       }
     }
     begin_fulfillment = {

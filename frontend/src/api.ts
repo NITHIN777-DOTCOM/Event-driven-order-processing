@@ -4,7 +4,7 @@
  * Every request carries the signed-in user's Cognito ID token (when there is one) as "Authorization".
  */
 import { getAccessToken, type AuthConfig } from "./auth";
-import type { CreateOrderResponse, Hold, Order, OrderSummary, Product, Simulate, Wallet } from "./types";
+import type { CancelResponse, CreateOrderResponse, Hold, Order, OrderSummary, Product, Simulate, Wallet } from "./types";
 
 export interface AppConfig {
   apiUrl: string;
@@ -56,6 +56,18 @@ export async function getProducts(): Promise<Product[]> {
 
 export async function getOrder(orderId: string): Promise<Order> {
   return (await request<Order>(`/orders/${encodeURIComponent(orderId)}`)).body;
+}
+
+/**
+ * POST /orders/{id}/cancel. Idempotent: asking twice gives the same answer. A 409 means the cancel window has
+ * closed (the order is already being fulfilled, or finished); its `error` code is mapped to a message by the caller.
+ */
+export async function cancelOrder(orderId: string, reason?: string): Promise<CancelResponse> {
+  const { body } = await request<CancelResponse>(`/orders/${encodeURIComponent(orderId)}/cancel`, {
+    method: "POST",
+    body: JSON.stringify(reason ? { reason } : {}),
+  });
+  return body;
 }
 
 export async function listOrders(limit = 20): Promise<OrderSummary[]> {
