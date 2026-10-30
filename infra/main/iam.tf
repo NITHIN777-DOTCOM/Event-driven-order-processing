@@ -236,9 +236,10 @@ data "aws_iam_policy_document" "payment_webhook" {
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.payments.arn]
   }
+  # GetItem (step 2.4): when capture loses to the order's condition, read the order to confirm it was cancelled.
   statement {
     sid       = "RecordPaymentOnOrder"
-    actions   = ["dynamodb:UpdateItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
   }
   # Task tokens are scoped to their state machine; this role can only answer tasks of the order saga.
@@ -321,6 +322,40 @@ data "aws_iam_policy_document" "write_off_lines" {
   }
 }
 
+# Customer cancellation (step 2.4): read the order, the conditional CANCEL_REQUESTED write (and a CANCEL_REJECTED
+# history entry), read the payment intent's task token, and fail that task.
+data "aws_iam_policy_document" "cancel_order" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["cancel_order"].json]
+
+  statement {
+    sid       = "ReadAndCancelOwnOrder"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.orders.arn]
+  }
+  statement {
+    sid       = "ReadPaymentTaskToken"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.payments.arn]
+  }
+  # Scoped to the order saga, like the webhook's SendTaskSuccess: a task token belongs to its state machine, and
+  # IAM authorises SendTaskFailure against that state machine's ARN. Failure only: this role can't fake a payment.
+  statement {
+    sid       = "FailThePaymentWaitWithOrderCancelled"
+    actions   = ["states:SendTaskFailure"]
+    resources = [local.state_machine_arn]
+  }
+}
+
+data "aws_iam_policy_document" "begin_fulfillment" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["begin_fulfillment"].json]
+
+  statement {
+    sid       = "MarkOrderFulfillingUnlessCancelled"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.orders.arn]
+  }
+}
+
 # Checkout holds (step 2.2). TransactWriteItems is authorised per item: Put/Update/Delete on holds (hold + pointer),
 # Update on inventory.
 data "aws_iam_policy_document" "holds_api" {
@@ -392,6 +427,8 @@ locals {
     hold_expiry       = data.aws_iam_policy_document.hold_expiry.json
     fulfill_item      = data.aws_iam_policy_document.fulfill_item.json
     write_off_lines   = data.aws_iam_policy_document.write_off_lines.json
+    cancel_order      = data.aws_iam_policy_document.cancel_order.json
+    begin_fulfillment = data.aws_iam_policy_document.begin_fulfillment.json
     # The Cognito trigger touches no AWS resource: own logs + X-Ray only.
     pre_token = data.aws_iam_policy_document.lambda_base["pre_token"].json
   }
@@ -446,14 +483,14 @@ data "aws_iam_policy_document" "sfn" {
     sid     = "InvokeSagaLambdas"
     actions = ["lambda:InvokeFunction"]
     resources = flatten([
-      for key in ["reserve_inventory", "request_payment", "fulfill_item", "refund_payment", "write_off_lines", "release_inventory"] : [
+      for key in ["reserve_inventory", "request_payment", "begin_fulfillment", "fulfill_item", "refund_payment", "write_off_lines", "release_inventory"] : [
         aws_lambda_function.fn[key].arn,
         "${aws_lambda_function.fn[key].arn}:*", # versions/aliases
       ]
     ])
   }
   statement {
-    sid       = "MarkOrderCompletedPartiallyFulfilledOrFailed"
+    sid       = "MarkOrderCompletedPartiallyFulfilledFailedOrCancelled"
     actions   = ["dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
   }

@@ -15,6 +15,12 @@ What it does, in order:
   4. Order -> PAYMENT_PENDING ("Awaiting payment confirmation"), then send the request to SQS
      order-saga-psp-requests with a 2-5 s delay (DemoPay's processing time; 150 s for payment_late).
 
+Customer cancellation (step 2.4): if the order's cancel was committed (cancelRequestedAt), this step fails with
+OrderCancelled instead of asking DemoPay to charge, and the state machine takes its cancel branch. The status
+writes below are conditional on that too, so a cancel landing mid-way can never be overwritten by PAYMENT_PENDING.
+(The cancel API also answers the stored task token with SendTaskFailure "OrderCancelled"; whichever arrives first
+closes the task, the other is a no-op.)
+
 The task token is stored on OUR intent only. DemoPay's message carries the intent id, order, wallet and amount,
 never the token, so the provider can't complete our workflow step directly.
 """
@@ -56,6 +62,14 @@ class PaymentTransientError(Exception):
     """Temporary failure (e.g. the gateway is busy). The state machine retries it with backoff."""
 
 
+class OrderCancelled(Exception):
+    """The customer cancelled before the payment was requested. The state machine catches it (cancel branch)."""
+
+
+# Status writes on the order only apply while no cancel is committed (step 2.4).
+NOT_CANCELLED = "attribute_not_exists(cancelRequestedAt)"
+
+
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     order_id, token = event["orderId"], event["taskToken"]
     simulate = event.get("simulate") or "none"
@@ -63,6 +77,9 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     log = logger.bind(orderId=order_id, paymentIntentId=intent_id, simulate=simulate)
 
     order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+    if "cancelRequestedAt" in order:
+        log.info("Order was cancelled before the payment was requested; not charging")
+        raise OrderCancelled(f"Order {order_id} was cancelled by the customer")
     intent = upsert_intent(order, intent_id, token, simulate)
     if intent is None:
         return answer_from_finished_intent(intent_id, token, log)
@@ -72,20 +89,18 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if simulate == "payment_flaky" and attempt <= FLAKY_FAILURES:
         reason = f"Payment gateway busy on attempt {attempt} (simulated)"
         log.warning("Transient payment failure; Step Functions will retry", reason=reason)
-        orders_table.update_item(
-            Key={"orderId": order_id},
-            **status_update(PAYMENT_RETRY, f"Attempt {attempt} failed: {reason} - retrying", {"paymentAttempts": attempt}),
-        )
+        update_order(order_id, status_update(PAYMENT_RETRY, f"Attempt {attempt} failed: {reason} - retrying", {"paymentAttempts": attempt}, condition=NOT_CANCELLED))
         raise PaymentTransientError(reason)
 
     amount = Decimal(order["totalAmount"])
     delay = provider_delay_seconds(simulate)
-    orders_table.update_item(
-        Key={"orderId": order_id},
-        **status_update(
+    update_order(
+        order_id,
+        status_update(
             PAYMENT_PENDING,
             f"Awaiting payment confirmation from DemoPay · {format_inr(amount)} · intent {intent_id}",
             {"paymentIntentId": intent_id, "paymentAttempts": attempt},
+            condition=NOT_CANCELLED,
         ),
     )
     # Last, so a failure before this line can't leave DemoPay working on a request the saga never paused for.
@@ -105,6 +120,16 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     )
     log.info("Payment requested; saga paused until the webhook", intentStatus=REQUESTED, amount=amount, providerDelaySeconds=delay)
     return {"paymentIntentId": intent_id, "status": REQUESTED}
+
+
+def update_order(order_id: str, update: dict[str, Any]) -> None:
+    """Apply a status write that requires "no cancel committed"; if a cancel got there first, raise OrderCancelled."""
+    try:
+        orders_table.update_item(Key={"orderId": order_id}, **update)
+    except ClientError as err:
+        if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        raise OrderCancelled(f"Order {order_id} was cancelled by the customer") from None
 
 
 def upsert_intent(order: dict[str, Any], intent_id: str, token: str, simulate: str) -> dict[str, Any] | None:

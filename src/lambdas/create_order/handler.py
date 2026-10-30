@@ -81,6 +81,9 @@ SIMULATE_MODES = (
     "payment_timeout", "payment_late", "webhook_duplicate", "webhook_bad_signature",
     # step 2.3: one line (simulateLine: 1..n or "all"; default the last line) is found damaged after payment
     "item_unavailable",
+    # step 2.4, time to cancel: DemoPay answers after 20 s / the warehouse waits 10 s before and after it starts /
+    # (tests only) DemoPay charges when the test harness says so, to race the payment against a cancel
+    "payment_slow", "fulfillment_slow", "payment_manual",
 )
 
 

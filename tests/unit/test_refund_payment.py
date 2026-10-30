@@ -37,7 +37,7 @@ def history(aws, order):
 def test_no_intent_means_nothing_to_refund(aws, refund):
     order = seed_order(aws.orders)
 
-    assert compensate(refund, order) == {"orderId": order["orderId"], "refunded": False, "reason": "no payment requested"}
+    assert compensate(refund, order) == {"orderId": order["orderId"], "refunded": False, "refundedAmount": "0.00", "reason": "no payment requested"}
 
 
 def test_a_paid_order_is_refunded_exactly_once(aws, payments, refund):

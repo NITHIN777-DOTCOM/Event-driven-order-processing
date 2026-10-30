@@ -11,6 +11,12 @@
    With "lineId" and "amount" (step 2.3) it refunds ONE order line: idempotent per (intent, line), and capped so
    the running refund total can never exceed the amount charged (invariant I7).
 
+3. Direct invoke {"operation": "void", "paymentIntentId", ...}  ->  "don't take this payment" (step 2.4, the order
+   was cancelled). Writes the intent's CHARGE record with outcome VOIDED, on the same condition the charge uses
+   (the record must not exist yet). So exactly one of the two wins: if the void wins, the charge request still in
+   the queue replays VOIDED and takes nothing (and sends no callback); if the charge won, the void is a no-op and
+   the caller refunds.
+
 What DemoPay knows: the intent id, order id, wallet and amount. It never sees the Step Functions task token;
 the token stays inside our system (payments table), so the provider can't resume or fail our workflow directly.
 
@@ -32,6 +38,9 @@ Demo behaviour (the order's simulate flag travels in the request, like a test ca
   payment_late           (delayed 150 s by the sender) charges normally, after our timeout: auto-refund follows
   webhook_duplicate      sends the success callback twice
   webhook_bad_signature  first sends a callback signed with the WRONG secret (expects 401), then the real one
+  payment_slow           (delayed 20 s by the sender) charges normally, slowly enough to cancel while it's pending
+  payment_manual         TEST ONLY: ignores the queued request; the test harness invokes the charge itself (with
+                         "manualTrigger": true) at the exact moment it cancels, to race the two (e2e_test.py)
 A wallet that can't cover the amount is declined for real ("Insufficient wallet balance").
 """
 
@@ -71,7 +80,7 @@ psp_table = dynamodb.Table(PSP_TABLE)
 wallets_table = dynamodb.Table(WALLETS_TABLE)
 logger = get_logger("payment_provider")
 
-SUCCEEDED, DECLINED = "SUCCEEDED", "DECLINED"
+SUCCEEDED, DECLINED, VOIDED = "SUCCEEDED", "DECLINED", "VOIDED"
 MAX_BALANCE_CONFLICTS = 3
 CALLBACK_TIMEOUT_SECONDS = 8
 
@@ -94,6 +103,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if event.get("lineId"):
             return refund_line(event["paymentIntentId"], event["lineId"], Decimal(str(event["amount"])), event.get("note", ""))
         return refund(event["paymentIntentId"])
+    if event.get("operation") == "void":
+        return void(event)
     return handle_sqs_batch(event)
 
 
@@ -118,8 +129,15 @@ def process_request(request: dict[str, Any], receive_count: int, log: Structured
     if simulate == "payment_timeout":
         log.warning("Simulated provider outage: request accepted, no callback will ever be sent")
         return
+    if simulate == "payment_manual" and not request.get("manualTrigger"):
+        log.info("payment_manual: waiting for the test harness to trigger this charge")
+        return
 
     charge = charge_once(request, simulate, log)
+    if charge["outcome"] == VOIDED:
+        # The merchant voided the intent (the order was cancelled) before we got to it: take nothing, say nothing.
+        log.info("Intent was voided before it was charged; nothing taken, no callback")
+        return
     callback = callback_body(request, charge)
 
     if simulate == "webhook_bad_signature":
@@ -214,6 +232,22 @@ def record_decline(request: dict[str, Any], reason: str, log: StructuredLogger) 
         return psp_table.get_item(Key={"pspTxnId": item["pspTxnId"]}, ConsistentRead=True)["Item"]
     log.warning("Payment declined", reason=reason)
     return item
+
+
+def void(request: dict[str, Any]) -> dict[str, Any]:
+    """Void the intent unless it was already charged or declined. Idempotent (a repeat finds VOIDED again)."""
+    log = logger.bind(orderId=request.get("orderId"), paymentIntentId=request["paymentIntentId"], operation="void")
+    item = charge_record(request, VOIDED, "voided by the merchant: the order was cancelled")
+    try:
+        psp_table.put_item(Item=item, ConditionExpression="attribute_not_exists(pspTxnId)")
+    except ClientError as err:
+        if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        existing = psp_table.get_item(Key={"pspTxnId": item["pspTxnId"]}, ConsistentRead=True)["Item"]
+        log.info("Void found the intent already decided", outcome=existing["outcome"])
+        return {"voided": existing["outcome"] == VOIDED, "outcome": existing["outcome"]}
+    log.info("Payment intent voided before any charge")
+    return {"voided": True, "outcome": VOIDED}
 
 
 def callback_body(request: dict[str, Any], charge: dict[str, Any]) -> bytes:

@@ -14,6 +14,12 @@ ACTIVE (expired, released) or loses a race with its expiry at this very moment, 
 whole and the step falls back to the normal reservation below (which may raise OutOfStock). An ACTIVE hold that is
 already past its expiry is expired here first, so its units are available to the fresh reservation.
 Orders without a holdId take exactly the old path.
+
+Cancellation stamp (step 2.4): the state machine definition that has a cancel branch passes "cancellable": true,
+and only then is the order stamped `cancellable = true` (in the same write that marks it RESERVED). The cancel API
+refuses unstamped orders (409 NOT_CANCELLABLE). The stamp therefore records which definition the execution really
+runs: an execution that started on an older definition (no cancel branch) can never be cancelled, even if it is
+still running after the new definition is deployed.
 """
 
 from __future__ import annotations
@@ -58,6 +64,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     log = logger.bind(orderId=order_id)
 
     order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+    stamp = {"cancellable": True} if event.get("cancellable") is True else {}
 
     if order.get("reservedItems"):
         # Step Functions retried after a successful attempt (e.g. a Lambda service error on the
@@ -66,11 +73,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     elif order.get("simulate") == "out_of_stock":
         log.warning("Simulated out-of-stock")
         raise record_out_of_stock(order_id, f"Insufficient stock for: {order['items'][0]['productId']} (simulated)")
-    elif order.get("holdId") and consume_hold(order, log):
+    elif order.get("holdId") and consume_hold(order, log, stamp):
         pass  # the checkout hold's units became this order's reservation
     else:
         try:
-            reserve_stock(order, fresh_after_hold=bool(order.get("holdId")))
+            reserve_stock(order, fresh_after_hold=bool(order.get("holdId")), stamp=stamp)
         except OutOfStock as err:
             log.warning("Out of stock", reason=str(err))
             raise record_out_of_stock(order_id, str(err)) from err
@@ -95,7 +102,7 @@ def record_out_of_stock(order_id: str, reason: str) -> OutOfStock:
     return OutOfStock(reason)
 
 
-def consume_hold(order: dict[str, Any], log: StructuredLogger) -> bool:
+def consume_hold(order: dict[str, Any], log: StructuredLogger, stamp: dict[str, Any] | None = None) -> bool:
     """Turn the order's ACTIVE checkout hold into its reservation. False = fall back to a fresh reservation."""
     hold_id = order["holdId"]
     hlog = log.bind(holdId=hold_id)
@@ -118,7 +125,7 @@ def consume_hold(order: dict[str, Any], log: StructuredLogger) -> bool:
             **status_update(
                 RESERVED,
                 f"Reserved stock for {len(reserved_items)} product(s) from checkout hold {hold_id}",
-                {"reservedItems": reserved_items, "released": False},
+                {"reservedItems": reserved_items, "released": False, **(stamp or {})},
             ),
         }
     }
@@ -134,7 +141,7 @@ def consume_hold(order: dict[str, Any], log: StructuredLogger) -> bool:
     return True
 
 
-def reserve_stock(order: dict[str, Any], fresh_after_hold: bool = False) -> None:
+def reserve_stock(order: dict[str, Any], fresh_after_hold: bool = False, stamp: dict[str, Any] | None = None) -> None:
     items = order["items"]
     reserved_items = [{"productId": i["productId"], "quantity": i["quantity"]} for i in items]
     transact_items: list[dict[str, Any]] = [
@@ -158,7 +165,7 @@ def reserve_stock(order: dict[str, Any], fresh_after_hold: bool = False) -> None
                     RESERVED,
                     f"Reserved stock for {len(items)} product(s)"
                     + (f" (checkout hold {order['holdId']} had ended, so reserved afresh)" if fresh_after_hold else ""),
-                    {"reservedItems": reserved_items, "released": False},
+                    {"reservedItems": reserved_items, "released": False, **(stamp or {})},
                 ),
             }
         }

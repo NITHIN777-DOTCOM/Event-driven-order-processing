@@ -18,6 +18,17 @@ Then, for the intent named in the body (our payments table, conditional writes t
     REQUESTED -> FAILED (+ order PAYMENT_DECLINED), then SendTaskFailure with error "PaymentDeclined", which the
                  state machine's existing Catch turns into compensation. Anything else: 200 no-op (nothing moved).
 
+Customer cancellation (step 2.4): the cancel API and this webhook race for the ORDER item. Cancel sets
+cancelRequestedAt (conditionally, while the order is still cancellable); capture and decline both require
+attribute_not_exists(cancelRequestedAt) in the same transaction as the intent update. DynamoDB applies one first:
+  - the webhook won: the order is PAYMENT_CAPTURED and the saga resumes as before (a cancel arriving now is the
+    "paid, not yet fulfilling" case: BeginFulfillment sees it and the saga refunds everything).
+  - cancel won: the transaction is cancelled as a whole, so the intent is still REQUESTED. It is marked FAILED
+    (cancelled), we NEVER call SendTaskSuccess, and a charge that went through is refunded at once through DemoPay's
+    idempotent refund (refund what's left: never twice, I7). We DO answer the token with SendTaskFailure
+    "OrderCancelled": normally the cancel API already did (then it's TaskTimedOut, a no-op), but if the cancel Lambda
+    died between its write and its SendTaskFailure, this is what moves the saga onto its cancel branch.
+
 A valid signature for an intent we don't know -> 404, nothing changes. Errors we can't handle -> 500, so DemoPay
 retries (its retries are bounded; then the request lands in order-saga-psp-dlq and an alarm fires).
 
@@ -73,6 +84,8 @@ EVENT_TYPES = ("payment.succeeded", "payment.declined")
 # SendTaskSuccess/Failure errors meaning "nobody is waiting on this token any more" (timed out, already
 # answered, or the execution ended). Anything else is unexpected and gets a 500, so DemoPay retries.
 TASK_CLOSED = ("TaskTimedOut", "TaskDoesNotExist")
+# Added to the order's condition by capture and decline: a committed cancel wins over a later callback (step 2.4).
+NOT_CANCELLED = "attribute_not_exists(cancelRequestedAt)"
 
 
 class BadRequest(Exception):
@@ -155,7 +168,10 @@ def delay_ms(intent: dict[str, Any]) -> int | None:
 def on_succeeded(intent: dict[str, Any], callback: dict[str, Any], log: StructuredLogger) -> str:
     status = intent["status"]
     if status == REQUESTED:
-        if capture(intent, callback, log):
+        captured = capture(intent, callback, log)
+        if captured == "cancelled":
+            return refund_cancelled_payment(intent, callback, log)
+        if captured:
             return resume(intent, "success", callback, log)
         # Lost a race (the saga timed out, or a duplicate got here first): decide again on the fresh intent.
         intent = payments_table.get_item(Key={"paymentIntentId": intent["paymentIntentId"]}, ConsistentRead=True)["Item"]
@@ -171,8 +187,9 @@ def on_succeeded(intent: dict[str, Any], callback: dict[str, Any], log: Structur
     return "duplicate"
 
 
-def capture(intent: dict[str, Any], callback: dict[str, Any], log: StructuredLogger) -> bool:
-    """REQUESTED -> SUCCEEDED and order PAYMENT_CAPTURED, atomically. False if the intent is no longer REQUESTED."""
+def capture(intent: dict[str, Any], callback: dict[str, Any], log: StructuredLogger) -> bool | str:
+    """REQUESTED -> SUCCEEDED and order PAYMENT_CAPTURED, atomically. False if the intent is no longer REQUESTED;
+    "cancelled" if the customer's cancel was committed first (then nothing was written)."""
     now = utc_now_iso()
     amount = Decimal(callback["amount"])
     try:
@@ -196,33 +213,72 @@ def capture(intent: dict[str, Any], callback: dict[str, Any], log: StructuredLog
                             PAYMENT_CAPTURED,
                             f"{format_inr(amount)} captured by DemoPay · {callback['paymentId']} (confirmed by webhook)",
                             {"paymentId": callback["paymentId"], "paidAmount": amount},
-                            condition="attribute_not_exists(paymentId)",
+                            condition=f"attribute_not_exists(paymentId) AND {NOT_CANCELLED}",
                         ),
                     }
                 },
             ]
         )
     except ClientError as err:
-        # Only the INTENT's condition (item 0) means "someone else moved it first"; anything else is a real error.
-        if err.response["Error"]["Code"] == "TransactionCanceledException" and cancellation_codes(err.response)[:1] == ["ConditionalCheckFailed"]:
-            return False
+        # The INTENT's condition (item 0) means "someone else moved it first"; the ORDER's (item 1) that the order
+        # is being cancelled (confirmed by reading it). Anything else is a real error.
+        if err.response["Error"]["Code"] == "TransactionCanceledException":
+            codes = cancellation_codes(err.response)
+            if codes[:1] == ["ConditionalCheckFailed"]:
+                return False
+            if codes[1:2] == ["ConditionalCheckFailed"] and cancel_requested(intent["orderId"]):
+                return "cancelled"
         raise
     intent.update(status=SUCCEEDED, paymentId=callback["paymentId"])
     log.info("Payment captured", intentStatus=SUCCEEDED, paymentId=callback["paymentId"], amount=amount)
     return True
 
 
+def cancel_requested(order_id: str) -> bool:
+    order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True).get("Item") or {}
+    return "cancelRequestedAt" in order
+
+
+def refund_cancelled_payment(intent: dict[str, Any], callback: dict[str, Any], log: StructuredLogger) -> str:
+    """Cancel won the race: never resume the saga. Close the intent (REQUESTED -> FAILED, cancelled), then refund."""
+    log.warning("Payment succeeded, but the customer cancelled first: not resuming the saga, refunding the charge")
+    close_cancelled_intent(intent, "order cancelled by the customer before the payment was confirmed")
+    return refund_late_payment(intent, callback, log)
+
+
+def close_cancelled_intent(intent: dict[str, Any], reason: str) -> None:
+    """REQUESTED -> FAILED with cancelled = true. A no-op if the saga's cancel branch already closed it."""
+    try:
+        payments_table.update_item(
+            Key={"paymentIntentId": intent["paymentIntentId"]},
+            UpdateExpression="SET #s = :failed, cancelled = :true, declineReason = :reason, failedAt = :now, updatedAt = :now",
+            ConditionExpression="#s = :requested",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":failed": FAILED, ":requested": REQUESTED, ":true": True, ":reason": reason, ":now": utc_now_iso()},
+        )
+    except ClientError as err:
+        if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+    intent.update(status=FAILED, cancelled=True)
+
+
 def refund_late_payment(intent: dict[str, Any], callback: dict[str, Any], log: StructuredLogger) -> str:
-    """The saga gave up (timeout or compensation) before this success arrived: give the money back now."""
-    log.warning("LATE success callback: the saga no longer waits for this payment; refunding it", intentStatus=intent["status"])
+    """The saga gave up (timeout, compensation or a cancellation) before this success arrived: give the money back now."""
+    cancelled = bool(intent.get("cancelled"))
+    if cancelled and not intent.get("sagaResumedAt"):
+        resume(intent, "failure", callback, log)  # OrderCancelled, in case the cancel API never got to answer it
+    log.warning("LATE success callback: the saga no longer waits for this payment; refunding it", intentStatus=intent["status"], cancelled=cancelled)
     refund = invoke_provider_refund(lambda_client, PROVIDER_FUNCTION, intent["paymentIntentId"])
     if not money_returned(refund):
         # DemoPay says nothing was charged after all (it only reported success): nothing to give back.
         log.error("Late success callback, but DemoPay has no charge to refund", refund=refund)
         return "late-nothing-to-refund"
-    record_refund(payments_table, orders_table, intent, refund, f"late payment {callback['paymentId']}, the order had already failed")
-    log.info("Late payment refunded automatically", intentStatus=REFUNDED, refundId=refund.get("refundId"))
-    return "late-refunded"
+    why = "the order was cancelled" if cancelled else "the order had already failed"
+    record_refund(payments_table, orders_table, intent, refund, f"late payment {callback['paymentId']}, {why}")
+    # cancelEvent feeds OrderSaga/CancelEvents: a charge that slipped past a cancel and was given back (step 2.4).
+    extra = {"cancelEvent": "late_charge_refunded"} if cancelled else {}
+    log.info("Late payment refunded automatically", intentStatus=REFUNDED, refundId=refund.get("refundId"), **extra)
+    return "cancelled-refunded" if cancelled else "late-refunded"
 
 
 # --- payment.declined -------------------------------------------------------------------------------------
@@ -243,13 +299,27 @@ def on_declined(intent: dict[str, Any], callback: dict[str, Any], log: Structure
                             "ExpressionAttributeValues": {":failed": FAILED, ":requested": REQUESTED, ":reason": reason, ":now": utc_now_iso()},
                         }
                     },
-                    {"Update": {"TableName": ORDERS_TABLE, "Key": {"orderId": intent["orderId"]}, **status_update(PAYMENT_DECLINED, reason)}},
+                    {
+                        "Update": {
+                            "TableName": ORDERS_TABLE,
+                            "Key": {"orderId": intent["orderId"]},
+                            **status_update(PAYMENT_DECLINED, reason, condition=NOT_CANCELLED),
+                        }
+                    },
                 ]
             )
         except ClientError as err:
-            if err.response["Error"]["Code"] == "TransactionCanceledException" and cancellation_codes(err.response)[:1] == ["ConditionalCheckFailed"]:
-                log.info("Decline arrived after the intent left REQUESTED; nothing to do (no money moved)")
-                return "duplicate"
+            if err.response["Error"]["Code"] == "TransactionCanceledException":
+                codes = cancellation_codes(err.response)
+                if codes[:1] == ["ConditionalCheckFailed"]:
+                    log.info("Decline arrived after the intent left REQUESTED; nothing to do (no money moved)")
+                    return "duplicate"
+                if codes[1:2] == ["ConditionalCheckFailed"] and cancel_requested(intent["orderId"]):
+                    # Cancel won: no money moved and the saga is already cancelling. Close the intent, don't resume.
+                    close_cancelled_intent(intent, reason)
+                    log.info("Decline arrived after the customer cancelled; intent closed, answering OrderCancelled")
+                    resume(intent, "failure", callback, log)
+                    return "cancelled-declined"
             raise
         intent.update(status=FAILED, declineReason=reason)
         log.info("Payment declined", intentStatus=FAILED, reason=reason)
@@ -262,9 +332,12 @@ def on_declined(intent: dict[str, Any], callback: dict[str, Any], log: Structure
 
 # --- resuming the saga ------------------------------------------------------------------------------------
 def resume(intent: dict[str, Any], outcome: str, callback: dict[str, Any], log: StructuredLogger) -> str:
-    """SendTaskSuccess / SendTaskFailure with the token stored on the intent, then remember that we did."""
+    """SendTaskSuccess / SendTaskFailure with the token stored on the intent, then remember that we did.
+    A failure on a cancelled intent is "OrderCancelled" (the state machine's cancel branch), never PaymentDeclined."""
     try:
-        if outcome == "success":
+        if outcome == "failure" and intent.get("cancelled"):
+            sfn.send_task_failure(taskToken=intent["taskToken"], error="OrderCancelled", cause="Cancelled by the customer")
+        elif outcome == "success":
             sfn.send_task_success(
                 taskToken=intent["taskToken"],
                 output=json.dumps({"paymentIntentId": intent["paymentIntentId"], "paymentId": intent["paymentId"], "status": SUCCEEDED}),

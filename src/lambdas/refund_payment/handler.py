@@ -18,6 +18,12 @@ prices), never a figure from the input. DemoPay refunds each line at most once a
 shown in the history as LINE_REFUNDED, all in one conditional write per line. When the lines add up to the whole
 charge, the intent becomes REFUNDED; otherwise it stays SUCCEEDED with its `refundedAmount`.
 
+Cancellation (step 2.4): with {"orderId", "cancelled": true} (the saga's RefundWhatIsLeft step) it first VOIDS the
+intent at DemoPay, so a charge still queued there takes nothing, and marks the intent `cancelled`. It then refunds
+whatever is left of a charge that did happen, exactly as above: DemoPay refunds the remainder once, so a cancel
+can never refund more than was charged (I7), even if the webhook refunds the same late charge at the same moment.
+It returns the amount refunded ("0.00" when nothing was charged) for the cancellation email.
+
 Timeout race: if the webhook captured the payment a moment before the 120 s timeout, the intent is SUCCEEDED
 here and DemoPay has the charge, so this refunds it. The webhook deliberately never refunds a SUCCEEDED intent,
 so exactly one of the two paths owns each refund (common/payments.py).
@@ -42,6 +48,7 @@ from common.payments import (
     SUCCEEDED,
     intent_id_for,
     invoke_provider_refund,
+    invoke_provider_void,
     money_returned,
     record_refund,
 )
@@ -67,43 +74,64 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     log = logger.bind(orderId=order_id, paymentIntentId=intent_id)
     if "lineIds" in event:
         return refund_lines(order_id, event["lineIds"], log)
+    cancelled = bool(event.get("cancelled"))
+    if cancelled:
+        log = log.bind(cancelled=True)
 
     intent = payments_table.get_item(Key={"paymentIntentId": intent_id}, ConsistentRead=True).get("Item")
     if not intent:
-        log.info("No payment was requested for this order; nothing to refund")
-        return {"orderId": order_id, "refunded": False, "reason": "no payment requested"}
+        log.info("No payment was requested for this order; nothing to refund", **cancel_event(cancelled, "nothing_charged"))
+        return {"orderId": order_id, "refunded": False, "refundedAmount": "0.00", "reason": "no payment requested"}
 
     if intent["status"] == REQUESTED:
-        abandon(intent, log)
+        abandon(intent, log, cancelled)
+    if cancelled:
+        void = invoke_provider_void(lambda_client, PROVIDER_FUNCTION, intent)
+        log.info("Payment intent voided at DemoPay" if void.get("voided") else "DemoPay had already decided the intent", outcome=void.get("outcome"))
 
     refund = invoke_provider_refund(lambda_client, PROVIDER_FUNCTION, intent_id)
     if not money_returned(refund):
-        log.info("Nothing was charged; nothing to refund", intentStatus=intent["status"])
-        return {"orderId": order_id, "refunded": False, "reason": refund.get("reason", "nothing charged")}
+        log.info("Nothing was charged; nothing to refund", intentStatus=intent["status"], **cancel_event(cancelled, "nothing_charged"))
+        return {"orderId": order_id, "refunded": False, "refundedAmount": "0.00", "reason": refund.get("reason", "nothing charged")}
 
-    record_refund(payments_table, orders_table, intent, refund, "saga compensation")
+    record_refund(payments_table, orders_table, intent, refund, "order cancelled" if cancelled else "saga compensation")
     log.info(
         "Payment refunded" if refund.get("refunded") else "Already refunded (idempotent no-op)",
         intentStatus=REFUNDED,
         refundId=refund.get("refundId"),
         amount=refund.get("amount"),
+        **cancel_event(cancelled, "refunded"),
     )
-    return {"orderId": order_id, "refunded": bool(refund.get("refunded")), "refundId": refund.get("refundId")}
+    return {
+        "orderId": order_id,
+        "refunded": bool(refund.get("refunded")),
+        "refundId": refund.get("refundId"),
+        "refundedAmount": f"{Decimal(str(refund.get('amount', '0'))):.2f}",
+    }
 
 
-def abandon(intent: dict[str, Any], log: Any) -> None:
-    """REQUESTED -> FAILED, only if nobody changed it meanwhile. Keeps invariant I4: no intent stays REQUESTED."""
+def cancel_event(cancelled: bool, outcome: str) -> dict[str, str]:
+    """Log field for the OrderSaga/CancelEvents metric, only on the cancel path."""
+    return {"cancelEvent": outcome} if cancelled else {}
+
+
+def abandon(intent: dict[str, Any], log: Any, cancelled: bool = False) -> None:
+    """REQUESTED -> FAILED, only if nobody changed it meanwhile. Keeps invariant I4: no intent stays REQUESTED.
+    On a cancellation the intent is also marked `cancelled`, so a late charge is refunded as one (webhook)."""
+    why = "cancelled by the customer before the provider answered" if cancelled else "abandoned: the saga compensated before the provider answered"
     try:
         payments_table.update_item(
             Key={"paymentIntentId": intent["paymentIntentId"]},
-            UpdateExpression="SET #s = :failed, failureReason = :why, failedAt = :now, updatedAt = :now",
+            UpdateExpression="SET #s = :failed, failureReason = :why, failedAt = :now, updatedAt = :now"
+            + (", cancelled = :true" if cancelled else ""),
             ConditionExpression="#s = :requested",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":failed": FAILED,
                 ":requested": REQUESTED,
-                ":why": "abandoned: the saga compensated before the provider answered",
+                ":why": why,
                 ":now": utc_now_iso(),
+                **({":true": True} if cancelled else {}),
             },
         )
         intent["status"] = FAILED

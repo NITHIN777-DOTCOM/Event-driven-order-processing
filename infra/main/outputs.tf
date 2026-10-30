@@ -174,3 +174,13 @@ output "fulfillment_function_names" {
     payment_provider = local.lambda_names["payment_provider"]
   }
 }
+
+output "cancellation_function_names" {
+  description = "The step 2.4 Lambdas, for scripts/e2e_test.py (the cancel race test invokes DemoPay and hold expiry directly)."
+  value = {
+    cancel_order      = local.lambda_names["cancel_order"]
+    begin_fulfillment = local.lambda_names["begin_fulfillment"]
+    payment_provider  = local.lambda_names["payment_provider"]
+    hold_expiry       = local.lambda_names["hold_expiry"]
+  }
+}

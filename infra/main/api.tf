@@ -54,6 +54,7 @@ locals {
     create_order  = { route = "POST /orders", fn = "create_order", auth = true }
     get_order     = { route = "GET /orders/{id}", fn = "get_order", auth = true }
     list_orders   = { route = "GET /orders", fn = "list_orders", auth = true }
+    cancel_order  = { route = "POST /orders/{id}/cancel", fn = "cancel_order", auth = true }
     list_products = { route = "GET /products", fn = "list_products", auth = false }
     wallet_get    = { route = "GET /wallet", fn = "wallet_api", auth = true }
     wallet_reset  = { route = "POST /wallet/reset", fn = "wallet_api", auth = true }

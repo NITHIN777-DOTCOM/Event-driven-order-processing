@@ -143,6 +143,21 @@ locals {
         WRITE_OFFS_TABLE = aws_dynamodb_table.write_offs.name
       }
     }
+    cancel_order = {
+      description = "POST /orders/{id}/cancel (JWT, owner only) - one conditional write decides cancel vs payment vs fulfillment - SendTaskFailure OrderCancelled on the payment token"
+      environment = {
+        ORDERS_TABLE   = aws_dynamodb_table.orders.name
+        PAYMENTS_TABLE = aws_dynamodb_table.payments.name
+        # Expand step (2.4 commit A): deployed switched OFF (503) until the state machine has its cancel branch.
+        CANCEL_ENABLED = "false"
+      }
+    }
+    begin_fulfillment = {
+      description = "Saga step - PAYMENT_CAPTURED to FULFILLING unless the customer cancelled first - after this the order can no longer be cancelled"
+      environment = {
+        ORDERS_TABLE = aws_dynamodb_table.orders.name
+      }
+    }
     pre_token = {
       description = "Cognito pre-token-generation trigger (V2_0) for order-saga-users - adds email + email_verified to ACCESS tokens"
       # Cognito waits at most 5 s for a trigger; the function makes no AWS calls and finishes in milliseconds.

@@ -237,6 +237,7 @@ locals {
     aws_cloudwatch_metric_alarm.webhook_signature_failures.arn,
     aws_cloudwatch_metric_alarm.hold_expiry_errors.arn,
     aws_cloudwatch_metric_alarm.refund_or_write_off_errors.arn,
+    aws_cloudwatch_metric_alarm.cancellation_errors.arn,
   ]
 }
 
@@ -377,6 +378,64 @@ resource "aws_cloudwatch_log_metric_filter" "line_refund_amount" {
     name      = "LineRefundAmount"
     namespace = "OrderSaga"
     value     = "$.amount"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# Customer cancellation (step 2.4)
+# -----------------------------------------------------------------------------
+# The cancel branch's steps retry and then FAIL the execution on purpose (redrive once fixed; every step is
+# idempotent). A failure there leaves a cancelled order with its stock still reserved or its money not yet back,
+# so it must never be silent. RefundWhatIsLeft is refund-payment, already covered by refund_or_write_off_errors.
+resource "aws_cloudwatch_metric_alarm" "cancellation_errors" {
+  alarm_name          = "${var.project_prefix}-cancellation-errors"
+  alarm_description   = "The cancel API, BeginFulfillment or ReleaseInventory failed: a cancelled order may still hold reserved stock or be stuck in CANCEL_REQUESTED. Check the cancel-order, begin-fulfillment and release-inventory logs (orderId on every line), fix the cause, then REDRIVE the failed execution in Step Functions: every cancel step is idempotent."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "errors"
+    expression  = "cancel + begin + release"
+    label       = "Cancellation path Lambda errors"
+    return_data = true
+  }
+  dynamic "metric_query" {
+    for_each = { cancel = "cancel_order", begin = "begin_fulfillment", release = "release_inventory" }
+    content {
+      id = metric_query.key
+      metric {
+        namespace   = "AWS/Lambda"
+        metric_name = "Errors"
+        dimensions  = { FunctionName = local.lambda_names[metric_query.value] }
+        stat        = "Sum"
+        period      = 300
+      }
+    }
+  }
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}
+
+# One count per cancel event, metric OrderSaga/CancelEvents with the event as its Event dimension:
+#   cancel-order:       accepted / rejected_too_late / not_cancellable / not_cancellable_yet / repeated
+#   refund-payment:     refunded / nothing_charged (the cancel branch's RefundWhatIsLeft)
+#   payment-webhook:    late_charge_refunded (a charge that slipped past the cancel, given back)
+#   begin-fulfillment:  fulfillment_started (the moment cancelling closes)
+resource "aws_cloudwatch_log_metric_filter" "cancel_events" {
+  for_each = toset(["cancel_order", "refund_payment", "payment_webhook", "begin_fulfillment"])
+
+  name           = "${var.project_prefix}-cancel-events-${replace(each.key, "_", "-")}"
+  log_group_name = aws_cloudwatch_log_group.lambda[each.key].name
+  pattern        = "{ $.cancelEvent = * }"
+
+  metric_transformation {
+    name       = "CancelEvents"
+    namespace  = "OrderSaga"
+    value      = "1"
+    dimensions = { Event = "$.cancelEvent" }
   }
 }
 
@@ -688,6 +747,64 @@ locals {
         stat   = "Sum"
         period = 300
         metrics = [for key in ["refund_payment", "write_off_lines"] :
+          ["AWS/Lambda", "Errors", "FunctionName", local.lambda_names[key], { label = local.lambda_names[key] }]
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
+  ]
+
+  # ---- Customer cancellation (step 2.4) ----
+  cancel_widgets = [
+    {
+      type   = "metric"
+      x      = 0
+      y      = 65
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Cancel requests per 5 min: accepted / rejected (too late) / not cancellable"
+        region = var.region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [for event in ["accepted", "rejected_too_late", "not_cancellable", "not_cancellable_yet", "repeated"] :
+          ["OrderSaga", "CancelEvents", "Event", event, { label = event }]
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
+    {
+      type   = "metric"
+      x      = 8
+      y      = 65
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Cancelled orders per 5 min: refunded / nothing charged / late charge refunded"
+        region = var.region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [for event in ["refunded", "nothing_charged", "late_charge_refunded"] :
+          ["OrderSaga", "CancelEvents", "Event", event, { label = event }]
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
+    {
+      type   = "metric"
+      x      = 16
+      y      = 65
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Cancellation path Lambda errors (should be 0; alarm at 1)"
+        region = var.region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [for key in ["cancel_order", "begin_fulfillment", "release_inventory"] :
           ["AWS/Lambda", "Errors", "FunctionName", local.lambda_names[key], { label = local.lambda_names[key] }]
         ]
         yAxis = { left = { min = 0 } }
@@ -1016,7 +1133,8 @@ locals {
     ],
     local.payment_widgets,
     local.hold_widgets,
-    local.fulfillment_widgets
+    local.fulfillment_widgets,
+    local.cancel_widgets
   )
 }
 

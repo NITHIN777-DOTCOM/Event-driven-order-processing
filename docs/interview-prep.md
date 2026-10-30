@@ -1181,7 +1181,116 @@ seeded with only 18 units. It ran out 1.5 min before the update, so every execut
 ReserveInventory. The check was re-run, with a 100-unit product and a definition-to-definition comparison, during the
 next deploy (also a real definition change), and passed. Report the inconclusive run as inconclusive.
 
-## 13. Known gaps (and where they get fixed)
+## 13. Customer cancellation mid-saga
+
+### What
+A customer can cancel their own order until the warehouse starts on it. Money and stock always end up right, even
+when Cancel and the payment webhook arrive at the same instant.
+- `POST /orders/{id}/cancel` (Cognito JWT, owner only; anyone else gets 404, not 403). Lambda `order-saga-cancel-order`.
+  Idempotent: a repeat gets the same answer (202 while cancelling, 200 once CANCELLED).
+- The window: waiting for payment (RESERVED, PAYMENT_RETRY, PAYMENT_PENDING) → cancel, nothing charged. Paid but
+  not fulfilling yet (PAYMENT_CAPTURED) → cancel, full refund to the wallet. FULFILLING or terminal → 409
+  `TOO_LATE_TO_CANCEL` (recorded once in the history). Orders on an older definition → 409 `NOT_CANCELLABLE`.
+- New statuses: `FULFILLING` (set by the new saga step BeginFulfillment, Lambda `order-saga-begin-fulfillment`),
+  `CANCEL_REQUESTED`, and the terminal `CANCELLED` (distinct from FAILED). Every change is in statusHistory.
+- Saga cancel branch: RefundWhatIsLeft (refund-payment: void at DemoPay, then refund what is left of any charge) →
+  ReleaseInventory → MarkOrderCancelled → NotifyCustomerCancelled. Every step retries; none has a Catch.
+- DemoPay got a **void** operation ("don't take this payment"), so cancelling while the payment is pending
+  really takes nothing.
+- Demo controls: `payment_slow` (DemoPay answers after 20 s), `fulfillment_slow` (10 s waits before and after
+  BeginFulfillment), and the test-only `payment_manual` (the test harness triggers DemoPay's charge itself, to race it
+  against a cancel).
+- Invariants: **I8** a CANCELLED order has net charge ₹0 and all its stock back in `stock`. **I9** cancel and
+  payment never both win: CANCELLED with ₹0, or the order continued normally and the cancel was rejected.
+
+### Why (the problem it solves)
+Customers change their minds, and the cheapest moment to cancel is before anything ships. But "cancel" arrives
+from outside the saga, at any moment: while the saga is paused waiting for the payment provider, a millisecond
+before or after the provider's success webhook, or just as the warehouse starts. If both cancel and payment
+"win", the customer is charged for a cancelled order or gets an item for free. The design has to make every
+interleaving end in exactly one of two outcomes.
+
+### How
+**One conditional write decides each race.** All three contenders write the same DynamoDB item, the order:
+- Cancel: `SET status = CANCEL_REQUESTED, cancelRequestedAt` IF status is in the window AND no cancelRequestedAt AND
+  `cancellable = true`.
+- Payment webhook (capture or decline, in the same transaction as the payment intent): IF `attribute_not_exists(cancelRequestedAt)`.
+- BeginFulfillment: `PAYMENT_CAPTURED → FULFILLING` IF status = PAYMENT_CAPTURED AND no cancelRequestedAt.
+DynamoDB serializes writes to one item, so exactly one condition passes first and the others see its result.
+
+**Reaching a saga that is paused on the payment.** The payment step is `lambda:invoke.waitForTaskToken`; its token is
+stored on the payment intent (PI-orderId). The cancel Lambda calls **SendTaskFailure** with error `OrderCancelled`.
+The state machine has a separate Catch for `OrderCancelled` (before the normal payment-failure Catch) that goes to
+the cancel branch. If the token was already answered (the webhook got there first, or a retry replaced it),
+SendTaskFailure returns `TaskTimedOut` / `InvalidToken`: the race was lost or is already handled, not a crash.
+request_payment also refuses to run for a cancelled order (`OrderCancelled`), and its status writes are conditional,
+so a cancel that lands mid-request is never overwritten by PAYMENT_PENDING.
+
+**The four interleavings.**
+1. Cancel, then webhook: the capture transaction fails on the order condition, so the intent stays REQUESTED. The
+   webhook closes it as FAILED (cancelled), does NOT call SendTaskSuccess, and refunds the charge at once.
+2. Webhook, then cancel (paid, not fulfilling): the saga resumes; BeginFulfillment's condition fails because of
+   cancelRequestedAt and it returns `CANCEL_REQUESTED`; a Choice takes the cancel branch, which refunds everything.
+3. Webhook, BeginFulfillment, then cancel: the cancel's condition fails (FULFILLING): 409, the order completes.
+4. Cancel before DemoPay even charged: the cancel branch voids the intent at DemoPay first (a conditional put of
+   the CHARGE record with outcome VOIDED). The charge request still queued at DemoPay finds VOIDED and takes nothing.
+
+**Refund what's left (I7).** The cancel branch and the webhook may both try to refund the same late charge. Both call
+DemoPay's "refund the remainder", which is idempotent per intent and capped by the charge's running refund total
+(step 2.3). So the money goes back exactly once, and never more than was charged, whatever the order.
+
+**Orders already running on the old definition.** The new definition passes `cancellable: true` to ReserveInventory,
+which stamps the order in the same write that marks it RESERVED. The cancel API refuses unstamped orders. Stamping
+in create_order would have been wrong: an order created a second before the deploy would be stamped but run on the
+old definition, which has no `OrderCancelled` Catch (its States.ALL Catch would turn the cancel into a FAILED order).
+
+**Checkout holds.** An order placed from a hold consumed it at reservation (hold CONSUMED, units held → reserved).
+Cancelling releases reserved → stock once (release_inventory is idempotent), and the hold's expiry schedule finds a
+CONSUMED hold and does nothing, so the stock comes back exactly once.
+
+**Rollout (expand → migrate → switch).** Commit A deployed the cancel Lambda behind `CANCEL_ENABLED=false` (503),
+BeginFulfillment (not yet called), the webhook's conditional write, the void, the stamp support, IAM and the
+alarm. All of it is backward compatible with the running definition, proven by the full e2e suite. Commit B switched the state
+machine and the flag in one apply.
+
+### Trade-offs / alternatives considered
+| Option | Why not (here) |
+|---|---|
+| **StopExecution** | Ends the execution immediately. No Catch runs, so no compensation: the stock stays reserved and a charge stays taken. A cancel must be a normal path through the saga. |
+| Cancel at any time, then refund + restock | After picking starts, the goods are moving; unpicking is a return, a different process. Closing the window at FULFILLING keeps the saga honest. |
+| A lock or a "cancel queue" | One conditional write on the order item already serializes the contenders; a lock adds a failure mode (who releases it?). |
+| Webhook checks status first, then captures | Check-then-act: the cancel can land between the two. The condition must be inside the write. |
+| Let the late charge happen and refund it | Correct, but the customer sees a debit and a credit for an order they cancelled. The void avoids it in the common case; the refund stays as the safety net for the real race. |
+| Stamp `cancellable` at order creation | The order is created before its execution starts, so it can't know which definition will run it (see How). |
+
+### Numbers
+None recorded yet (filled in from the commit A and commit B runs).
+
+### Likely interview questions
+1. *Why SendTaskFailure and not StopExecution?* StopExecution aborts: no Catch, no compensation, so reserved stock and
+   a captured payment would be left behind. SendTaskFailure fails just the payment wait with a named error,
+   `OrderCancelled`, which the state machine catches like any other business error and turns into the cancel branch
+   (refund, release, CANCELLED, email). The saga stays in charge of its own clean-up.
+2. *How do you resolve cancel vs payment arriving together?* Both are conditional writes on the same DynamoDB item.
+   Cancel requires the order to be in the window and not cancelled; capture requires "no cancelRequestedAt".
+   DynamoDB applies one first; the other's condition fails. The loser never acts on the saga: a losing webhook doesn't
+   call SendTaskSuccess, and a losing cancel returns 409.
+3. *What if the payment is captured after the cancel?* The webhook's capture fails on the order condition, so the
+   order isn't marked paid and the saga isn't resumed. The webhook refunds the charge through DemoPay's idempotent
+   "refund what's left", so even if the saga's cancel branch refunds at the same moment, the money goes back once (I7).
+   Before that, the cancel branch voids the intent, so in most cases DemoPay never charges at all.
+4. *Why can't you cancel during fulfillment?* Once the warehouse starts picking, the goods are moving; undoing that
+   is a return, not a cancellation. BeginFulfillment is the point of no return: one conditional write that the cancel
+   API's write can't overtake. After it, cancel gets 409 TOO_LATE_TO_CANCEL and the order completes normally.
+5. *How did you handle orders already running on the old definition?* A running Standard execution keeps the
+   definition it started with. Those executions have no `OrderCancelled` Catch, so cancelling them would turn into a
+   FAILED order. The new definition stamps `cancellable` on the order itself (in ReserveInventory), and the API answers
+   409 NOT_CANCELLABLE for anything unstamped. The stamp records the definition the execution really runs.
+
+### Debugging story
+None recorded yet.
+
+## 14. Known gaps (and where they get fixed)
 
 ### What
 Design limits found and documented, each with a planned fix.
@@ -1206,8 +1315,13 @@ claiming there are no gaps.
   FAILED order until someone redrives `order-saga-psp-dlq` (the alarm says so). Fix: a scheduled reconciliation job
   that asks the provider about intents in TIMED_OUT/FAILED and refunds any charge it finds.
 - Compensation failures are recorded in the execution (`refundError`/`releaseError`). Since step 2.3, refund and
-  write-off Lambda errors raise the alarm `order-saga-refund-or-write-off-errors`; ReleaseInventory errors still don't.
+  write-off Lambda errors raise the alarm `order-saga-refund-or-write-off-errors`; since step 2.4, ReleaseInventory,
+  BeginFulfillment and cancel-API errors raise `order-saga-cancellation-errors`.
 - HTTP API has no X-Ray; the SFN segment is missing from the map (section 7).
+- **A cancel at the exact moment the 120 s payment timeout fires**: SendTaskFailure finds the token already timed
+  out, so the saga takes the timeout path and the order ends FAILED (net ₹0, stock released) although the cancel
+  was accepted (202). Money and stock are right; only the final status is FAILED, not CANCELLED. Fix: a Choice
+  before MarkOrderFailed that marks a cancel-requested order CANCELLED instead.
 
 ### Trade-offs / alternatives considered
 - Sweeper vs nothing: a sweeper adds a scheduled job and a "how old is stuck?" threshold, but it's the only safety

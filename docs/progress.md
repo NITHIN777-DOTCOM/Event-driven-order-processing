@@ -3,9 +3,9 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.3 — per-item fulfillment with partial refunds: DONE (2026-10-30).** Next: **step 2.4, mid-saga
-cancellation.** Report: docs/evidence/upgrade-2.3-report.md.
-(Step-by-step notes for 2.1 to 2.3 are in the "Step 2.x" sections below.)
+**Upgrade step 2.4 — customer cancellation mid-saga: IN PROGRESS (commit A, expand; cancel switched OFF).**
+Step 2.3 is DONE (2026-10-30, report docs/evidence/upgrade-2.3-report.md).
+(Step-by-step notes for 2.1 to 2.4 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
 ## Upgrade plan (toward a 9/10 resume project)
@@ -137,6 +137,29 @@ cancellation.** Report: docs/evidence/upgrade-2.3-report.md.
 - Known nit: the write-off feed row repeats the item name (the reason is fulfill_item's message).
 - Docs commit `2a6ca16`: CI 41036078786 + Deploy 41036264119 both green (recorded after they finished).
 
+### Step 2.4 (customer cancellation mid-saga)
+- Design: ONE conditional write on the order item decides every race. Cancel: status in the window (RESERVED,
+  PAYMENT_RETRY, PAYMENT_PENDING, PAYMENT_CAPTURED) + no cancelRequestedAt + cancellable=true -> CANCEL_REQUESTED.
+  Webhook capture/decline and BeginFulfillment (PAYMENT_CAPTURED -> FULFILLING) require no cancelRequestedAt.
+  Cancel reaches a saga waiting for payment with SendTaskFailure "OrderCancelled" on the token stored on the intent
+  (TaskTimedOut / InvalidToken = race lost / already handled). Never StopExecution.
+- DemoPay "void" (conditional CHARGE record, outcome VOIDED) so cancelling while the payment is pending takes
+  nothing; a charge that wins the race is refunded once ("refund what's left", I7).
+- The `cancellable` stamp is written by reserve_inventory ONLY when the state machine passes "cancellable": true
+  (the new definition), so orders on the old definition stay 409 NOT_CANCELLABLE.
+- New: Lambdas order-saga-cancel-order (POST /orders/{id}/cancel, CANCEL_ENABLED=false in A -> 503) and
+  order-saga-begin-fulfillment (not called before B); alarm order-saga-cancellation-errors; metric
+  OrderSaga/CancelEvents (4 filters) + dashboard row y=65; outputs cancellation_function_names; simulate
+  payment_slow (20 s), fulfillment_slow (B: 10 s waits), payment_manual (test harness triggers the charge).
+- IAM: cancel-order (orders Get/Update, payments Get, states:SendTaskFailure on the state machine ARN);
+  begin-fulfillment (orders Get/Update); payment-webhook + orders GetItem; SFN role + invoke begin-fulfillment.
+- Legacy cleanup `scripts/migrate_legacy_sold.py` (dry-run default, --apply, --check). Dry-run before A: 454 orders,
+  233 legacy COMPLETED, all reserved before the last seed (2026-10-30T09:43:09Z) -> 0 units to move, 233 to mark.
+- Commit A: plan 16 added, 41 changed, 0 destroyed (changes = new code hashes, policies re-read, the definition's
+  formatting only). Unit tests 303, 93%. Pre-APPLY review: the losing webhook (success or decline) also answers the
+  token with SendTaskFailure "OrderCancelled", and a retried cancel answers it whenever the intent is not SUCCEEDED, so a
+  cancel Lambda that dies between its write and SendTaskFailure still reaches the cancel branch. Next: APPLY approval, push, full e2e + UI on A, then the cleanup.
+
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
 - GET /products stays public; checkout, orders and wallet require login.
@@ -218,7 +241,7 @@ cancellation.** Report: docs/evidence/upgrade-2.3-report.md.
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
 ## Next (upgrade step 2.4)
-- Mid-saga cancellation.
+- Mid-saga cancellation: commit A in progress (see "Step 2.4" above).
 
 ## Known limitations / ideas (good viva points)
 - (Fixed in 1.2) Wallets/orders are keyed by the Cognito `sub`; the API has a JWT authorizer.

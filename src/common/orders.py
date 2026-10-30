@@ -23,7 +23,17 @@ FAILED = "FAILED"  # terminal: failure (written by the state machine itself)
 
 PARTIALLY_FULFILLED = "PARTIALLY_FULFILLED"  # terminal: some lines delivered, the others refunded (step 2.3)
 
-TERMINAL_STATUSES = frozenset({COMPLETED, FAILED, PARTIALLY_FULFILLED})
+# Customer cancellation (step 2.4).
+FULFILLING = "FULFILLING"  # BeginFulfillment: the warehouse started; from here on the order can't be cancelled
+CANCEL_REQUESTED = "CANCEL_REQUESTED"  # the customer cancelled; the saga is refunding and releasing the stock
+CANCELLED = "CANCELLED"  # terminal: cancelled by the customer, nothing charged (or all of it refunded), stock back
+
+TERMINAL_STATUSES = frozenset({COMPLETED, FAILED, PARTIALLY_FULFILLED, CANCELLED})
+
+# The cancel window. Before payment: no money has moved yet. Paid but not yet fulfilling: refund everything.
+# PENDING / PROCESSING are not in it: the saga hasn't reserved the stock yet (that takes well under a second).
+AWAITING_PAYMENT = frozenset({RESERVED, PAYMENT_RETRY, PAYMENT_PENDING})
+CANCELLABLE_STATUSES = AWAITING_PAYMENT | {PAYMENT_CAPTURED}
 
 # History-only events: appended to statusHistory WITHOUT changing `status` (the order stays PENDING).
 DELIVERY_RETRY = "DELIVERY_RETRY"  # an SQS delivery attempt failed and SQS will retry it
@@ -31,6 +41,7 @@ DEAD_LETTERED = "DEAD_LETTERED"  # final attempt failed; SQS moves the message t
 ITEM_FULFILLED = "ITEM_FULFILLED"  # one line picked and packed (step 2.3)
 LINE_REFUNDED = "LINE_REFUNDED"  # one line's amount refunded to the wallet
 ITEM_WRITTEN_OFF = "ITEM_WRITTEN_OFF"  # one line's units written off (damaged / lost), not back on sale
+CANCEL_REJECTED = "CANCEL_REJECTED"  # a cancel arrived after fulfillment started (recorded once, step 2.4)
 
 # Per-line fulfillment, stored on the order line as `fulfillment` (absent = reserved, not handled yet).
 LINE_FULFILLED = "FULFILLED"
