@@ -23,7 +23,7 @@
 | Lambda (changed) | `refund-payment`, `request-payment`, `reserve-inventory`, `create-order`, `get-order` | cancelled mode (void, refund what's left), conditional status writes, the stamp, demo scenarios, `canCancel` + feed rows | https://ap-south-1.console.aws.amazon.com/lambda/home?region=ap-south-1#/functions |
 | CloudWatch | alarm `order-saga-cancellation-errors`; metric filters `order-saga-cancel-events-*` → `OrderSaga/CancelEvents` (dimension Event); dashboard row | cancellations must never fail silently | https://ap-south-1.console.aws.amazon.com/cloudwatch/home?region=ap-south-1#alarmsV2:alarm/order-saga-cancellation-errors |
 | CloudWatch dashboard | `order-saga-dashboard` (cancellation row) | accepted / refunded / nothing charged / refused | https://ap-south-1.console.aws.amazon.com/cloudwatch/home?region=ap-south-1#dashboards/dashboard/order-saga-dashboard |
-| IAM | roles of the 2 new Lambdas; SFN role (+ invoke begin-fulfillment, + `dynamodb:GetItem` orders for CheckForCancelBeforeFailing); payment-webhook (+ orders GetItem) | least privilege | https://console.aws.amazon.com/iam/home#/roles |
+| IAM | roles of the 2 new Lambdas; SFN role (+ invoke begin-fulfillment, + `dynamodb:GetItem` orders for CheckForCancelBeforeFailing); payment-webhook (+ orders `dynamodb:GetItem`, only to read the order when a capture loses; its `cancelRequestedAt` condition runs under the existing `dynamodb:UpdateItem`) | least privilege | https://console.aws.amazon.com/iam/home#/roles |
 | Storefront | CloudFront `dg38gx94mao9n.cloudfront.net` | Cancel button + confirm, 409 messages, "Cancelled — refunded ₹X / nothing charged", Cancelled badge | https://dg38gx94mao9n.cloudfront.net |
 | DynamoDB (data) | `order-saga-orders` | 233 legacy orders marked by the cleanup (`legacyStockMigratedAt`) | https://ap-south-1.console.aws.amazon.com/dynamodbv2/home?region=ap-south-1#table?name=order-saga-orders |
 
@@ -51,6 +51,9 @@
      Deploy 41061113800: `Apply complete! Resources: 0 added, 21 changed, 0 destroyed.`
    - `python scripts/inflight_check.py` (during B's Deploy): PASS, 2 straddled, 13 × 409 NOT_CANCELLABLE.
    - `python scripts/e2e_test.py` on B: **35/35** in 361 s. `python scripts/capture_ui.py`: 10/10 (after the B fix).
+   - `python scripts/e2e_test.py` re-run on the B fix deploy (`fd8709a`, 19 Lambdas redeployed), after a re-seed:
+     **35/35** in 403 s (race x20: 15 cancel won with nothing charged, 4 late charge refunded, 1 payment won, 0 both).
+     Evidence `docs/evidence/upgrade-2.4/e2e-commit-B-fix.md`.
    - Terraform outputs used: `cancellation_function_names` = {cancel_order: order-saga-cancel-order,
      begin_fulfillment: order-saga-begin-fulfillment, payment_provider: order-saga-payment-provider, hold_expiry:
      order-saga-hold-expiry}; `api_url` https://8kyxed1rec.execute-api.ap-south-1.amazonaws.com;
@@ -90,8 +93,10 @@
      `docs/interview-prep.md`, `docs/progress.md`, `scripts/e2e_test.py` (evidence header I1–I9).
 
 7. **Problems hit and fixes**
-   - Pre-APPLY review (A): the webhook's new condition is evaluated by TransactWriteItems' Update on the order item,
-     authorised as `dynamodb:UpdateItem` (already allowed); the missing GetItem was added. A cancel Lambda dying after
+   - Pre-APPLY review (A): the webhook's new `cancelRequestedAt` condition is part of TransactWriteItems' Update on
+     the order item, so it runs under the webhook's existing `dynamodb:UpdateItem`; no new permission is needed for
+     it. The one permission that was missing is `dynamodb:GetItem` on the orders table, used only when the capture
+     loses, to read the order and confirm it was cancelled (`cancel_requested`); it was added. A cancel Lambda dying after
      its write would have left the token unanswered: now the losing webhook answers OrderCancelled itself and a
      retried cancel re-answers it.
    - The cancel at the moment of the 120 s timeout would have ended FAILED: every failure path now checks

@@ -1215,6 +1215,9 @@ interleaving end in exactly one of two outcomes.
 - Cancel: `SET status = CANCEL_REQUESTED, cancelRequestedAt` IF status is in the window AND no cancelRequestedAt AND
   `cancellable = true`.
 - Payment webhook (capture or decline, in the same transaction as the payment intent): IF `attribute_not_exists(cancelRequestedAt)`.
+  The condition is part of the transaction's Update on the order, so it runs under the webhook's existing
+  `dynamodb:UpdateItem` permission. The webhook's new `dynamodb:GetItem` on orders is only for reading the order
+  after the capture loses, to confirm a cancel (not a stale intent) is why.
 - BeginFulfillment: `PAYMENT_CAPTURED → FULFILLING` IF status = PAYMENT_CAPTURED AND no cancelRequestedAt.
 DynamoDB serializes writes to one item, so exactly one condition passes first and the others see its result.
 
@@ -1276,7 +1279,8 @@ Live, 2026-10-30 (`docs/evidence/upgrade-2.4-cancellation.md`):
 - **Cancel -> CANCELLED:** 0.35 s while waiting for payment (zd), 0.52 s for an order from a checkout hold (zh),
   10.18 s after payment (ze: a paid order isn't waiting on a token, so the saga acts at BeginFulfillment, after the
   10 s demo Wait).
-- **e2e 35/35** on commit B (29 earlier scenarios + 6 cancel scenarios); 29/29 on commit A (nothing changed).
+- **e2e 35/35** on commit B (29 earlier scenarios + 6 cancel scenarios), and 35/35 again on the B fix deploy;
+  29/29 on commit A (nothing changed).
   **327 unit tests**, 93% coverage. UI suite 10/10.
 - **Rollout:** 13 orders on the old definition asked to cancel during the Deploy, all 409 NOT_CANCELLABLE, all
   COMPLETED; 2 executions straddled the update and finished on the old definition.

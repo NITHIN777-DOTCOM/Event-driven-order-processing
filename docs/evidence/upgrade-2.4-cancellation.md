@@ -16,9 +16,9 @@ New invariants, checked for every e2e order:
 |---|---|---|---|
 | A `eb9a4ab` | cancel_order + begin_fulfillment Lambdas, `POST /orders/{id}/cancel` route, DemoPay void, conditional webhook/request_payment writes, alarm + metric filters + dashboard row, legacy migration script. **Switched off:** `CANCEL_ENABLED=false` (503), the state machine unchanged. CI 41043851030, Deploy 41044113358 | 16 added, 22 changed, 0 destroyed | full e2e 28/29 (g: test flaw, below), then **29/29**; UI **9/9**; legacy migration |
 | B `48e7d8e` | the state machine's cancel branch, `cancellable` stamp, BeginFulfillment, the cancel check before MarkOrderFailed; `CANCEL_ENABLED=true`; storefront, feed, notification; SFN role may `dynamodb:GetItem` the orders table. CI 41060910418, Deploy 41061113800 | 0 added, 21 changed, 0 destroyed | in-flight check **PASS**; e2e **35/35**; UI 10/10 after the fix |
-| B fix `fd8709a` | the CANCEL_REQUESTED entry names the reason once; UI capture waits for the tracker; UTF-8 output. CI 41064702078, Deploy 41065249876 | 0 added, 19 changed, 0 destroyed | UI **10/10** |
+| B fix `fd8709a` | the CANCEL_REQUESTED entry names the reason once; UI capture waits for the tracker; UTF-8 output. CI 41064702078, Deploy 41065249876 | 0 added, 19 changed, 0 destroyed | UI **10/10**; full e2e re-run on this deploy **35/35** (403 s, race x20: 15 nothing charged, 4 late charge refunded, 1 payment won, 0 both) |
 
-Evidence files: `upgrade-2.4/e2e-commit-A.md` (29/29 on A), `upgrade-2.4/e2e-commit-B.md` (35/35 on B),
+Evidence files: `upgrade-2.4/e2e-commit-A.md` (29/29 on A), `upgrade-2.4/e2e-commit-B.md` (35/35 on B), `upgrade-2.4/e2e-commit-B-fix.md` (35/35 on the B fix deploy),
 `upgrade-2.4/inflight-definition.md`, `upgrade-2.4/legacy-migration-{apply,check,dry-run-after-apply}.md`,
 `e2e-failure-tests.md` (latest), `ui/README.md`.
 

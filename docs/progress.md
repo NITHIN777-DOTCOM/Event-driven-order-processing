@@ -172,6 +172,8 @@ Next: upgrade Phase 3 (3.1 oversell race test). Step 2.3 is DONE (report docs/ev
   (the stamp held). e2e 35/35 (race x20: 14 nothing charged, 4 late charge refunded, 2 payment won, 0 both); I1-I9.
 - B fix `fd8709a`: the CANCEL_REQUESTED entry names the reason once; capture_ui waits for the tracker, prints UTF-8.
   CI 41064702078 + Deploy 41065249876 green. UI 10/10. Unit tests 327, 93%.
+- Full e2e re-run on the B fix deploy (it redeployed 19 Lambdas): 35/35 in 403 s, 2026-10-30 15:10 UTC (race x20:
+  15 nothing charged, 4 late charge refunded, 1 payment won, 0 both); I1-I9. Evidence upgrade-2.4/e2e-commit-B-fix.md.
 - States per one-line COMPLETED order 9 -> 12; cancel while waiting 8; after payment 12.
 - Docs commit: evidence docs/evidence/upgrade-2.4-cancellation.md, report, README, interview-prep section 13 numbers +
   debugging story. Docs commit `cb5b002`: CI 41066644918 + Deploy 41066893944 green (0 changed; recorded after they finished).
