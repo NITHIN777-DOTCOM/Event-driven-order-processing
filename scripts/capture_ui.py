@@ -10,6 +10,8 @@ the duplicate test, poison, and a late payment (DemoPay confirms after the 120 s
 "Awaiting payment confirmation", then the failure and the automatic refund). After each order, the DemoPay ledger is checked through the API.
 Checkout holds (step 2.2): every checkout must show the 10-minute countdown, the normal order must consume its hold,
 and a separate browser context with Playwright's fake clock jumps past the 10 minutes to capture "Your hold expired".
+Per-item fulfillment (step 2.3): a 2-item order whose last item is found damaged after payment must end "Order
+partially fulfilled" with that item "Cancelled — refunded ₹X", and the wallet must show exactly one partial CREDIT.
 Desktop (1440 px) and mobile (360 px) screenshots and docs/evidence/ui/README.md are written.
 """
 
@@ -28,7 +30,7 @@ from auth_tokens import auth_header, credentials
 from tf_outputs import load_outputs
 
 OUT_DIR = Path(__file__).resolve().parents[1] / "docs" / "evidence" / "ui"
-TERMINAL_TITLES = re.compile(r"Order completed|Order failed|Stuck in the dead-letter queue")
+TERMINAL_TITLES = re.compile(r"Order completed|Order partially fulfilled|Order failed|Stuck in the dead-letter queue")
 NAME = "Asha Rao"
 USER = "a"  # Cognito test user (create_test_users.py); the wallet and orders are this account's
 DESKTOP = {"width": 1440, "height": 900}
@@ -55,6 +57,10 @@ class Run:
     def debits(self, order_id: str) -> int:
         txns = self.api_json("GET", "/wallet")["transactions"]
         return sum(1 for t in txns if t.get("orderId") == order_id and t["type"] == "DEBIT")
+
+    def credits(self, order_id: str) -> list[dict]:
+        txns = self.api_json("GET", "/wallet")["transactions"]
+        return [t for t in txns if t.get("orderId") == order_id and t["type"] == "CREDIT"]
 
     def balance(self) -> float:
         return self.api_json("GET", "/wallet")["balance"]
@@ -190,6 +196,22 @@ class Run:
         order_id = self.checkout(page, "Payment declined")
         self.record("Payment declined", order_id, self.wait_terminal(page), 0)
         self.shot(page, "desktop-10-tracker-payment-declined")
+
+        # 3b) Item damaged after payment: the mouse ships, the laptop stand (the last line) is refunded.
+        self.add_from_listing(page, "Slim Wireless Mouse")
+        self.add_from_listing(page, "Aluminium Laptop Stand")
+        order_id = self.checkout(page, "Item damaged (partial refund)")
+        result = self.wait_terminal(page)
+        expect(page.get_by_text("Delivered", exact=True)).to_be_visible()
+        expect(page.get_by_text(re.compile(r"^Cancelled — refunded ₹[\d,]+$"))).to_be_visible()
+        self.shot(page, "desktop-10b-tracker-partially-fulfilled")
+        credits = self.credits(order_id)
+        line_amount = next(i["lineAmount"] for i in self.api_json("GET", f"/orders/{order_id}")["items"] if i["lineId"] == "L2")
+        self.record("Item damaged (partial refund)", order_id, f"{result}; CREDITs {[c['amount'] for c in credits]} (L2 = {line_amount})", 1)
+        self.results[-1]["ok"] &= result == "Order partially fulfilled" and [c["amount"] for c in credits] == [line_amount]
+        page.goto(base + "/wallet")
+        expect(page.get_by_text(re.compile(rf"Refund for {order_id} line L2"))).to_be_visible()
+        self.shot(page, "desktop-10c-wallet-partial-credit")
 
         # 4) REAL decline: set the wallet to ₹1,000 in the UI, then buy a ₹5,999 microphone.
         page.goto(base + "/wallet")

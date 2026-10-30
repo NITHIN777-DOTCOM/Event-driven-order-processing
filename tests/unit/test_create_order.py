@@ -103,6 +103,10 @@ def test_handler_needs_no_queue_configuration(aws, load_handler, monkeypatch):
         ({**VALID_BODY, "items": [{"productId": "WIRELESS-MOUSE", "quantity": True}]}, "quantity"),
         ({**VALID_BODY, "items": [{"productId": "WIRELESS-MOUSE", "quantity": 1}] * 2}, "more than once"),
         ({**VALID_BODY, "simulate": "explode"}, "simulate"),
+        ({**VALID_BODY, "simulateLine": 1}, "only used with"),
+        ({**VALID_BODY, "simulate": "item_unavailable", "simulateLine": 3}, "line number from 1 to 2"),
+        ({**VALID_BODY, "simulate": "item_unavailable", "simulateLine": True}, "line number"),
+        ({**VALID_BODY, "simulate": "item_unavailable", "simulateLine": "L1"}, "line number"),
     ],
 )
 def test_invalid_input_returns_400(aws, handler, body, expected_error):
@@ -200,3 +204,15 @@ def test_malformed_idempotency_key_returns_400(aws, handler):
     result = handler.lambda_handler(api_event(VALID_BODY, headers={"Idempotency-Key": "bad key!"}), None)
 
     assert result["statusCode"] == 400
+
+
+@pytest.mark.parametrize("simulate_line", [1, 2, "all", None])
+def test_item_unavailable_stores_the_target_line(aws, handler, simulate_line):
+    body = {**VALID_BODY, "simulate": "item_unavailable", **({} if simulate_line is None else {"simulateLine": simulate_line})}
+
+    result = handler.lambda_handler(api_event(body), None)
+
+    assert result["statusCode"] == 202
+    order = aws.orders.get_item(Key={"orderId": json.loads(result["body"])["orderId"]})["Item"]
+    assert order["simulate"] == "item_unavailable"
+    assert order.get("simulateLine") == simulate_line

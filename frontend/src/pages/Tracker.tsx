@@ -8,7 +8,7 @@ import { Link, useParams } from "react-router-dom";
 import { ApiError, getOrder } from "../api";
 import { formatDateTime, formatDuration, formatPrice, formatTime, scenarioLabel } from "../format";
 import { deriveSteps, finishedAt, isTerminal, trackerTitle, type Step } from "../tracker";
-import type { FeedRow, Order } from "../types";
+import type { FeedRow, Order, OrderItem } from "../types";
 import { useWallet } from "../wallet";
 import {
   CardIcon,
@@ -126,7 +126,7 @@ const ROW_STYLE: Record<FeedRow["level"], string> = {
 function Message({ text }: { text: string }) {
   return (
     <>
-      {text.split(/\b(COMPLETED|FAILED)\b/).map((part, index) =>
+      {text.split(/\b(PARTIALLY_FULFILLED|COMPLETED|FAILED)\b/).map((part, index) =>
         index % 2 === 1 ? <strong key={index} className="font-semibold">{part}</strong> : part,
       )}
     </>
@@ -216,7 +216,7 @@ export function Tracker() {
   }
   if (!order) return error ? <ErrorBanner message={error.message} /> : <TrackerSkeleton />;
 
-  const pill = order.status === "COMPLETED" || order.status === "FAILED" || order.deadLettered
+  const pill = isTerminal(order)
     ? orderPill(order.status, order.deadLettered)
     : { tone: "pending" as const, label: "Processing" };
   const end = finishedAt(order);
@@ -282,11 +282,16 @@ export function Tracker() {
             </h2>
             <ul className="space-y-2">
               {order.items.map((item) => (
-                <li key={item.productId} className="flex justify-between gap-4 text-[15px]">
-                  <span>
-                    {item.name} × {item.quantity}
-                  </span>
-                  <span className="whitespace-nowrap">{formatPrice(item.unitPrice * item.quantity)}</span>
+                <li key={item.lineId ?? item.productId} className="text-[15px]">
+                  <div className="flex justify-between gap-4">
+                    <span>
+                      {item.name} × {item.quantity}
+                    </span>
+                    <span className={`whitespace-nowrap ${item.fulfillment === "WRITTEN_OFF" ? "text-muted line-through" : ""}`}>
+                      {formatPrice(item.lineAmount ?? item.unitPrice * item.quantity)}
+                    </span>
+                  </div>
+                  <LineStatus item={item} />
                 </li>
               ))}
             </ul>
@@ -294,15 +299,21 @@ export function Tracker() {
               <span>Total</span>
               <span>{formatPrice(order.totalAmount)}</span>
             </div>
+            {order.refundedAmount !== undefined && order.refundedAmount > 0 && order.status === "PARTIALLY_FULFILLED" && (
+              <div className="mt-2 flex justify-between text-[15px] text-ok" data-testid="partial-refund">
+                <span>Refunded to wallet</span>
+                <span>−{formatPrice(order.refundedAmount)}</span>
+              </div>
+            )}
             {order.paidAmount !== undefined && (
               <p className="mt-4 text-sm text-muted-strong">
                 Paid {formatPrice(order.paidAmount)} with DemoPay
                 {order.refunded && <span className="block text-ok">Refunded {formatPrice(order.paidAmount)} to the wallet</span>}
               </p>
             )}
-            {(order.status === "COMPLETED" || order.status === "FAILED") && (
+            {isTerminal(order) && !order.deadLettered && (
               <p className="mt-4 text-sm text-muted">
-                {order.status === "COMPLETED" ? "Confirmation" : "Failure"} email sent via SNS
+                {{ COMPLETED: "Confirmation", PARTIALLY_FULFILLED: "Partial delivery", FAILED: "Failure" }[order.status] ?? "Status"} email sent via SNS
                 <br />
                 <span className="text-muted-strong">for {order.customerEmail}</span>
               </p>
@@ -325,6 +336,19 @@ export function Tracker() {
       </div>
     </div>
   );
+}
+
+/** Under each item, once fulfillment ran: Delivered, or Cancelled with the refund (step 2.3). */
+function LineStatus({ item }: { item: OrderItem }) {
+  if (item.fulfillment === "FULFILLED") return <p className="text-sm text-ok">Delivered</p>;
+  if (item.fulfillment === "WRITTEN_OFF" || item.refundedAmount !== undefined) {
+    return (
+      <p className="text-sm text-bad" title={item.writeOffReason}>
+        Cancelled — refunded {formatPrice(item.refundedAmount ?? item.lineAmount)}
+      </p>
+    );
+  }
+  return null;
 }
 
 function ConsoleLink({ href, label, missing }: { href: string | null; label: string; missing?: string }) {

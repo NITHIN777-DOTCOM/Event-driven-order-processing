@@ -8,6 +8,7 @@
  *
  * On failure the failing step turns red. When compensation ran (INVENTORY_RELEASED), a
  * "Stock released" step replaces "Confirmed", because the order will never be confirmed.
+ * A PARTIALLY_FULFILLED order (some lines refunded after payment) ends on "Partly delivered".
  */
 import { ordinal } from "./format";
 import type { HistoryEntry, Order } from "./types";
@@ -23,7 +24,9 @@ export interface Step {
   note?: string;
 }
 
-export const isTerminal = (order: Order) => order.status === "COMPLETED" || order.status === "FAILED" || Boolean(order.deadLettered);
+export const TERMINAL_STATUSES = ["COMPLETED", "PARTIALLY_FULFILLED", "FAILED"];
+
+export const isTerminal = (order: Order) => TERMINAL_STATUSES.includes(order.status) || Boolean(order.deadLettered);
 
 const find = (history: HistoryEntry[], status: string) => history.find((entry) => entry.status === status);
 const last = (history: HistoryEntry[], status: string) => [...history].reverse().find((entry) => entry.status === status);
@@ -32,6 +35,8 @@ export function deriveSteps(order: Order): Step[] {
   const h = order.statusHistory;
   const failedAt = find(h, "FAILED")?.timestamp;
   const released = find(h, "INVENTORY_RELEASED");
+  const partial = find(h, "PARTIALLY_FULFILLED");
+  const cancelled = order.items.filter((item) => item.fulfillment === "WRITTEN_OFF").length;
 
   const steps: Step[] = [
     { key: "placed", label: "Placed", state: "done", time: find(h, "PENDING")?.timestamp ?? order.createdAt },
@@ -40,7 +45,9 @@ export function deriveSteps(order: Order): Step[] {
     paidStep(order, h, failedAt),
     released
       ? { key: "released", label: "Stock released", state: "compensated", time: released.timestamp }
-      : stage("confirmed", "Confirmed", find(h, "COMPLETED"), undefined),
+      : partial
+        ? { key: "confirmed", label: "Partly delivered", state: "compensated", time: partial.timestamp, note: `${cancelled} of ${order.items.length} refunded` }
+        : stage("confirmed", "Confirmed", find(h, "COMPLETED"), undefined),
   ];
 
   // A failure that didn't map to a specific step (e.g. an unexpected error) marks the first unfinished step.
@@ -87,6 +94,7 @@ function paidStep(order: Order, h: HistoryEntry[], failedAt?: string): Step {
 export function trackerTitle(order: Order): string {
   if (order.deadLettered) return "Stuck in the dead-letter queue";
   if (order.status === "COMPLETED") return "Order completed";
+  if (order.status === "PARTIALLY_FULFILLED") return "Order partially fulfilled";
   if (order.status === "FAILED") return "Order failed";
   return "Processing…";
 }

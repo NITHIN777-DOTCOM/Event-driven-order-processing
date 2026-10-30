@@ -35,6 +35,7 @@ export const SCENARIOS: { value: Simulate; label: string; description: string }[
   { value: "payment_late", label: "Late payment (auto-refund)", description: "DemoPay charges after the 120 s timeout (~150 s). The order has already failed, so the late payment is refunded automatically." },
   { value: "webhook_duplicate", label: "Duplicate webhook", description: "DemoPay sends the success callback twice; the second is ignored, so the wallet is debited once." },
   { value: "webhook_bad_signature", label: "Forged webhook first", description: "A callback with a wrong HMAC signature arrives first and is rejected (401); the genuine one then completes the order." },
+  { value: "item_unavailable", label: "Item damaged (partial refund)", description: "After payment, the last item is found damaged in the warehouse: only that item is refunded and written off, the rest is delivered, and the order is partially fulfilled." },
   { value: "out_of_stock", label: "Out of stock", description: "Reservation fails before anything is held, so the order fails with nothing to release." },
   { value: "poison", label: "Poison message (to DLQ)", description: "The queue consumer rejects the message; after 3 attempts SQS moves it to the dead-letter queue (~3 min)." },
 ];

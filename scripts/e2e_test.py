@@ -39,10 +39,19 @@ Scenarios (each uses its own product, so stock assertions can't interfere with e
                           stock comes back; records how many seconds after expiresAt the release happened
   v) last unit race    -> two users hold the last unit at the same moment: exactly one 201, one 409
   w) hold ownership    -> another user can't release (404) or see someone's hold
+  za) partial fulfillment -> 3 lines (quantities 2/1/3), line 2 damaged after payment (item_unavailable,
+                          simulateLine 2): PARTIALLY_FULFILLED, 1 DEBIT (total) + 1 CREDIT (exactly line 2), net = lines
+                          1 + 3 (I6), line 2 written off with an audit record, lines 1 and 3 reserved -> sold
+  zb) all unavailable  -> every line damaged: FAILED "all items unavailable", every line refunded (intent
+                          REFUNDED, net 0), every line written off
+  zc) hold + partial   -> an order placed with a checkout hold, last line damaged: the hold is consumed once
+                          (stock moved once, at hold time), the rest sold, the damaged line written off
   x) I5                -> stock conservation for EVERY product at the end of the run: seeded stock =
                           stock + held + reserved + sold + writtenOff, held = the units in ACTIVE holds, and
                           writtenOff = the units in this seed's write-off audit records. An order that completed on
                           the pre-2.3 definition never moves anything to `sold`: its units stay in `reserved`.
+Since step 2.3 every line of a paid order is fulfilled on its own: a COMPLETED order (a, c, e, ...) moves its units
+`reserved` -> `sold` and gains ITEM_FULFILLED history entries; nothing else about those scenarios changes.
 
 Auth: every API call carries a Cognito access token for test user A (or B), from auth_tokens.py. The API
 takes identity only from that token, so no request below sends an email or user id.
@@ -52,8 +61,12 @@ against the money invariants, using the wallet ledger (order-saga-wallet-txns) a
 (order-saga-payments):
   I1  COMPLETED -> exactly one DEBIT of the order total, no CREDIT
   I2  FAILED (or never started) -> net charge 0 (no entries, or DEBIT + matching CREDIT)
-  I3  never more than one DEBIT or one CREDIT per order (no double charge, no double refund)
+  I3  never more than one DEBIT per order, and at most one CREDIT per refunded line or for the whole remainder
+      (no double charge, no double refund)
   I4  the intent, if any, is in a final state (SUCCEEDED, FAILED, TIMED_OUT, REFUNDED), and the expected one
+  I6  net charge = the sum of the FULFILLED line amounts (COMPLETED: the total; PARTIALLY_FULFILLED: the
+      delivered lines; FAILED: 0)
+  I7  refunds never exceed the charge
 
 The poison, payment_timeout and payment_late orders and the 30 s hold are placed FIRST, so their minutes of waiting
 (SQS retries, the 120 s payment timeout, the ~150 s late callback) overlap the other scenarios.
@@ -74,6 +87,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import boto3
@@ -199,7 +213,7 @@ def wait_for_terminal(order_id: str, timeout: int = 90, user: str = USER) -> dic
     order: dict = {}
     while time.monotonic() < deadline:
         order = get_order(order_id, user)
-        if order.get("status") in ("COMPLETED", "FAILED"):
+        if order.get("status") in ("COMPLETED", "PARTIALLY_FULFILLED", "FAILED"):
             return order
         time.sleep(2)
     return order
@@ -286,15 +300,15 @@ def scenario_none() -> Scenario:
     order = wait_for_terminal(s.order_id)
     s.timeline = order.get("statusHistory", [])
     s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
-    expected = ["PENDING", "PROCESSING", "RESERVED", "PAYMENT_PENDING", "PAYMENT_CAPTURED", "COMPLETED"]
+    expected = ["PENDING", "PROCESSING", "RESERVED", "PAYMENT_PENDING", "PAYMENT_CAPTURED", "ITEM_FULFILLED", "COMPLETED"]
     s.check(statuses(order) == expected, f"statusHistory {' -> '.join(statuses(order))}")
     after = stock_of("MECH-KEYBOARD")
-    s.check(after == (before[0] - 1, before[1] + 1), f"MECH-KEYBOARD stock {before[0]} -> {after[0]} (expected -1)")
-    # Step 2.3 commit A (expand): the saga doesn't fulfil per line yet, so the unit stays in `reserved` exactly as
-    # before and nothing moves to `sold` or `writtenOff`. The order already stores its server-priced lines.
+    s.check(after == (before[0] - 1, before[1]), f"MECH-KEYBOARD (stock, reserved) {before} -> {after} (expected stock -1)")
+    # Step 2.3: the single line is fulfilled on its own: its unit goes reserved -> sold; nothing is written off.
+    sold_after = fulfillment_counters("MECH-KEYBOARD")
     s.check(
-        fulfillment_counters("MECH-KEYBOARD") == sold_before,
-        f"MECH-KEYBOARD (sold, writtenOff) {sold_before} -> {fulfillment_counters('MECH-KEYBOARD')} (expected unchanged)",
+        sold_after == (sold_before[0] + 1, sold_before[1]),
+        f"MECH-KEYBOARD (sold, writtenOff) {sold_before} -> {sold_after} (expected sold +1)",
     )
     stored = orders_table.get_item(Key={"orderId": s.order_id}, ConsistentRead=True)["Item"]["items"]
     s.check(
@@ -912,6 +926,8 @@ EXPECTED_INTENT = {
     "a": "SUCCEEDED", "b": "FAILED", "c": "SUCCEEDED", "d": None, "e": "SUCCEEDED", "f": "SUCCEEDED",
     "g": None, "h": "FAILED", "i": "SUCCEEDED", "n": "SUCCEEDED",
     "p": "TIMED_OUT", "q": "REFUNDED", "r": "SUCCEEDED", "s": "SUCCEEDED", "y": "SUCCEEDED", "z": "SUCCEEDED",
+    # step 2.3: a partly refunded intent stays SUCCEEDED (with refundedAmount); refunding every line makes it REFUNDED
+    "za": "SUCCEEDED", "zb": "REFUNDED", "zc": "SUCCEEDED",
 }
 FINAL_INTENT_STATUSES = {"SUCCEEDED", "FAILED", "TIMED_OUT", "REFUNDED"}
 
@@ -935,6 +951,21 @@ def ledger_for(order_id: str, user: str) -> list[dict]:
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
 
+def fulfilled_amount(order: dict) -> Decimal:
+    """I6: what the customer should have paid in the end. COMPLETED on the pre-2.3 definition has no per-line
+    state, so all its lines count; PARTIALLY_FULFILLED counts its FULFILLED lines; FAILED counts nothing."""
+    if order["status"] == "COMPLETED":
+        return order["totalAmount"]
+    if order["status"] != "PARTIALLY_FULFILLED":
+        return Decimal("0")
+    lines = order["items"]
+    return sum((line_amount(i) for i in lines if i.get("fulfillment") == "FULFILLED"), Decimal("0"))
+
+
+def line_amount(item: dict) -> Decimal:
+    return item.get("lineAmount") or (Decimal(item["quantity"]) * item["unitPrice"]).quantize(Decimal("0.01"))
+
+
 def check_money(s: Scenario) -> None:
     """Money invariants I1-I4 for this scenario's order (see the module docstring)."""
     order = orders_table.get_item(Key={"orderId": s.order_id}, ConsistentRead=True)["Item"]
@@ -945,9 +976,14 @@ def check_money(s: Scenario) -> None:
     ledger = f"ledger {len(debits)} DEBIT / {len(credits)} CREDIT, net ₹{net}"
     if order["status"] == "COMPLETED":
         s.check(debits == [order["totalAmount"]] and not credits, f"I1 COMPLETED -> one DEBIT of ₹{order['totalAmount']}: {ledger}")
-    else:
+    elif order["status"] != "PARTIALLY_FULFILLED":
         s.check(net == 0, f"I2 {order['status']} -> net charge 0: {ledger}")
-    s.check(len(debits) <= 1 and len(credits) <= 1, f"I3 no double charge / double refund: {ledger}")
+    # I3: one DEBIT at most; each refunded line credited once; the whole-remainder refund at most once.
+    credit_keys = [e.get("lineId", "*") for e in entries if e["type"] == "CREDIT"]
+    s.check(len(debits) <= 1 and len(credit_keys) == len(set(credit_keys)), f"I3 no double charge / double refund: {ledger}, credits {credit_keys}")
+    expected_net = fulfilled_amount(order)
+    s.check(net == expected_net, f"I6 {order['status']} -> net ₹{net} = fulfilled lines ₹{expected_net}")
+    s.check(sum(credits) <= sum(debits), f"I7 refunds ₹{sum(credits)} <= charged ₹{sum(debits)}")
     intent = intent_of(s.order_id)
     status = intent["status"] if intent else None
     expected = EXPECTED_INTENT[s.key]
@@ -1142,8 +1178,8 @@ def scenario_order_consumes_hold() -> Scenario:
     s.check(f"from checkout hold {hold_id}" in reserved_detail(order), f"RESERVED detail: {reserved_detail(order)!r}")
     item = stored_hold(hold_id)
     s.check(item.get("status") == "CONSUMED" and item.get("orderId") == s.order_id, f"hold {item.get('status')} by {item.get('orderId')} (expected CONSUMED by this order)")
-    s.check(counters(product) == (before[0] - 1, before[1], before[2] + 1),
-            f"{product} (stock, held, reserved) {before} -> {counters(product)} (stock -1 once, at hold time; held -> reserved)")
+    s.check(counters(product) == (before[0] - 1, before[1], before[2]),
+            f"{product} (stock, held, reserved) {before} -> {counters(product)} (stock -1 once, at hold time; held -> reserved -> sold)")
     s.check(not schedule_exists(hold_id) and current_hold() is None, "expiry schedule deleted, no current hold")
     return s
 
@@ -1169,9 +1205,105 @@ def finish_expiring_hold(s: Scenario, hold: dict) -> Scenario:
     s.timeline = order.get("statusHistory", [])
     s.check(order.get("status") == "COMPLETED", f"order status {order.get('status')} (expected COMPLETED)")
     s.check("had ended, so reserved afresh" in reserved_detail(order), f"RESERVED detail: {reserved_detail(order)!r}")
-    s.check(counters("COMPACT-KEYBOARD") == (before[0] - 1, before[1], before[2] + 1),
-            f"COMPACT-KEYBOARD {before} -> {counters('COMPACT-KEYBOARD')} (a normal fresh reservation)")
+    s.check(counters("COMPACT-KEYBOARD") == (before[0] - 1, before[1], before[2]),
+            f"COMPACT-KEYBOARD {before} -> {counters('COMPACT-KEYBOARD')} (a normal fresh reservation, then sold)")
     s.check(stored_hold(hold_id).get("status") == "EXPIRED", "the expired hold stays EXPIRED (never revived)")
+    return s
+
+
+# --------------------------------------------------------------------------------------------
+# Step 2.3: per-item fulfillment, partial refunds, write-offs
+def place_lines(lines: list[tuple[str, int]], simulate: str, simulate_line=None, hold_id: str | None = None) -> tuple[int, dict]:
+    payload: dict = {"customerName": "E2E Tester", "items": [{"productId": p, "quantity": q} for p, q in lines], "simulate": simulate}
+    if simulate_line is not None:
+        payload["simulateLine"] = simulate_line
+    if hold_id:
+        payload["holdId"] = hold_id
+    return http_json("POST", f"{API}/orders", payload, {"Idempotency-Key": str(uuid.uuid4()), **auth_header(USER)})
+
+
+def five_counters(product_id: str) -> tuple[int, int, int, int, int]:
+    """(stock, held, reserved, sold, writtenOff)"""
+    return (*counters(product_id), *fulfillment_counters(product_id))
+
+
+def write_off_record(order_id: str, line_id: str) -> dict | None:
+    return write_offs_table.get_item(Key={"orderId": order_id, "lineId": line_id}, ConsistentRead=True).get("Item")
+
+
+def check_lines_moved(s: Scenario, before: dict, lines: list[tuple[str, int]], written_off: set[str]) -> None:
+    """Each line's units: reserved -> sold (delivered) or reserved -> writtenOff (unavailable). With a hold, stock
+    already moved at hold time (held -> reserved -> ...), so the counters before are taken BEFORE the hold."""
+    for index, (product, quantity) in enumerate(lines):
+        line_id, now, was = f"L{index + 1}", five_counters(product), before[product]
+        sold, off = (0, quantity) if line_id in written_off else (quantity, 0)
+        expected = (was[0] - quantity, was[1], was[2], was[3] + sold, was[4] + off)
+        s.check(now == expected, f"{line_id} {product} (stock, held, reserved, sold, writtenOff) {was} -> {now} (expected {expected})")
+
+
+def scenario_partial_fulfillment() -> Scenario:
+    s = Scenario("za", "3 lines, line 2 damaged after payment -> PARTIALLY_FULFILLED, only line 2 refunded and written off")
+    lines = [("WIRELESS-MOUSE", 2), ("ERGO-MOUSE", 1), ("LOWPRO-KEYBOARD", 3)]
+    before = {p: five_counters(p) for p, _ in lines}
+    code, body = place_lines(lines, "item_unavailable", simulate_line=2)
+    s.check(code == 202, f"POST /orders -> {code} (expected 202)")
+    s.order_id = body.get("orderId")
+    order = wait_for_terminal(s.order_id, timeout=120)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "PARTIALLY_FULFILLED", f"order status {order.get('status')} (expected PARTIALLY_FULFILLED)")
+    items = order.get("items", [])
+    s.check([i.get("fulfillment") for i in items] == ["FULFILLED", "WRITTEN_OFF", "FULFILLED"], f"line states {[i.get('fulfillment') for i in items]}")
+    l2 = items[1] if len(items) > 1 else {}
+    s.check(Decimal(str(l2.get("refundedAmount", 0))) == Decimal(str(l2.get("lineAmount"))), f"L2 refundedAmount {l2.get('refundedAmount')} = its lineAmount {l2.get('lineAmount')}")
+    entries = ledger_for(s.order_id, USER)
+    credits = [(e.get("lineId"), e["amount"]) for e in entries if e["type"] == "CREDIT"]
+    s.check(credits == [("L2", Decimal(str(l2.get("lineAmount"))))], f"ledger CREDITs {credits} (expected exactly one, for L2)")
+    s.check(statuses(order).count("LINE_REFUNDED") == 1 and statuses(order).count("ITEM_WRITTEN_OFF") == 1
+            and statuses(order).count("ITEM_FULFILLED") == 2, f"statusHistory {' -> '.join(statuses(order))}")
+    record = write_off_record(s.order_id, "L2")
+    s.check(bool(record) and record["productId"] == "ERGO-MOUSE", f"write-off audit record for L2: {record and record['reason']}")
+    check_lines_moved(s, before, lines, {"L2"})
+    s.check(execution(s)["status"] == "SUCCEEDED", f"execution {execution(s)['status']} (expected SUCCEEDED at OrderPartiallyFulfilled)")
+    s.check("OrderPartiallyFulfilled" in states_entered(s), "the execution ended in OrderPartiallyFulfilled")
+    return s
+
+
+def scenario_all_unavailable() -> Scenario:
+    s = Scenario("zb", "every line damaged -> FAILED 'all items unavailable', full refund, everything written off, net 0")
+    lines = [("USBC-HUB", 1), ("WIRELESS-EARBUDS", 2)]
+    before = {p: five_counters(p) for p, _ in lines}
+    code, body = place_lines(lines, "item_unavailable", simulate_line="all")
+    s.check(code == 202, f"POST /orders -> {code} (expected 202)")
+    s.order_id = body.get("orderId")
+    order = wait_for_terminal(s.order_id, timeout=120)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "FAILED", f"order status {order.get('status')} (expected FAILED)")
+    s.check("all items unavailable" in (order.get("failureReason") or ""), f"failureReason {order.get('failureReason')!r}")
+    s.check([i.get("fulfillment") for i in order.get("items", [])] == ["WRITTEN_OFF", "WRITTEN_OFF"], "every line WRITTEN_OFF")
+    s.check(all(write_off_record(s.order_id, f"L{n}") for n in (1, 2)), "write-off audit records for L1 and L2")
+    check_lines_moved(s, before, lines, {"L1", "L2"})
+    s.check("RefundAllLines" in states_entered(s) and "ReleaseInventory" not in states_entered(s),
+            "RefundAllLines ran; ReleaseInventory did not (damaged units are written off, not released)")
+    return s
+
+
+def scenario_hold_then_partial() -> Scenario:
+    s = Scenario("zc", "order with a checkout hold, last line damaged -> hold consumed once, PARTIALLY_FULFILLED, I5 holds")
+    lines = [("LAPTOP-STAND", 1), ("ANC-HEADPHONES", 2)]
+    before = {p: five_counters(p) for p, _ in lines}
+    code, hold = post_hold(lines)
+    hold_id = hold.get("holdId", "")
+    s.check(code == 201, f"POST /holds -> {code} {hold_id}")
+    code, body = place_lines(lines, "item_unavailable", hold_id=hold_id)  # default: the last line
+    s.check(code == 202, f"POST /orders with holdId -> {code} (expected 202)")
+    s.order_id = body.get("orderId")
+    order = wait_for_terminal(s.order_id, timeout=120)
+    s.timeline = order.get("statusHistory", [])
+    s.check(order.get("status") == "PARTIALLY_FULFILLED", f"order status {order.get('status')} (expected PARTIALLY_FULFILLED)")
+    s.check(f"from checkout hold {hold_id}" in reserved_detail(order), f"RESERVED detail: {reserved_detail(order)!r}")
+    item = stored_hold(hold_id)
+    s.check(item.get("status") == "CONSUMED" and item.get("orderId") == s.order_id, f"hold {item.get('status')} by {item.get('orderId')}")
+    check_lines_moved(s, before, lines, {"L2"})
     return s
 
 
@@ -1256,6 +1388,8 @@ def main() -> int:
         scenario_hold_lifecycle,
         scenario_hold_ownership,
         scenario_order_consumes_hold,
+        scenario_partial_fulfillment,
+        scenario_all_unavailable,
     ):
         result = run()
         print(f"[{'PASS' if result.passed else 'FAIL'}] {result.key}) {result.title}  {result.order_id}")
@@ -1278,10 +1412,11 @@ def main() -> int:
     check_signature_metric(next(r for r in results if r.key == "s"))
     results.append(finish_short_hold(short_hold, short_hold_body, short_hold_before))
     results.append(finish_expiring_hold(expiring, expiring_body))
+    results.append(scenario_hold_then_partial())  # after z: user A may hold only one cart at a time
     results.append(scenario_last_unit_race())
     results.append(scenario_stock_conservation())
 
-    print("Checking the money invariants I1-I4 for every order...")
+    print("Checking the money invariants I1-I4, I6, I7 for every order...")
     for r in results:
         if r.key in EXPECTED_INTENT and r.order_id:
             check_money(r)

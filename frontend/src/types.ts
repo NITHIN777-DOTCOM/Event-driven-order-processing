@@ -9,7 +9,8 @@ export type Simulate =
   | "payment_timeout"
   | "payment_late"
   | "webhook_duplicate"
-  | "webhook_bad_signature";
+  | "webhook_bad_signature"
+  | "item_unavailable";
 
 export interface Product {
   productId: string;
@@ -44,11 +45,19 @@ export interface Wallet {
   transactions: WalletTxn[];
 }
 
+/** Per-line fulfillment (step 2.3): absent while the line is still reserved. */
+export type LineFulfillment = "FULFILLED" | "WRITTEN_OFF";
+
 export interface OrderItem {
   productId: string;
   name: string;
   quantity: number;
   unitPrice: number;
+  lineId: string; // L1, L2, ...
+  lineAmount: number; // quantity x unitPrice, fixed by the server when the order was created
+  fulfillment?: LineFulfillment;
+  refundedAmount?: number; // set once the line was refunded (it couldn't be fulfilled)
+  writeOffReason?: string;
 }
 
 export interface HistoryEntry {
@@ -93,6 +102,7 @@ export interface Order {
   released?: boolean;
   paidAmount?: number;
   refunded?: boolean;
+  refundedAmount?: number; // the sum of the line refunds (step 2.3)
   feed: FeedRow[];
   consoleLinks: ConsoleLinks;
 }
@@ -106,6 +116,8 @@ export interface OrderSummary {
   currency: string;
   customerName: string;
   deadLettered: boolean | null;
+  items: OrderItem[];
+  refundedAmount: number | null;
 }
 
 export interface CreateOrderResponse {

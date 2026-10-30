@@ -24,6 +24,7 @@ export function StatusPill({ tone, label }: { tone: PillTone; label: string }) {
 export function orderPill(status: string, deadLettered?: boolean | null): { tone: PillTone; label: string } {
   if (deadLettered) return { tone: "bad", label: "In DLQ" };
   if (status === "COMPLETED") return { tone: "ok", label: "Completed" };
+  if (status === "PARTIALLY_FULFILLED") return { tone: "retry", label: "Partially fulfilled" };
   if (status === "FAILED") return { tone: "bad", label: "Failed" };
   if (status === "PENDING") return { tone: "pending", label: "Pending" };
   return { tone: "pending", label: "Processing" };

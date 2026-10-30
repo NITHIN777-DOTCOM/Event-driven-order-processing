@@ -1054,8 +1054,15 @@ the order ends **PARTIALLY_FULFILLED**.
 - Orders store per-line prices at creation: `lineId` (L1, L2, ...), `unitPrice` and `lineAmount` = quantity ×
   unit price, all from the inventory table. The total is the sum of the lines.
 - Inventory counters per product: `stock`, `held`, `reserved`, `sold`, `writtenOff`.
-- Saga (commit B): an inline Map `FulfillItems` over the lines; then a Choice: all fulfilled → COMPLETED; some →
-  PartialRefund → WriteOffLines → PARTIALLY_FULFILLED; none → full refund + write off all → FAILED.
+- Saga: after RequestPayment, an inline Map `FulfillItems` over the lines (MaxConcurrency 5), a JSONata Pass
+  `SummarizeFulfillment`, then the Choice `FulfillmentOutcome`: all fulfilled → MarkOrderCompleted (unchanged);
+  some → PartialRefund → WriteOffLines → MarkOrderPartiallyFulfilled → NotifyCustomerPartial; none → RefundAllLines →
+  WriteOffAllLines → DescribeAllUnavailable → MarkOrderFailed ("all items unavailable") → notify.
+- API: `GET /orders/{id}` and `GET /orders` return every line (lineId, lineAmount, fulfillment, refundedAmount);
+  the list reads them with ONE BatchGetItem for exactly the orders its Query returned (owner only).
+- Storefront: each item shows "Delivered" or "Cancelled — refunded ₹X"; the orders list has a "Partially fulfilled"
+  badge; the wallet ledger shows the line's CREDIT ("Refund for ORD-… line L2 (…)"). Demo scenario "Item damaged
+  (partial refund)".
 
 ### Why (the problem it solves)
 Reservation is still atomic and all-or-nothing, which is right *before* payment: the customer pays for a
@@ -1096,13 +1103,26 @@ written-off units where they are.
 > **I6** net charge = the sum of the FULFILLED line amounts (COMPLETED: the total; FAILED: 0).
 > **I7** refunds of an intent never exceed the charge; each line is refunded at most once.
 
+**Inline Map with a Catch per iteration.** Each iteration is `FulfillItem` (Lambda) with Retry on
+`FulfillmentTransientError` and a Catch on `States.ALL` that goes to a JSONata Pass `LineUnavailable`, which returns
+`{lineId, status: UNAVAILABLE, reason}` (the reason is the Lambda's errorMessage, parsed out of the error Cause). So
+an iteration never fails: the Map always finishes with one result per line, and the decision is made afterwards
+on the whole picture. The money/stock steps after it (PartialRefund, WriteOffLines, …) deliberately have Retry but
+NO Catch: if refunding keeps failing, the execution stops FAILED with the customer still owed money, which raises
+an alarm and can be redriven, instead of carrying on to a "PARTIALLY_FULFILLED" that would be a lie. The refund also
+refuses a line that is FULFILLED, so a wrong "unavailable" (e.g. the Lambda timed out after its transaction
+committed) can't refund an item that shipped. The refund input is only line ids; amounts are read from the order.
+
 **Rollout (expand → migrate).** Commit A deployed the Lambdas, the line refund, the write-off table and per-line
 prices, but nothing in the saga called them. The changed live functions (create_order, reserve_inventory,
 release_inventory, DemoPay refund) stayed backward compatible: reserve_inventory's new `lines` output is dropped
 by the old definition's ResultSelector, and release_inventory's per-line logic only applies when a line has been
 fulfilled or written off. `scripts/fulfillment_check.py` drove the new pieces by direct invoke on a real order, and the full
-e2e suite re-ran to prove the old path unchanged. Commit B switches the state machine. Executions that are already
-running keep the definition they started with.
+e2e suite re-ran to prove the old path unchanged. Commit B switches the state machine (0 added, 20 changed, 0
+destroyed: nothing removed). Executions that are already running keep the definition they started with:
+`scripts/inflight_check.py` placed slow orders during B's deploy and read each execution's definition with
+`DescribeStateMachineForExecution`. Orders that completed on the old definition keep their units in `reserved`
+for good (they were never fulfilled per line), which is why I5 sums all five counters.
 
 ### Trade-offs / alternatives considered
 | Option | Why not (here) |

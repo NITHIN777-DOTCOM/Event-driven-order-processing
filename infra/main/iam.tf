@@ -64,11 +64,17 @@ data "aws_iam_policy_document" "get_order" {
 data "aws_iam_policy_document" "list_orders" {
   source_policy_documents = [data.aws_iam_policy_document.lambda_base["list_orders"].json]
 
-  # Query on the index only: this function can't read the base table or scan it.
+  # Query on the index; no Scan anywhere. BatchGetItem reads the line details of exactly the orders that Query
+  # returned from the caller's own partition (step 2.3; the index doesn't project them).
   statement {
     sid       = "QueryRecentOrdersIndex"
     actions   = ["dynamodb:Query"]
     resources = ["${aws_dynamodb_table.orders.arn}/index/gsi1"]
+  }
+  statement {
+    sid       = "BatchGetLineDetailsOfListedOrders"
+    actions   = ["dynamodb:BatchGetItem"]
+    resources = [aws_dynamodb_table.orders.arn]
   }
 }
 
@@ -440,14 +446,14 @@ data "aws_iam_policy_document" "sfn" {
     sid     = "InvokeSagaLambdas"
     actions = ["lambda:InvokeFunction"]
     resources = flatten([
-      for key in ["reserve_inventory", "request_payment", "refund_payment", "release_inventory"] : [
+      for key in ["reserve_inventory", "request_payment", "fulfill_item", "refund_payment", "write_off_lines", "release_inventory"] : [
         aws_lambda_function.fn[key].arn,
         "${aws_lambda_function.fn[key].arn}:*", # versions/aliases
       ]
     ])
   }
   statement {
-    sid       = "MarkOrderCompleted"
+    sid       = "MarkOrderCompletedPartiallyFulfilledOrFailed"
     actions   = ["dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.orders.arn]
   }

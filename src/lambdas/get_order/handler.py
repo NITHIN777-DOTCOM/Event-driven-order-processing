@@ -18,6 +18,7 @@ from common.auth import Forbidden, Unauthorized, caller_from
 from common.feed import build_feed, console_links
 from common.http import response
 from common.logger import get_logger
+from common.orders import public_lines
 from common.tracing import instrument_aws_sdk
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
@@ -57,6 +58,9 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         return response(404, {"error": f"Order {order_id} not found"})
 
     body = {key: value for key, value in order.items() if key not in HIDDEN_ATTRIBUTES}
+    # Every line with its id and amount (derived the same way for pre-2.3 orders) and, after fulfillment,
+    # its state (FULFILLED / WRITTEN_OFF) and refund.
+    body["items"] = public_lines(order)
     body["feed"] = build_feed(order)
     body["consoleLinks"] = console_links(order, REGION, ORDERS_TABLE, WORKFLOW_LOG_GROUP)
 

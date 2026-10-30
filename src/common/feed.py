@@ -16,6 +16,7 @@ from urllib.parse import quote
 API = "API Gateway"
 QUEUE = "SQS → Step Functions"
 INVENTORY = "Lambda · inventory"
+WAREHOUSE = "Lambda · fulfillment"
 PAYMENT = "Lambda · payment"
 WEBHOOK = "Webhook · DemoPay"
 WORKFLOW = "Step Functions"
@@ -95,6 +96,14 @@ def rows_for(entry: dict[str, Any], order: dict[str, Any]) -> list[dict[str, Any
         return [row(PAYMENT, detail.replace("refunded to DemoPay", "refunded to wallet"))]
     if status == "INVENTORY_RELEASED":
         return [row(INVENTORY, "Stock released back to inventory")]
+    if status == "ITEM_FULFILLED":  # "Picked and packed 2 x Desk Mat (line L1)"
+        return [row(WAREHOUSE, detail.replace("Picked and packed", "Packed"))]
+    if status == "LINE_REFUNDED":  # "₹1,598 refunded to DemoPay for 2 x Desk Mat (line L2)"
+        return [row(PAYMENT, detail.replace("refunded to DemoPay", "refunded to wallet"), "retry")]
+    if status == "ITEM_WRITTEN_OFF":  # "1 x Desk Mat (line L2) written off: <reason>"
+        return [row(WAREHOUSE, "Unavailable: " + detail, "error")]
+    if status == "PARTIALLY_FULFILLED":
+        return [row(DATABASE, f"Order marked PARTIALLY_FULFILLED: {detail}", "retry"), row(EMAIL, "Partial delivery email sent")]
     if status == "COMPLETED":
         return [row(DATABASE, "Order marked COMPLETED"), row(EMAIL, "Confirmation email sent")]
     if status == "FAILED":

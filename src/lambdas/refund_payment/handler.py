@@ -34,7 +34,7 @@ from botocore.exceptions import ClientError
 
 from common.logger import StructuredLogger, get_logger
 from common.money import format_inr
-from common.orders import LINE_REFUNDED, find_line, history_entry, order_lines
+from common.orders import LINE_FULFILLED, LINE_REFUNDED, find_line, history_entry, order_lines
 from common.payments import (
     FAILED,
     REFUNDED,
@@ -128,6 +128,10 @@ def refund_lines(order_id: str, line_ids: list[str], log: StructuredLogger) -> d
     charge_amount = charge_refunded = None
     for line_id in line_ids:
         line = find_line(order, line_id)
+        if line.get("fulfillment") == LINE_FULFILLED:
+            # A shipped line is never refunded. If the Map called it unavailable (e.g. fulfill_item timed out
+            # after its transaction committed), stop here, before any money moves: an alarm, not a free item.
+            raise RuntimeError(f"Line {line_id} of {order_id} was fulfilled; refusing to refund it")
         note = f"{line['quantity']} x {line['name']}"
         result = invoke_provider_refund(
             lambda_client, PROVIDER_FUNCTION, intent_id, {"lineId": line_id, "amount": line["lineAmount"], "note": note}

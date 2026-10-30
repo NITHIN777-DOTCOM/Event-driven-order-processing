@@ -137,3 +137,20 @@ def test_payment_timeout_reason():
     rows = feed(entry("FAILED", "x"), failureReason="PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s")
 
     assert rows[0]["message"] == "Order marked FAILED: payment timeout - DemoPay did not confirm the payment within 120 s"
+
+
+def test_per_item_fulfillment_rows():
+    rows = feed(
+        entry("ITEM_FULFILLED", "Picked and packed 2 x Desk Mat (line L1)"),
+        entry("LINE_REFUNDED", "₹3,499 refunded to DemoPay for 1 x Mechanical Keyboard (line L2)"),
+        entry("ITEM_WRITTEN_OFF", "1 x Mechanical Keyboard (line L2) written off: found damaged"),
+        entry("PARTIALLY_FULFILLED", "1 of 2 items delivered - INR 3499.00 refunded for the unavailable items"),
+    )
+
+    assert [(r["service"], r["message"], r["level"]) for r in rows] == [
+        ("Lambda · fulfillment", "Packed 2 x Desk Mat (line L1)", "info"),
+        ("Lambda · payment", "₹3,499 refunded to wallet for 1 x Mechanical Keyboard (line L2)", "retry"),
+        ("Lambda · fulfillment", "Unavailable: 1 x Mechanical Keyboard (line L2) written off: found damaged", "error"),
+        ("DynamoDB", "Order marked PARTIALLY_FULFILLED: 1 of 2 items delivered - INR 3499.00 refunded for the unavailable items", "retry"),
+        ("SNS", "Partial delivery email sent", "info"),
+    ]

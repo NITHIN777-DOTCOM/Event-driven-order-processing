@@ -20,6 +20,9 @@ orders, but the state machine still runs the old definition. So this script driv
 The order is a labelled test order ("Fulfillment Check"); its status stays COMPLETED because commit A has no
 PARTIALLY_FULFILLED yet. Results are printed and written to docs/evidence/upgrade-2.3/fulfillment-check.md.
 Exit code 1 if anything fails.
+
+This is the commit A record only: from commit B on, the saga itself fulfils, refunds and writes off lines (e2e
+scenarios za-zc), so an order no longer stays COMPLETED-with-reserved-units and step 1 here would fail.
 """
 
 from __future__ import annotations

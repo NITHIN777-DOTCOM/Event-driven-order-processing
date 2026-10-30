@@ -21,7 +21,7 @@ module "tags" {
     psp_requests_queue     = "Payment requests to the mock provider DemoPay - DLQ after 5 receives"
     orders_dlq             = "Dead-letter queue for orders that failed to start the workflow 3 times"
     orders_queue           = "New orders waiting for the saga workflow to start - DLQ after 3 receives"
-    state_machine          = "Order saga - reserve inventory - request payment and wait up to 120 s for the signed webhook - complete or compensate - notify customer"
+    state_machine          = "Order saga - reserve inventory - request payment and wait up to 120 s for the signed webhook - fulfil each line - refund and write off unavailable lines - complete or compensate - notify customer"
     notifications_topic    = "Customer order status emails published by the saga workflow"
     ops_alerts_topic       = "Operational alarms for the order saga - DLQ depth - errors - failed executions"
     holds_table            = "Checkout holds - stock set aside for one user for 10 minutes - ACTIVE then CONSUMED or RELEASED or EXPIRED - plus one USER pointer per user"

@@ -79,6 +79,8 @@ SIMULATE_MODES = (
     "none", "payment_declined", "payment_flaky", "out_of_stock", "poison",
     # step 2.1: the asynchronous payment and its webhook
     "payment_timeout", "payment_late", "webhook_duplicate", "webhook_bad_signature",
+    # step 2.3: one line (simulateLine: 1..n or "all"; default the last line) is found damaged after payment
+    "item_unavailable",
 )
 
 
@@ -210,11 +212,23 @@ def validate_request(body: dict[str, Any]) -> dict[str, Any]:
     if simulate not in SIMULATE_MODES:
         raise BadRequest(f"simulate must be one of: {', '.join(SIMULATE_MODES)}")
 
+    simulate_line = body.get("simulateLine")
+    if simulate_line is not None:
+        if simulate != "item_unavailable":
+            raise BadRequest('simulateLine is only used with simulate "item_unavailable"')
+        line_ok = simulate_line == "all" or (
+            isinstance(simulate_line, int) and not isinstance(simulate_line, bool) and 1 <= simulate_line <= len(normalised_items)
+        )
+        if not line_ok:
+            raise BadRequest(f'simulateLine must be a line number from 1 to {len(normalised_items)}, or "all"')
+
     hold_id = body.get("holdId")
     if hold_id is not None and (not isinstance(hold_id, str) or not HOLD_ID_PATTERN.match(hold_id)):
         raise BadRequest("holdId must look like HOLD-YYYYMMDD-<10 hex characters>")
 
     normalised: dict[str, Any] = {"customerName": name.strip(), "items": normalised_items, "simulate": simulate}
+    if simulate_line is not None:
+        normalised["simulateLine"] = simulate_line
     if hold_id:
         normalised["holdId"] = hold_id
     return normalised
@@ -287,6 +301,7 @@ def build_order(request: dict[str, Any], idempotency_key: str, caller: Caller) -
         "status": PENDING,
         "statusHistory": [history_entry(PENDING, "Order received via API", now)],
         "simulate": request["simulate"],
+        **({"simulateLine": request["simulateLine"]} if "simulateLine" in request else {}),
         **({"holdId": request["holdId"]} if request.get("holdId") else {}),
         "createdAt": now,
         "updatedAt": now,

@@ -47,6 +47,7 @@ def test_orders_newest_first_with_limit(aws, orders):
     assert [o["orderId"] for o in body] == ["ORD-20261022-00000001", "ORD-20261022-00000002"]
     assert set(body[0]) == {
         "orderId", "createdAt", "status", "simulate", "totalAmount", "currency", "customerName", "deadLettered",
+        "items", "refundedAmount",  # step 2.3: line details from the base table
     }
 
 

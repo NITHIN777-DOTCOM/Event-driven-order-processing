@@ -262,3 +262,65 @@ def test_reserve_returns_the_lines_for_the_map(aws, load_handler):
         {"lineId": "L1", "productId": "WIRELESS-MOUSE", "quantity": 2},
         {"lineId": "L2", "productId": "MECH-KEYBOARD", "quantity": 1},
     ]
+
+
+def test_a_fulfilled_line_is_never_refunded(aws, load_handler, paid, refund):
+    """If the Map ever reported a shipped line as unavailable, no money may move for it."""
+    order = paid(load_handler)
+    load_handler("fulfill_item").lambda_handler({"orderId": order["orderId"], "lineId": "L1"}, None)
+
+    with pytest.raises(RuntimeError, match="refusing to refund"):
+        refund.lambda_handler({"orderId": order["orderId"], "lineIds": ["L1"]}, None)
+    assert ledger(aws) == [("DEBIT", TOTAL)]
+
+
+# --- The partial path, step by step (what the Map and the steps after it do) ------------------------------------
+def test_partial_fulfillment_keeps_money_and_stock_consistent(aws, load_handler, paid, refund, fulfill, write_off):
+    order = paid(load_handler, simulate="item_unavailable", simulateLine=2)
+    fulfill.lambda_handler({"orderId": order["orderId"], "lineId": "L1"}, None)
+    with pytest.raises(fulfill.ItemUnavailable):
+        fulfill.lambda_handler({"orderId": order["orderId"], "lineId": "L2"}, None)
+
+    refund.lambda_handler({"orderId": order["orderId"], "lineIds": ["L2"]}, None)
+    write_off.lambda_handler({"orderId": order["orderId"], "lines": [{"lineId": "L2", "reason": "damaged"}]}, None)
+
+    entries = ledger(aws)
+    net = sum(a for t, a in entries if t == "DEBIT") - sum(a for t, a in entries if t == "CREDIT")
+    assert net == MOUSE_LINE  # I6: exactly the fulfilled line
+    assert [i.get("fulfillment") for i in stored(aws, order)["items"]] == ["FULFILLED", "WRITTEN_OFF"]
+    assert counters(aws, "MECH-KEYBOARD") == {"stock": 1, "held": 0, "reserved": 0, "sold": 0, "writtenOff": 1}
+    assert_i5(aws)
+
+
+# --- Line details in the order APIs (owner only) ----------------------------------------------------------------
+def test_get_order_returns_each_line_with_its_outcome(aws, load_handler, paid, refund, write_off):
+    order = paid(load_handler)
+    refund.lambda_handler({"orderId": order["orderId"], "lineIds": ["L2"]}, None)
+    write_off.lambda_handler({"orderId": order["orderId"], "lines": [{"lineId": "L2", "reason": "damaged"}]}, None)
+
+    body = json.loads(load_handler("get_order").lambda_handler(api_event(path_parameters={"id": order["orderId"]}), None)["body"])
+
+    l1, l2 = body["items"]
+    assert (l1["lineId"], l1["lineAmount"], l1.get("fulfillment")) == ("L1", 1598, None)
+    assert (l2["lineId"], l2["fulfillment"], l2["refundedAmount"], l2["writeOffReason"]) == ("L2", "WRITTEN_OFF", 3499, "damaged")
+    assert "index" not in l1
+
+
+def test_line_details_are_only_for_the_owner(aws, load_handler):
+    from conftest import EMAIL_B, USER_B, jwt_claims
+
+    order = seed_order(aws.orders, gsi1pk=f"USER#{USER_A}", gsi1sk=f"2026-10-22T10:00:00.000Z#ORD-20261022-abcdef12")
+    as_b = api_event(path_parameters={"id": order["orderId"]}, claims=jwt_claims(USER_B, EMAIL_B))
+
+    assert load_handler("get_order").lambda_handler(as_b, None)["statusCode"] == 404
+    listed = json.loads(load_handler("list_orders").lambda_handler(api_event(claims=jwt_claims(USER_B, EMAIL_B)), None)["body"])
+    assert listed["orders"] == []
+
+
+def test_list_orders_includes_line_details(aws, load_handler):
+    seed_order(aws.orders, gsi1pk=f"USER#{USER_A}", gsi1sk="2026-10-22T10:00:00.000Z#ORD-20261022-abcdef12", refundedAmount=Decimal("3499"))
+
+    listed = json.loads(load_handler("list_orders").lambda_handler(api_event(), None)["body"])["orders"]
+
+    assert [line["lineId"] for line in listed[0]["items"]] == ["L1", "L2"]
+    assert listed[0]["refundedAmount"] == 3499

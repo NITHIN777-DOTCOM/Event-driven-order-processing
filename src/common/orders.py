@@ -63,6 +63,11 @@ def order_lines(order: dict[str, Any]) -> list[dict[str, Any]]:
     return lines
 
 
+def public_lines(order: dict[str, Any]) -> list[dict[str, Any]]:
+    """The lines as the API returns them (GET /orders, GET /orders/{id}): id, amount, fulfillment, refund."""
+    return [{key: value for key, value in line.items() if key != "index"} for line in order_lines(order)]
+
+
 def find_line(order: dict[str, Any], line_id: str) -> dict[str, Any]:
     for line in order_lines(order):
         if line["lineId"] == line_id:

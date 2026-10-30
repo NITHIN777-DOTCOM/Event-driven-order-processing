@@ -114,8 +114,19 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
   writtenOff against the write-off records since `seededAt`; scenario a asserts an old-definition COMPLETED order
   moves nothing to `sold`. `scripts/fulfillment_check.py` = live direct-invoke check of the new pieces.
   jsonata-python==0.7.1 pinned in requirements-dev.txt (Map summary expression tests, commit B).
-- Next: deploy A, run fulfillment_check.py AND the full e2e (old path unchanged), then commit B (Map + Choice +
-  PARTIALLY_FULFILLED + item_unavailable/simulateLine + frontend), then docs.
+- Commit A `25a6b90`: CI + Deploy green (15 added, 22 changed, 0 destroyed). Live: fulfillment_check.py 19/19
+  (order ORD-20261030-399cf6c3: concurrent L1+L3 fulfil, L2 written off + refunded once, I7 probe RefundRejected,
+  I6 net 15395 = L1 + L3); full e2e 26/26 on A (old path unchanged; scenario a: sold unchanged). Evidence:
+  docs/evidence/upgrade-2.3/fulfillment-check.md, e2e-commit-A.md.
+- Commit B: Map FulfillItems (inline, MaxConcurrency 5, Catch per iteration -> LineUnavailable) + SummarizeFulfillment
+  (JSONata, unit-tested with jsonata-python on the real ASL) + Choice FulfillmentOutcome; PartialRefund /
+  WriteOffLines / MarkOrderPartiallyFulfilled / NotifyCustomerPartial; RefundAllLines / WriteOffAllLines /
+  DescribeAllUnavailable -> MarkOrderFailed. create_order accepts item_unavailable + simulateLine (1..n | "all").
+  refund_payment refuses FULFILLED lines. GET /orders(/{id}) return lines (list: BatchGetItem). Feed rows, tracker
+  "Delivered / Cancelled — refunded", "Partially fulfilled" badge. e2e: a/y/z now expect sold; new za/zb/zc; I3
+  per line; I6/I7 for every order. capture_ui: partial order + wallet credit. scripts/inflight_check.py.
+  Plan: 0 added, 20 changed, 0 destroyed. Unit tests 266, 93%.
+- Next: deploy B (run inflight_check.py during it), seed, full e2e, capture_ui, then the docs commit.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
