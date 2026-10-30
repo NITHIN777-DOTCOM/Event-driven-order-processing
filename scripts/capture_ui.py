@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -221,10 +222,8 @@ class Run:
         order_id = self.checkout(page, "Slow warehouse (cancel after payment)")
         cancel_button = page.get_by_test_id("cancel-order")
         expect(cancel_button).to_be_visible(timeout=20_000)
-        for _ in range(40):  # cancel once it is paid, to show the full refund
-            if self.api_json("GET", f"/orders/{order_id}")["status"] == "PAYMENT_CAPTURED":
-                break
-            page.wait_for_timeout(500)
+        # Cancel once the tracker itself shows the payment (its 1.5 s poll can lag the API), to show the full refund.
+        expect(page.get_by_text(re.compile(r"^Paid ₹[\d,]+ with DemoPay$"))).to_be_visible(timeout=20_000)
         self.shot(page, "desktop-10d-tracker-cancel-button")
         cancel_button.click()
         expect(page.get_by_test_id("confirm-cancel")).to_be_visible()
@@ -379,6 +378,7 @@ def write_index(run: Run) -> None:
 
 
 def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")  # results print "₹"; a Windows console or redirect defaults to cp1252
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", help="storefront URL (default: terraform output frontend_url)")
     args = parser.parse_args()

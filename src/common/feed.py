@@ -128,6 +128,7 @@ def rows_for(entry: dict[str, Any], order: dict[str, Any]) -> list[dict[str, Any
     if status == "FULFILLING":  # step 2.4: BeginFulfillment, the point of no return
         return [row(WAREHOUSE, "Fulfillment started: the order can no longer be cancelled")]
     if status == "CANCEL_REQUESTED":  # "Cancellation requested by the customer: <reason>"
+        detail = detail.removesuffix(": Cancelled by the customer")  # orders cancelled before the step 2.4 fix
         return [row(API, detail or "Cancellation requested by the customer", "retry")]
     if status == "CANCEL_REJECTED":  # "Cancel request rejected: the order was already FULFILLING"
         return [row(API, detail.replace("Cancel request rejected:", "Cancel rejected (too late):"), "error")]

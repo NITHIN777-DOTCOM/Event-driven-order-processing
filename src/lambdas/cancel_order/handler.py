@@ -135,7 +135,8 @@ def request_cancel(order: dict[str, Any], reason: str, log: StructuredLogger) ->
             ReturnValues="UPDATED_OLD",
             **status_update(
                 CANCEL_REQUESTED,
-                f"Cancellation requested by the customer: {reason}",
+                # No reason given: don't repeat the default ("... by the customer: Cancelled by the customer").
+                "Cancellation requested by the customer" + ("" if reason == DEFAULT_REASON else f": {reason}"),
                 {"cancelRequestedAt": now, "cancelReason": reason},
                 condition=f"#status IN ({', '.join(placeholders)}) AND attribute_not_exists(cancelRequestedAt) AND cancellable = :true",
                 condition_values={**placeholders, ":true": True},

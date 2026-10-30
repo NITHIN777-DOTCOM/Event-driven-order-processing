@@ -465,3 +465,19 @@ def test_payment_manual_with_no_trigger_charges_nothing_and_sends_no_callback(aw
 
     assert ledger(aws) == [] and payments.callbacks == []
     assert intent(aws)["status"] == "REQUESTED"  # left to the saga's 120 s timeout, exactly like payment_timeout
+
+
+@pytest.mark.parametrize(
+    "body, detail",
+    [
+        (None, "Cancellation requested by the customer"),  # the UI sends no reason: the default isn't repeated
+        ({"reason": "ordered the wrong size"}, "Cancellation requested by the customer: ordered the wrong size"),
+    ],
+)
+def test_the_history_entry_names_the_reason_once(aws, saga, cancel, body, detail):
+    saga.placed()
+
+    assert call(cancel, body=body)[0] == 202
+
+    entry = next(e for e in stored(aws)["statusHistory"] if e["status"] == "CANCEL_REQUESTED")
+    assert entry["detail"] == detail

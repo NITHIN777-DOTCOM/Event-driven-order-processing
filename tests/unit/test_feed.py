@@ -185,3 +185,9 @@ def test_cancelled_with_nothing_charged():
     rows = feed(entry("CANCELLED", "Cancelled by the customer - nothing was charged"))
 
     assert rows[0]["message"] == "Order marked CANCELLED: nothing was charged"
+
+
+def test_cancel_request_without_a_reason_is_not_repeated():
+    rows = feed(entry("CANCEL_REQUESTED", "Cancellation requested by the customer: Cancelled by the customer"))
+
+    assert rows[0]["message"] == "Cancellation requested by the customer"

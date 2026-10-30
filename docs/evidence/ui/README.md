@@ -6,15 +6,16 @@ After each order the DemoPay ledger was checked through `GET /wallet`.
 
 | Scenario | orderId | Tracker result | Wallet DEBITs (expected) |
 |---|---|---|---|
-| Normal | `ORD-20261030-0a3942e3` | Order completed; balance 1,000,000 -> 996,501; hold consumed: True | 1 (1) ✓ |
-| Payment glitch (retries) | `ORD-20261030-000d7d88` | Order completed | 1 (1) ✓ |
-| Payment declined | `ORD-20261030-51a1bdcc` | Order failed | 0 (0) ✓ |
-| Item damaged (partial refund) | `ORD-20261030-99c1539b` | Order partially fulfilled; CREDITs [1799] (L2 = 1799) | 1 (1) ✓ |
-| Low balance (real decline) | `ORD-20261030-6ddffc4f` | Order failed | 0 (0) ✓ |
-| Duplicate test (3 requests) | `ORD-20261030-1ec3ba8d` | Order completed · 1 order | 1 (1) ✓ |
-| Late payment (auto-refund) | `ORD-20261030-3770ba81` | Order failed; refund row shown: True | 1 (1) ✓ |
-| Poison message (to DLQ) | `ORD-20261030-9d978920` | Stuck in the dead-letter queue | 0 (0) ✓ |
-| Checkout hold: expired, held again, released on leaving | `-` | HOLD-20261030-a27867137b -> HOLD-20261030-048d4d2da8; released: True | 0 (0) ✓ |
+| Normal | `ORD-20261030-fceed1dd` | Order completed; balance 1,000,000 -> 996,501; hold consumed: True | 1 (1) ✓ |
+| Payment glitch (retries) | `ORD-20261030-8826857e` | Order completed | 1 (1) ✓ |
+| Payment declined | `ORD-20261030-bd3afcbb` | Order failed | 0 (0) ✓ |
+| Item damaged (partial refund) | `ORD-20261030-305562b3` | Order partially fulfilled; CREDITs [1799] (L2 = 1799) | 1 (1) ✓ |
+| Cancel after payment | `ORD-20261030-5eb11ebb` | Order cancelled; Cancelled — refunded ₹1,299; CREDITs [1299] | 1 (1) ✓ |
+| Low balance (real decline) | `ORD-20261030-034e71e4` | Order failed | 0 (0) ✓ |
+| Duplicate test (3 requests) | `ORD-20261030-f9b6decd` | Order completed · 1 order | 1 (1) ✓ |
+| Late payment (auto-refund) | `ORD-20261030-46b99269` | Order failed; refund row shown: True | 1 (1) ✓ |
+| Poison message (to DLQ) | `ORD-20261030-57fb2f10` | Stuck in the dead-letter queue | 0 (0) ✓ |
+| Checkout hold: expired, held again, released on leaving | `-` | HOLD-20261030-8463aab849 -> HOLD-20261030-407d7a122f; released: True | 0 (0) ✓ |
 
 Browser console errors during the run: 0
 
@@ -91,6 +92,22 @@ Browser console errors during the run: 0
 ### desktop-10c-wallet-partial-credit
 
 ![desktop-10c-wallet-partial-credit](desktop-10c-wallet-partial-credit.png)
+
+### desktop-10d-tracker-cancel-button
+
+![desktop-10d-tracker-cancel-button](desktop-10d-tracker-cancel-button.png)
+
+### desktop-10e-tracker-cancel-confirm
+
+![desktop-10e-tracker-cancel-confirm](desktop-10e-tracker-cancel-confirm.png)
+
+### desktop-10f-tracker-cancelled
+
+![desktop-10f-tracker-cancelled](desktop-10f-tracker-cancelled.png)
+
+### desktop-10g-wallet-cancel-refund
+
+![desktop-10g-wallet-cancel-refund](desktop-10g-wallet-cancel-refund.png)
 
 ### desktop-11-checkout-insufficient-balance
 
