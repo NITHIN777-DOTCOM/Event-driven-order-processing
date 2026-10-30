@@ -135,6 +135,7 @@ cancellation.** Report: docs/evidence/upgrade-2.3-report.md.
   console errors. Evidence: docs/evidence/upgrade-2.3-fulfillment.md (+ upgrade-2.3/).
 - Executions per order: old definition 5 states, 1 line 9, 3-line partial 14. Map 0.14-0.23 s.
 - Known nit: the write-off feed row repeats the item name (the reason is fulfill_item's message).
+- Docs commit `2a6ca16`: CI 41036078786 + Deploy 41036264119 both green (recorded after they finished).
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).

@@ -98,5 +98,5 @@
    `inflight_check.py` and `fulfillment_check.py` are labelled and stay as history.
 
 10. **Git.** A `25a6b90` (CI 41028903864, Deploy 41029064222), B `89f355f` (CI 41032228377, Deploy 41032444445),
-    B fix `e464e66` (CI 41034908817, Deploy 41035114664), all green and pushed. Docs commit: see `docs/progress.md`
-    (its CI/Deploy are recorded there after they finish).
+    B fix `e464e66` (CI 41034908817, Deploy 41035114664), all green and pushed. Docs commit `2a6ca16` (CI 41036078786, Deploy
+    41036264119), green; recorded by the follow-up commit that adds this line.
