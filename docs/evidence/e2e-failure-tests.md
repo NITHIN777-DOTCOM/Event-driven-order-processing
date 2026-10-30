@@ -1,11 +1,11 @@
-# End-to-end tests: every saga path, with DemoPay money invariants (I1-I4)
+# End-to-end tests: every saga path, with DemoPay money and stock invariants (I1-I9)
 
 Run: 2026-10-30 13:22:41 UTC · Region: ap-south-1 · API: `https://8kyxed1rec.execute-api.ap-south-1.amazonaws.com`
 Command: `python scripts/e2e_test.py` (after `python scripts/seed_inventory.py`) · Duration: 361s
 
 **Result: 35/35 scenarios passed.**
 
-| # | Scenario | Result | orderId | Intent · ledger (I1-I4) | Execution (console) |
+| # | Scenario | Result | orderId | Intent · ledger (I1-I9) | Execution (console) |
 |---|----------|--------|---------|--------------------------|---------------------|
 | a | simulate=none -> COMPLETED, stock decreased, wallet debited once | PASS | `ORD-20261030-b94dfc11` | SUCCEEDED · ledger 1 DEBIT / 0 CREDIT, net ₹3499 | [open](https://ap-south-1.console.aws.amazon.com/states/home?region=ap-south-1#/v2/executions/details/arn:aws:states:ap-south-1:876889172858:execution:order-saga-workflow:ORD-20261030-b94dfc11) |
 | b | payment_declined -> FAILED, stock restored by compensation | PASS | `ORD-20261030-10d86d8e` | FAILED · ledger 0 DEBIT / 0 CREDIT, net ₹0 | [open](https://ap-south-1.console.aws.amazon.com/states/home?region=ap-south-1#/v2/executions/details/arn:aws:states:ap-south-1:876889172858:execution:order-saga-workflow:ORD-20261030-10d86d8e) |

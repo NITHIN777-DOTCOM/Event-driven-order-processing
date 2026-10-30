@@ -3,8 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.4 — customer cancellation mid-saga: IN PROGRESS (commit A, expand; cancel switched OFF).**
-Step 2.3 is DONE (2026-10-30, report docs/evidence/upgrade-2.3-report.md).
+**Upgrade step 2.4 — customer cancellation mid-saga: DONE (2026-10-30, report docs/evidence/upgrade-2.4-report.md).**
+Next: upgrade Phase 3 (3.1 oversell race test). Step 2.3 is DONE (report docs/evidence/upgrade-2.3-report.md).
 (Step-by-step notes for 2.1 to 2.4 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
@@ -134,7 +134,7 @@ Step 2.3 is DONE (2026-10-30, report docs/evidence/upgrade-2.3-report.md).
   PASS (ORD-20261030-62b512cd started 4.1 s before the update, finished on the old definition). UI suite 9/9, 0
   console errors. Evidence: docs/evidence/upgrade-2.3-fulfillment.md (+ upgrade-2.3/).
 - Executions per order: old definition 5 states, 1 line 9, 3-line partial 14. Map 0.14-0.23 s.
-- Known nit: the write-off feed row repeats the item name (the reason is fulfill_item's message).
+- Known nit (fixed in step 2.4): the write-off feed row repeated the item name.
 - Docs commit `2a6ca16`: CI 41036078786 + Deploy 41036264119 both green (recorded after they finished).
 
 ### Step 2.4 (customer cancellation mid-saga)
@@ -158,7 +158,23 @@ Step 2.3 is DONE (2026-10-30, report docs/evidence/upgrade-2.3-report.md).
 - Commit A: plan 16 added, 41 changed, 0 destroyed (changes = new code hashes, policies re-read, the definition's
   formatting only). Unit tests 303, 93%. Pre-APPLY review: the losing webhook (success or decline) also answers the
   token with SendTaskFailure "OrderCancelled", and a retried cancel answers it whenever the intent is not SUCCEEDED, so a
-  cancel Lambda that dies between its write and SendTaskFailure still reaches the cancel branch. Next: APPLY approval, push, full e2e + UI on A, then the cleanup.
+  cancel Lambda that dies between its write and SendTaskFailure still reaches the cancel branch.
+- Commit A `eb9a4ab`: CI 41043851030 + Deploy 41044113358 green (16 added, 22 changed, 0 destroyed). e2e 28/29 (g:
+  the poison message was in the DLQ, but a 10-message peek with nothing hidden missed it among 27), then 29/29; UI
+  9/9. Evidence docs/evidence/upgrade-2.4/e2e-commit-A.md.
+- Legacy cleanup (APPLY): 505 scanned, 233 marked, 0 units moved; --check PASS before and after; re-run finds 0.
+- e2e g made deterministic (review): DLQ count must rise by exactly 1, then a sweep with VisibilityTimeout 30 until
+  the message is found or every message seen, then visibility 0 for all; nothing deleted.
+- Commit B `48e7d8e` (APPLY, incl. the SFN GetItem): state machine cancel branch + CheckCancelBeforeFailing (the
+  timeout + cancel case ends CANCELLED; fallback Catch -> MarkOrderFailed), CANCEL_ENABLED=true, storefront, feed,
+  refund note. CI 41060910418 + Deploy 41061113800 green (0 added, 21 changed). inflight_check PASS: 2 straddled on
+  the old definition, 13 old orders 409 NOT_CANCELLABLE; the cancel Lambda flipped ~2 min before the state machine
+  (the stamp held). e2e 35/35 (race x20: 14 nothing charged, 4 late charge refunded, 2 payment won, 0 both); I1-I9.
+- B fix `fd8709a`: the CANCEL_REQUESTED entry names the reason once; capture_ui waits for the tracker, prints UTF-8.
+  CI 41064702078 + Deploy 41065249876 green. UI 10/10. Unit tests 327, 93%.
+- States per one-line COMPLETED order 9 -> 12; cancel while waiting 8; after payment 12.
+- Docs commit: evidence docs/evidence/upgrade-2.4-cancellation.md, report, README, interview-prep section 13 numbers +
+  debugging story. CI/Deploy run ids: see the report's Git line.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
@@ -240,8 +256,9 @@ Step 2.3 is DONE (2026-10-30, report docs/evidence/upgrade-2.3-report.md).
   Evidence: docs/evidence/phase5-cicd.md.
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
-## Next (upgrade step 2.4)
-- Mid-saga cancellation: commit A in progress (see "Step 2.4" above).
+## Next (upgrade Phase 3)
+- 3.1 oversell race test, then 3.2 invariant/chaos checker, 3.3 k6 load test, 3.4 Standard vs Express + cost per
+  1,000 orders, 3.5 README rewrite + demo video. Wait for the step spec.
 
 ## Known limitations / ideas (good viva points)
 - (Fixed in 1.2) Wallets/orders are keyed by the Cognito `sub`; the API has a JWT authorizer.
@@ -258,16 +275,3 @@ Step 2.3 is DONE (2026-10-30, report docs/evidence/upgrade-2.3-report.md).
   run the tests with `.venv\Scripts\python -m pytest --cov=src`.
 - `terraform.tfvars` files are gitignored; copy them from `*.tfvars.example` on a new machine.
 - In Git Bash, set `MSYS_NO_PATHCONV=1` before AWS CLI calls that take `/aws/...` log group names.
-
-### Step 2.4 resume point (2026-10-30, session cut by usage limit)
-- Commit A `eb9a4ab` live: CI 41043851030 + Deploy 41044113358 green (16 added, 22 changed, 0 destroyed).
-- A e2e run 1: 28/29. Only g failed: the poison message WAS in the DLQ (27 msgs, never purged) but a single
-  10-message peek missed it. Probe fixed (`dlq_has`, 15 peeks). Re-run of the e2e + capture_ui on A was started in
-  the background (logs in the session scratchpad); check its result first.
-- Still to do on A: the legacy migration dry-run, then WAIT for "APPLY", then `--apply` + `--check`.
-- Commit B (uncommitted): ASL cancel branch, the cancel-aware Choice before MarkOrderFailed + unit tests, feed rows +
-  write-off nit, get_order canCancel, frontend (Cancel button/confirm/409 messages, Cancelled badge, summary),
-  wallet CREDIT note "(order cancelled)", script terminal statuses, e2e zd-zi (incl. a 20-order race) + I8/I9,
-  inflight_check for 2.4. Unit suite green, 93% coverage; frontend tsc OK.
-- Left for B: capture_ui cancel screenshots, remove the timeout-cancel item from interview-prep Known gaps, show
-  B's plan + IAM diff (new SFN dynamodb:GetItem) and WAIT for APPLY, push, inflight_check during Deploy, full e2e.

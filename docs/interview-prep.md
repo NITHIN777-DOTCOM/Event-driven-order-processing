@@ -1269,7 +1269,19 @@ machine and the flag in one apply.
 | Stamp `cancellable` at order creation | The order is created before its execution starts, so it can't know which definition will run it (see How). |
 
 ### Numbers
-None recorded yet (filled in from the commit A and commit B runs).
+Live, 2026-10-30 (`docs/evidence/upgrade-2.4-cancellation.md`):
+- **Race, 20 orders** (cancel API and DemoPay's charge fired at the same moment): 14 cancel won with nothing charged,
+  4 cancel won and the losing webhook refunded the charge, 2 payment won and the cancel got 409. **0 with both.**
+  Every order passed I1-I9.
+- **Cancel -> CANCELLED:** 0.35 s while waiting for payment (zd), 0.52 s for an order from a checkout hold (zh),
+  10.18 s after payment (ze: a paid order isn't waiting on a token, so the saga acts at BeginFulfillment, after the
+  10 s demo Wait).
+- **e2e 35/35** on commit B (29 earlier scenarios + 6 cancel scenarios); 29/29 on commit A (nothing changed).
+  **327 unit tests**, 93% coverage. UI suite 10/10.
+- **Rollout:** 13 orders on the old definition asked to cancel during the Deploy, all 409 NOT_CANCELLABLE, all
+  COMPLETED; 2 executions straddled the update and finished on the old definition.
+- **Legacy cleanup:** 505 orders scanned, 233 legacy COMPLETED orders marked, 0 units moved (all reserved before the
+  last re-seed); the stock check passed before and after.
 
 ### Likely interview questions
 1. *Why SendTaskFailure and not StopExecution?* StopExecution aborts: no Catch, no compensation, so reserved stock and
@@ -1293,7 +1305,24 @@ None recorded yet (filled in from the commit A and commit B runs).
    409 NOT_CANCELLABLE for anything unstamped. The stamp records the definition the execution really runs.
 
 ### Debugging story
-None recorded yet.
+**A flaky DLQ test.** On commit A, which changed nothing on the poison path, scenario g failed: "message NOT in DLQ
+within 5 min". The start_workflow logs showed the three failed receives, so the message had to be somewhere.
+Receiving from the DLQ 30 times found 27 distinct messages, this one among them. The DLQ is never purged (it stays
+for the demo), and the test peeked once per loop with `MaxNumberOfMessages=10`. A receive returns at most 10 messages, in
+no particular order, and with `VisibilityTimeout=0` nothing it returned is hidden, so the next peek can return the
+same 10 again: with 27 queued, the one you want can be missed every time. A fix with "peek more often"
+still only lowers the odds as the queue grows. The deterministic version: (1) record the DLQ count before placing
+the order and assert it rose by exactly 1; (2) sweep: receive with `VisibilityTimeout=30`, so each receive returns
+only messages not seen yet, until the order's message is found or every message has been seen; then set every
+received message's visibility back to 0. Nothing is deleted, and the queue looks exactly as before.
+
+**What the rollout check found.** The in-flight check, running during commit B's Deploy, showed the cancel Lambda
+switched on about 2 minutes before the state machine updated, in the same `terraform apply`. Terraform updates
+independent resources in parallel, in no promised order, so for those 2 minutes the API accepted cancels while every
+execution still ran the old definition (no `OrderCancelled` Catch: a cancel would have become a FAILED order). The
+`cancellable` stamp, written by the new definition's ReserveInventory, is what kept them safe: all 13 old orders
+asked were refused with 409 NOT_CANCELLABLE. Lesson: a feature flag and the code it guards can't be assumed to
+switch together; the guard has to be a fact on the data itself.
 
 ## 14. Known gaps (and where they get fixed)
 

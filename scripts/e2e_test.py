@@ -664,14 +664,14 @@ def scenario_modify_does_not_restart(order_id: str) -> Scenario:
 def write_evidence(results: list[Scenario], duration: float) -> None:
     passed = sum(r.passed for r in results)
     lines = [
-        "# End-to-end tests: every saga path, with DemoPay money invariants (I1-I4)",
+        "# End-to-end tests: every saga path, with DemoPay money and stock invariants (I1-I9)",
         "",
         f"Run: {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC · Region: {REGION} · API: `{API}`",
         f"Command: `python scripts/e2e_test.py` (after `python scripts/seed_inventory.py`) · Duration: {duration:.0f}s",
         "",
         f"**Result: {passed}/{len(results)} scenarios passed.**",
         "",
-        "| # | Scenario | Result | orderId | Intent · ledger (I1-I4) | Execution (console) |",
+        "| # | Scenario | Result | orderId | Intent · ledger (I1-I9) | Execution (console) |",
         "|---|----------|--------|---------|--------------------------|---------------------|",
     ]
     for r in results:

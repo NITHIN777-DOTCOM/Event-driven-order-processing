@@ -31,6 +31,13 @@ At checkout, open **Test scenario** and try *Payment glitch*, *Payment declined*
   and release race safely: every transition is one transaction led by a status condition, so exactly one wins.
   Expiry is also enforced logically, because the schedule fires within about a minute, not to the second (measured).
   Stock conservation (I5) is checked for every product.
+- **Customer cancellation mid-saga, decided by one conditional write.** `POST /orders/{id}/cancel` (owner only,
+  idempotent) works while the order waits for payment or is paid but not yet being fulfilled. The cancel, the payment
+  webhook and the warehouse's `BeginFulfillment` all write to the same DynamoDB item under conditions that exclude
+  each other, so exactly one wins: never "cancelled and charged" (I9), and a cancelled order always ends at net ₹0
+  with its stock back (I8). The cancel answers the paused payment with `SendTaskFailure("OrderCancelled")`, never
+  `StopExecution`, so the saga runs its own clean-up: void or refund what's left, release stock, CANCELLED, email.
+  Proven live with a 20-order race (cancel API and DemoPay's charge fired at the same moment).
 - **Retries where they help, not where they hurt.** Transient payment errors are retried with exponential backoff (2 s → 4 s → 8 s). A permanent decline goes straight to compensation.
 - **Transactional outbox, no dual write.** `create_order` makes exactly one write: the DynamoDB transaction. The new order row *is* the outbox record. A **DynamoDB stream → EventBridge Pipe** (INSERT-only filter) delivers it to SQS, so a crash right after the write can't lose the order.
 - **Sign-in and row-level isolation.** Cognito managed login (authorization code + PKCE). API Gateway's **JWT authorizer**
@@ -39,7 +46,7 @@ At checkout, open **Test scenario** and try *Payment glitch*, *Payment declined*
   verified claims** (`sub`). Orders and wallets are keyed by the user; someone else's order is a **404**, not a 403; idempotency keys
   are scoped per user.
 - **Poison messages are isolated.** After 3 failed receives, SQS moves the message to a dead-letter queue, and a CloudWatch alarm emails the operator.
-- **100% infrastructure as code.** 156 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
+- **100% infrastructure as code.** 187 resources in the app stack plus 13 in the bootstrap stack, all Terraform, with no console clicks. Every resource is named `order-saga-*` and tagged.
 - **CI/CD with no stored keys.** GitHub Actions assumes AWS roles through **OIDC**, scoped to this repo's `main` branch (deploy) or its pull requests (read-only plan). Every merge is applied, published and smoke-tested.
 - **Close to $0 when idle.** Everything is pay-per-use: Lambda, Step Functions, on-demand DynamoDB, SQS, SNS, CloudFront and S3. There's no VPC, NAT gateway or server. The one fixed cost is the outbox pipe polling the stream, estimated at about $1.6/month (an estimate from AWS's documented polling rate, not measured; see [the evidence](docs/evidence/upgrade-1.1-outbox.md)). A $5/month budget alert is the backstop.
 
@@ -125,7 +132,10 @@ stateDiagram-v2
   ReserveInventory --> RequestPayment
   ReserveInventory --> DescribeFailure: OutOfStock or other error, nothing to undo
   RequestPayment --> RequestPayment: PaymentTransientError, retry 2s 4s 8s
-  RequestPayment --> FulfillItems: webhook SendTaskSuccess
+  RequestPayment --> BeginFulfillment: webhook SendTaskSuccess
+  RequestPayment --> RefundWhatIsLeft: OrderCancelled (customer cancelled)
+  BeginFulfillment --> FulfillItems: PAYMENT_CAPTURED to FULFILLING
+  BeginFulfillment --> RefundWhatIsLeft: a cancel came first
   state FulfillItems {
     [*] --> FulfillItem: one iteration per order line
     FulfillItem --> FulfillItem: FulfillmentTransientError, retry
@@ -145,7 +155,7 @@ stateDiagram-v2
   OrderPartiallyFulfilled --> [*]
   RefundAllLines --> WriteOffAllLines
   WriteOffAllLines --> DescribeAllUnavailable
-  DescribeAllUnavailable --> MarkOrderFailed
+  DescribeAllUnavailable --> CheckCancelBeforeFailing
   RequestPayment --> RefundPayment: PaymentDeclined (webhook) or retries exhausted
   RequestPayment --> MarkPaymentTimedOut: States.Timeout, no callback in 120 s
   MarkPaymentTimedOut --> RefundPayment
@@ -155,7 +165,14 @@ stateDiagram-v2
   OrderCompleted --> [*]
   RefundPayment --> ReleaseInventory
   ReleaseInventory --> DescribeFailure
-  DescribeFailure --> MarkOrderFailed
+  DescribeFailure --> CheckCancelBeforeFailing
+  CheckCancelBeforeFailing --> MarkOrderFailed: no cancel requested
+  CheckCancelBeforeFailing --> RefundWhatIsLeft: cancelRequestedAt set (e.g. the 120 s timeout won the race)
+  RefundWhatIsLeft --> CancelReleaseInventory: void, then refund what is left
+  CancelReleaseInventory --> MarkOrderCancelled
+  MarkOrderCancelled --> NotifyCustomerCancelled
+  NotifyCustomerCancelled --> OrderCancelled
+  OrderCancelled --> [*]
   MarkOrderFailed --> NotifyCustomerFailure
   NotifyCustomerFailure --> OrderFailed
   OrderFailed --> [*]
@@ -166,6 +183,15 @@ Reservation stays **all-or-nothing** (before payment the customer gets the whole
 or WRITTEN_OFF; the refund steps take only line ids and read the amounts from the order. PartialRefund and
 WriteOffLines retry and then fail the execution on purpose (alarm `order-saga-refund-or-write-off-errors`, then a
 redrive: both are idempotent per line).
+
+**Cancellation (step 2.4).** `BeginFulfillment` is the point of no return: after it, a cancel gets
+`409 TOO_LATE_TO_CANCEL` and the order completes normally. Before it, the cancel branch voids the payment intent at
+DemoPay (so a charge still in flight never happens), refunds whatever was charged, releases the stock and marks the
+order CANCELLED, a terminal status distinct from FAILED. Every failure path reads `cancelRequestedAt` before
+MarkOrderFailed, so a cancel that collides with the payment timeout still ends CANCELLED. Orders already running on
+the previous definition are refused with `409 NOT_CANCELLABLE` (only the new definition stamps orders `cancellable`).
+The demo scenarios `payment_slow` and `fulfillment_slow` open a 10–20 s window to press Cancel (two Wait states,
+not drawn above).
 
 Compensation runs in **reverse order**: refund first, then release stock. Both steps are idempotent (`RefundPayment` goes through DemoPay's idempotent refund and is a no-op if nothing was charged), so retries are always safe. `DescribeFailure` is a JSONata Pass state that turns a Lambda error into a readable reason such as *"PaymentDeclined: Insufficient wallet balance: ₹1,000 available, ₹5,999 needed"*. Definition: [`statemachine/order_saga.asl.json`](statemachine/order_saga.asl.json).
 
@@ -184,6 +210,10 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | Payment provider down | Requests retried by SQS (5 receives), then dead-lettered; ops alarm emails | `order-saga-psp-requests` → `order-saga-psp-dlq`; alarm `order-saga-psp-dlq-not-empty` |
 | Item damaged after payment | That line refunded and written off; the rest delivered; order PARTIALLY_FULFILLED; email lists the refunded items | Inline Map with a Catch per iteration; DemoPay line refund idempotent per (intent, line) and capped by a running `refundedAmount` (I7); write-off audit record per (order, line) |
 | Every item damaged | Every line refunded (intent REFUNDED) and written off; order FAILED "all items unavailable" | `FulfillmentOutcome` Choice → RefundAllLines → WriteOffAllLines |
+| Customer cancels while waiting for payment | CANCELLED in ~0.4 s; DemoPay's charge is voided, nothing taken; stock released | Conditional write `CANCEL_REQUESTED` → `SendTaskFailure("OrderCancelled")` on the stored token → RefundWhatIsLeft (void) → release |
+| Cancel and payment at the same moment | Exactly one wins: CANCELLED at net ₹0, or COMPLETED with the cancel refused | The webhook's capture is conditional on `attribute_not_exists(cancelRequestedAt)`; a losing webhook never resumes the saga and refunds the charge |
+| Customer cancels after paying, before fulfillment | Full refund (one CREDIT, "order cancelled"), stock released, CANCELLED | `BeginFulfillment`'s conditional write sees the cancel and takes the cancel branch |
+| Cancel during fulfillment or after the end | `409 TOO_LATE_TO_CANCEL`, nothing changes (one CANCEL_REJECTED entry) | The cancel's condition requires a status inside the window |
 | Out of stock | Order FAILED; no compensation needed | Reservation is one all-or-nothing transaction; `Catch OutOfStock` skips release |
 | Duplicate click or retry | Same order returned (`200`, `duplicate: true`); no second order | `Idempotency-Key` record written in the same transaction as the order (24 h TTL) |
 | Duplicate SQS delivery | Ignored; exactly one execution | Conditional PENDING → PROCESSING update; execution name = `orderId` |
@@ -224,8 +254,8 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 
 ## Testing & evidence
 
-- **266 unit tests, 93% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
-- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **29/29 scenarios passed** against the deployed system, signed in as two Cognito test users, including DemoPay ledger checks and money invariants, the transactional outbox, per-user isolation, the payment webhook, checkout holds and per-item fulfillment with partial refunds (money invariants I1–I7 for every order).
+- **327 unit tests, 93% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
+- **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **35/35 scenarios passed** against the deployed system, signed in as two Cognito test users, including DemoPay ledger checks and money invariants, the transactional outbox, per-user isolation, the payment webhook, checkout holds, per-item fulfillment with partial refunds and customer cancellation (invariants I1–I9 for every order).
 
 | # | Scenario | Result |
 |---|---|---|
@@ -235,7 +265,7 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | d | Out of stock → FAILED, nothing reserved, no release step | PASS |
 | e | Same Idempotency-Key ×3 → 1 order, 1 stream INSERT, 1 execution, 1 debit | PASS |
 | f | Same SQS message delivered 3× → 1 execution | PASS |
-| g | Poison message → in the orders DLQ within ~3 min (not the outbox DLQ), order stays PENDING | PASS |
+| g | Poison message → orders DLQ count +1 within ~3 min and the message found by a full no-delete sweep (not the outbox DLQ), order stays PENDING | PASS |
 | h | Wallet balance too low → real decline, nothing debited, stock released | PASS |
 | i | Crash simulation: order row written straight into DynamoDB, no SQS send → COMPLETED via the outbox | PASS |
 | j | MODIFY on an existing order (status back to PENDING) → not re-delivered | PASS |
@@ -256,17 +286,23 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 | za | 3 lines, line 2 damaged after payment → PARTIALLY_FULFILLED; 1 CREDIT for line 2 only; net = lines 1 + 3 (I6) | PASS |
 | zb | every line damaged → FAILED "all items unavailable"; every line refunded and written off; net ₹0 | PASS |
 | zc | checkout hold + damaged last line → hold consumed once, PARTIALLY_FULFILLED | PASS |
+| zd | Cancel while waiting for payment → CANCELLED "nothing was charged", DemoPay's delayed charge finds the intent VOIDED; B's cancel → 404; a repeat → same 202 | PASS |
+| ze | Cancel after payment, before fulfillment → CANCELLED, one CREDIT of the total ("order cancelled"), stock back; cancel again → 200, no second refund | PASS |
+| zf | Cancel during fulfillment → 409 TOO_LATE_TO_CANCEL, order still COMPLETED, one CANCEL_REJECTED entry | PASS |
+| zg | Cancel a COMPLETED order → 409 TOO_LATE_TO_CANCEL, order unchanged | PASS |
+| zh | Cancel an order placed from a checkout hold → CANCELLED, hold CONSUMED, stock back exactly once | PASS |
+| zi | **Race ×20**: cancel API and DemoPay's charge fired at the same moment → 14 cancel won (nothing charged), 4 cancel won (late charge refunded), 2 payment won (cancel 409); never both | PASS |
 | y | Order with its hold → hold CONSUMED, stock taken once; B can't use A's hold (400) | PASS |
 | z | Order after its hold expired → reserved afresh, hold stays EXPIRED | PASS |
 
-- **UI suite** ([`scripts/capture_ui.py`](scripts/capture_ui.py)): every scenario driven through the deployed storefront in Chromium, signing in through Cognito managed login. **8/8**, with ledger checks, the checkout-hold countdown, and a fake-clock run that shows "Your hold expired".
+- **UI suite** ([`scripts/capture_ui.py`](scripts/capture_ui.py)): every scenario driven through the deployed storefront in Chromium, signing in through Cognito managed login. **10/10**, including a cancel after payment from the tracker, with ledger checks, the checkout-hold countdown, and a fake-clock run that shows "Your hold expired".
 - **Every deploy** runs a smoke test: one real order must reach COMPLETED within 60 s with exactly one wallet debit.
-- Evidence: [`docs/evidence/`](docs/evidence/). The e2e results are in [`e2e-failure-tests.md`](docs/evidence/e2e-failure-tests.md), UI screenshots in [`ui/`](docs/evidence/ui/), monitoring in [`phase3-monitoring.md`](docs/evidence/phase3-monitoring.md), CI/CD runs in [`phase5-cicd.md`](docs/evidence/phase5-cicd.md) sign-in/isolation in [`upgrade-1.2-auth.md`](docs/evidence/upgrade-1.2-auth.md) access tokens in [`upgrade-2.0-access-tokens.md`](docs/evidence/upgrade-2.0-access-tokens.md) and checkout holds in [`upgrade-2.2-holds.md`](docs/evidence/upgrade-2.2-holds.md).
+- Evidence: [`docs/evidence/`](docs/evidence/). The e2e results are in [`e2e-failure-tests.md`](docs/evidence/e2e-failure-tests.md), UI screenshots in [`ui/`](docs/evidence/ui/), monitoring in [`phase3-monitoring.md`](docs/evidence/phase3-monitoring.md), CI/CD runs in [`phase5-cicd.md`](docs/evidence/phase5-cicd.md) sign-in/isolation in [`upgrade-1.2-auth.md`](docs/evidence/upgrade-1.2-auth.md) access tokens in [`upgrade-2.0-access-tokens.md`](docs/evidence/upgrade-2.0-access-tokens.md) checkout holds in [`upgrade-2.2-holds.md`](docs/evidence/upgrade-2.2-holds.md), per-item fulfillment in [`upgrade-2.3-fulfillment.md`](docs/evidence/upgrade-2.3-fulfillment.md) and cancellation in [`upgrade-2.4-cancellation.md`](docs/evidence/upgrade-2.4-cancellation.md).
 
 ### Observability
 
-- **Dashboard** `order-saga-dashboard`: orders started, succeeded and failed with success rate, API traffic, queue and DLQ depth, the Lambdas, DynamoDB, a table of the latest failed orders, and checkout holds (active holds, transitions, expiry lag).
-- **11 alarms → SNS `order-saga-ops-alerts`**. System faults (DLQ not empty, consumer errors, API 5xx, stuck executions, queue backlog, outbox and payment DLQs, forged webhooks, hold-expiry errors) are separate from a business alarm: failure rate > 50%, evaluated only when at least 5 orders have started. A declined payment is a normal outcome, not an incident.
+- **Dashboard** `order-saga-dashboard`: orders started, succeeded and failed with success rate, API traffic, queue and DLQ depth, the Lambdas, DynamoDB, a table of the latest failed orders, checkout holds (active holds, transitions, expiry lag), fulfillment, and cancellations (accepted, refunded, nothing charged, refused).
+- **13 alarms → SNS `order-saga-ops-alerts`**. System faults (DLQ not empty, consumer errors, API 5xx, stuck executions, queue backlog, outbox and payment DLQs, forged webhooks, hold-expiry errors, refund/write-off errors, cancellation errors) are separate from a business alarm: failure rate > 50%, evaluated only when at least 5 orders have started. A declined payment is a normal outcome, not an incident.
 - **Saved Logs Insights queries**, such as *Trace one order*, which follows one `orderId` across every Lambda and the Step Functions log.
 - **X-Ray**: one trace follows an order from `create_order` through SQS and Step Functions to DynamoDB.
 
@@ -375,7 +411,8 @@ docs/              progress log, evidence, images, resume bullets
 - [ ] Load test with k6 and a scaling graph (not run yet, so there are no throughput claims)
 - [x] Cognito sign-in for customers; wallets and orders keyed by user ID
 - [ ] Publish order events to EventBridge (analytics, a shipping service)
-- [ ] Shipping step in the saga, with a cancellation window
+- [x] Customer cancellation mid-saga, with a cancel window that closes when fulfillment starts
+- [ ] Shipping step in the saga
 - [ ] Per-customer emails with Amazon SES (SNS topic currently notifies a single subscribed inbox)
 - [x] Transactional outbox (DynamoDB Streams → Pipes) for create_order
 - [ ] AWS WAF on CloudFront, and a custom domain with ACM
