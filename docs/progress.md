@@ -174,7 +174,7 @@ Next: upgrade Phase 3 (3.1 oversell race test). Step 2.3 is DONE (report docs/ev
   CI 41064702078 + Deploy 41065249876 green. UI 10/10. Unit tests 327, 93%.
 - States per one-line COMPLETED order 9 -> 12; cancel while waiting 8; after payment 12.
 - Docs commit: evidence docs/evidence/upgrade-2.4-cancellation.md, report, README, interview-prep section 13 numbers +
-  debugging story. CI/Deploy run ids: see the report's Git line.
+  debugging story. Docs commit `cb5b002`: CI 41066644918 + Deploy 41066893944 green (0 changed; recorded after they finished).
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).

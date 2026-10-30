@@ -118,5 +118,5 @@
    Orders from `inflight_check.py` (payment_slow, "inflight_check: old-definition probe") and the race stay as history.
 
 10. **Git.** A `eb9a4ab` (CI 41043851030, Deploy 41044113358), B `48e7d8e` (CI 41060910418, Deploy 41061113800),
-    B fix `fd8709a` (CI 41064702078, Deploy 41065249876), all green and pushed. Docs commit DOCS_SHA
-    (CI DOCS_CI, Deploy DOCS_DEPLOY), green; recorded by the follow-up commit that adds this line.
+    B fix `fd8709a` (CI 41064702078, Deploy 41065249876), all green and pushed. Docs commit `cb5b002`
+    (CI 41066644918, Deploy 41066893944, 0 changed), green; recorded by the follow-up commit that adds this line.
