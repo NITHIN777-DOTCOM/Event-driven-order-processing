@@ -239,9 +239,19 @@ def validate_request(body: dict[str, Any]) -> dict[str, Any]:
         if not chaos.valid_value(chaos_value):
             raise BadRequest(f"chaos must be one of: {', '.join(chaos.PREFIX + p for p in chaos.POINTS)}")
 
+    # E1/E2/E5: marks the order as one of a chaos harness run; injected faults touch only such orders.
+    chaos_run = body.get("chaosRun")
+    if chaos_run is not None:
+        if not chaos.enabled():
+            raise BadRequest("chaos is disabled")
+        if not chaos.valid_run_id(chaos_run):
+            raise BadRequest(f"chaosRun must be 1-{chaos.RUN_ID_MAX} letters, digits or '-'")
+
     normalised: dict[str, Any] = {"customerName": name.strip(), "items": normalised_items, "simulate": simulate}
     if chaos_value is not None:
         normalised["chaos"] = chaos_value
+    if chaos_run is not None:
+        normalised["chaosRun"] = chaos_run
     if simulate_line is not None:
         normalised["simulateLine"] = simulate_line
     if hold_id:
@@ -318,6 +328,7 @@ def build_order(request: dict[str, Any], idempotency_key: str, caller: Caller) -
         "simulate": request["simulate"],
         **({"simulateLine": request["simulateLine"]} if "simulateLine" in request else {}),
         **({"chaos": request["chaos"]} if "chaos" in request else {}),
+        **({"chaosRun": request["chaosRun"]} if "chaosRun" in request else {}),
         **({"holdId": request["holdId"]} if request.get("holdId") else {}),
         "createdAt": now,
         "updatedAt": now,

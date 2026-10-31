@@ -27,27 +27,15 @@ data "aws_iam_policy_document" "lambda_base" {
     resources = ["*"]
   }
 
-  # Step 3.2: the AWS FIS extension of a FIS-target function reads its fault configuration from the config prefix
-  # (read only; FIS itself writes there with the experiment role). Exactly the two grants the FIS docs list.
+  # Step 3.2: a fault-target function reads the one fault configuration object (src/common/chaos.py), and only
+  # while CHAOS_ENABLED is true. Read only, that object only; no ListBucket (a missing object then reads as
+  # AccessDenied instead of NoSuchKey, which the code treats the same: no fault).
   dynamic "statement" {
-    for_each = contains(local.fis_target_functions, each.key) ? [1] : []
+    for_each = contains(local.fault_target_functions, each.key) ? [1] : []
     content {
-      sid       = "FisExtensionListConfigPrefix"
-      actions   = ["s3:ListBucket"]
-      resources = [aws_s3_bucket.fis_config.arn]
-      condition {
-        test     = "StringLike"
-        variable = "s3:prefix"
-        values   = ["${local.fis_config_prefix}/*"]
-      }
-    }
-  }
-  dynamic "statement" {
-    for_each = contains(local.fis_target_functions, each.key) ? [1] : []
-    content {
-      sid       = "FisExtensionReadConfig"
+      sid       = "ReadChaosFaultConfig"
       actions   = ["s3:GetObject"]
-      resources = ["${aws_s3_bucket.fis_config.arn}/${local.fis_config_prefix}/*"]
+      resources = ["${aws_s3_bucket.fis_config.arn}/${local.chaos_fault_key}"]
     }
   }
 }

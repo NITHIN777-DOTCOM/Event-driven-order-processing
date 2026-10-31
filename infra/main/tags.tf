@@ -29,9 +29,6 @@ module "tags" {
     client_ids_parameter   = "Cognito app client ids for the hold duration rule - storefront 600 s - automation client may ask for 30 to 600 s"
     write_offs_table       = "Audit of written-off order lines - damaged or missing after payment - one item per orderId and lineId - units never back on sale"
     audit_schedule_group   = "Schedules of the invariant auditor - hourly reconciliation of orders - payments - DemoPay ledger and stock - I1 to I9"
-    fis_config_bucket      = "AWS FIS fault configurations for the order-saga Lambdas - written by running experiments only - expired after 1 day"
-    fis_e1_errors          = "Chaos E1 - 30 percent invocation errors on the saga Lambdas for 10 min - stop condition order-saga-invariant-violation"
-    fis_e2_delays          = "Chaos E2 - 25 s delay on half the DemoPay and webhook invocations for 10 min - pushes payments past the 120 s timeout"
-    fis_e5_refund_outage   = "Chaos E5 - refund outage - all refund-payment invocations fail for 6 min - parked executions are redriven afterwards"
+    fis_config_bucket      = "Chaos fault configuration for the order-saga Lambdas - written by the chaos harness only - each expires within 15 min - objects deleted after 1 day"
   }
 }

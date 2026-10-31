@@ -182,27 +182,20 @@ locals {
   }
 
   # Step 3.2 chaos experiments (chaos.tf, src/common/chaos.py).
-  # FIS targets: the saga Lambdas get the AWS FIS extension layer and its two variables. With no experiment running,
-  # the extension only polls the S3 config prefix (every 60 s while the function is active) and changes nothing.
-  fis_target_functions = toset([
+  # Fault targets (E1/E2/E5): the saga Lambdas read the fault configuration s3://<chaos bucket>/faults/active.json,
+  # but only while CHAOS_ENABLED is true; with it false they never touch S3.
+  fault_target_functions = toset([
     "reserve_inventory", "request_payment", "payment_provider", "payment_webhook", "fulfill_item",
     "refund_payment", "release_inventory", "write_off_lines", "begin_fulfillment",
   ])
-  fis_environment = {
-    AWS_LAMBDA_EXEC_WRAPPER        = "/opt/aws-fis/bootstrap"
-    AWS_FIS_CONFIGURATION_LOCATION = "${aws_s3_bucket.fis_config.arn}/${local.fis_config_prefix}/"
-  }
-  # Functions with a crash-after-write switch (E3) or that pass the chaos field on. CHAOS_ENABLED is the Terraform
-  # variable chaos_enabled: "false" unless a chaos run flips it for E3, and flipped back right after.
-  chaos_switch_functions = toset([
-    "create_order", "reserve_inventory", "request_payment", "payment_provider", "payment_webhook",
-    "refund_payment", "fulfill_item", "write_off_lines", "release_inventory",
-  ])
+  # Functions with a crash-after-write switch (E3), a fault hook, or that accept/pass on the chaos fields.
+  # CHAOS_ENABLED is the Terraform variable chaos_enabled: "false" except during a chaos run, flipped back right after.
+  chaos_switch_functions = setunion(local.fault_target_functions, ["create_order"])
   lambda_environment = {
     for key, fn in local.lambda_functions : key => merge(
       fn.environment,
-      contains(local.fis_target_functions, key) ? local.fis_environment : {},
       contains(local.chaos_switch_functions, key) ? { CHAOS_ENABLED = tostring(var.chaos_enabled) } : {},
+      contains(local.fault_target_functions, key) ? { CHAOS_FAULT_BUCKET = aws_s3_bucket.fis_config.bucket } : {},
     )
   }
 
@@ -253,7 +246,7 @@ resource "aws_lambda_function" "fn" {
   runtime          = "python3.12"
   architectures    = ["arm64"] # Graviton: about 20% cheaper per GB-second than x86
   handler          = "handler.lambda_handler"
-  layers           = contains(local.fis_target_functions, each.key) ? [local.powertools_layer_arn, local.fis_extension_layer_arn] : [local.powertools_layer_arn]
+  layers           = [local.powertools_layer_arn]
   filename         = data.archive_file.lambda[each.key].output_path
   source_code_hash = data.archive_file.lambda[each.key].output_base64sha256
   timeout          = try(each.value.timeout, local.default_lambda_timeout)
@@ -276,8 +269,9 @@ resource "aws_lambda_function" "fn" {
     log_group  = aws_cloudwatch_log_group.lambda[each.key].name
   }
 
-  # ChaosTarget = saga marks the FIS targets (chaos.tf): experiment E1 selects all of them by this tag.
-  tags = merge({ Name = local.lambda_names[each.key] }, contains(local.fis_target_functions, each.key) ? { ChaosTarget = "saga" } : {})
+  tags = {
+    Name = local.lambda_names[each.key]
+  }
 
   depends_on = [aws_iam_role_policy.lambda]
 }

@@ -24,6 +24,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.logger import get_logger
 from common.orders import CANCEL_REQUESTED, FULFILLING, PAYMENT_CAPTURED, status_update
 from common.timeutil import utc_now_iso
@@ -40,6 +41,11 @@ logger = get_logger("begin_fulfillment")
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     order_id = event["orderId"]
     log = logger.bind(orderId=order_id)
+    chaos.inject_fault(  # E1 fault injection (common/chaos.py); the order is read only while a fault targets us
+        "begin_fulfillment",
+        lambda: orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True).get("Item", {}).get("chaosRun"),
+        log,
+    )
     try:
         orders_table.update_item(
             Key={"orderId": order_id},

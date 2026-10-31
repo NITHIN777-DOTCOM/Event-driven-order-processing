@@ -842,7 +842,7 @@ locals {
       width  = 12
       height = 6
       properties = {
-        title  = "Reconciliation alarms (also the stop condition of every FIS experiment)"
+        title  = "Reconciliation alarms (also the stop condition of every chaos run)"
         alarms = [aws_cloudwatch_metric_alarm.invariant_violation.arn, aws_cloudwatch_metric_alarm.stuck_orders.arn]
       }
     },

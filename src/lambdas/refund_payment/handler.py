@@ -69,10 +69,16 @@ lambda_client = boto3.client("lambda")
 logger = get_logger("refund_payment")
 
 
+def chaos_run_of(order_id: str) -> Any:
+    """The order's chaos run marker; read only while a fault targets this function (common/chaos.py)."""
+    return orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True).get("Item", {}).get("chaosRun")
+
+
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     order_id = event["orderId"]
     intent_id = intent_id_for(order_id)
     log = logger.bind(orderId=order_id, paymentIntentId=intent_id)
+    chaos.inject_fault("refund_payment", lambda: chaos_run_of(order_id), log)  # E1/E5 fault injection
     if "lineIds" in event:
         return refund_lines(order_id, event["lineIds"], log)
     cancelled = bool(event.get("cancelled"))

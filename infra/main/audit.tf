@@ -5,7 +5,7 @@
 #     -> metrics OrderSaga/Audit (Violations, Stuck, Parked, per-invariant Violations)
 #     -> alarms order-saga-invariant-violation and order-saga-stuck-orders -> SNS order-saga-ops-alerts
 #
-# The violation alarm is also the stop condition of every FIS experiment (chaos.tf): a chaos run that breaks an
+# The violation alarm is also the stop condition of every chaos run (scripts/chaos_run.py): a run that breaks an
 # invariant stops itself.
 # =============================================================================
 
@@ -29,16 +29,18 @@ data "aws_iam_policy_document" "audit_scheduler_assume" {
       type        = "Service"
       identifiers = ["scheduler.amazonaws.com"]
     }
-    # Confused-deputy protection: only schedules in this account's audit group may use the role.
+    # Confused-deputy protection: only schedules in this account's audit group may use the role. Scheduler sends the
+    # schedule GROUP's ARN as aws:SourceArn (a schedule ARN here made CreateSchedule fail: "must allow AWS
+    # EventBridge Scheduler to assume the role").
     condition {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
       values   = [local.account_id]
     }
     condition {
-      test     = "ArnLike"
+      test     = "ArnEquals"
       variable = "aws:SourceArn"
-      values   = ["arn:aws:scheduler:${var.region}:${local.account_id}:schedule/${aws_scheduler_schedule_group.audit.name}/*"]
+      values   = [aws_scheduler_schedule_group.audit.arn]
     }
   }
 }
@@ -88,7 +90,7 @@ resource "aws_scheduler_schedule" "audit_hourly" {
 # the verdict of the LAST audit until the next one (hourly, or every minute during a chaos run).
 resource "aws_cloudwatch_metric_alarm" "invariant_violation" {
   alarm_name          = "${var.project_prefix}-invariant-violation"
-  alarm_description   = "The invariant auditor found money or stock that does not add up (I1-I9). Always a bug. Its log group /aws/lambda/${local.auditor_name} lists each finding (auditFinding = violation, orderId, invariant, detail). Also the stop condition of every FIS experiment: a running experiment stops itself."
+  alarm_description   = "The invariant auditor found money or stock that does not add up (I1-I9). Always a bug. Its log group /aws/lambda/${local.auditor_name} lists each finding (auditFinding = violation, orderId, invariant, detail). Also the stop condition of every chaos run: scripts/chaos_run.py removes its fault configuration when this fires."
   namespace           = "OrderSaga/Audit"
   metric_name         = "Violations"
   statistic           = "Maximum"

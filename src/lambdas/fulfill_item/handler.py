@@ -60,6 +60,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     order_id, line_id = event["orderId"], event["lineId"]
     log = logger.bind(orderId=order_id, lineId=line_id)
     order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+    chaos.inject_fault("fulfill_item", lambda: order.get("chaosRun"), log)  # E1/E5 fault injection (common/chaos.py)
     line = find_line(order, line_id)
 
     if line.get("fulfillment") == LINE_FULFILLED:

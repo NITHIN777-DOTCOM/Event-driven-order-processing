@@ -174,3 +174,124 @@ def test_full_refund_crash_then_retry_credits_once(aws, load_handler, payments, 
         refund_handler.lambda_handler({"orderId": order["orderId"]}, None)
     assert refund_handler.lambda_handler({"orderId": order["orderId"]}, None)["refunded"] is False  # already done
     assert [t for t, _ in ledger(aws)] == ["DEBIT", "CREDIT"]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Fault injection (E1/E2/E5): our stand-in for AWS FIS (blocked on the AWS Free plan). Same contract: a percentage of
+# invocations fail or start late, for a bounded time, with a stop condition; narrower blast radius (marked orders).
+# ---------------------------------------------------------------------------------------------------------------------
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+import boto3  # noqa: E402
+
+NOW = datetime(2026, 10, 31, 12, 0, tzinfo=timezone.utc)
+
+
+def fault(**overrides) -> dict:
+    config = {
+        "run": "E1-test", "functions": ["reserve_inventory", "refund_payment"], "action": "error", "percent": 100,
+        "delayMs": 0, "startsAt": (NOW - timedelta(minutes=1)).isoformat(), "expiresAt": (NOW + timedelta(minutes=9)).isoformat(),
+    }
+    return {**config, **overrides}
+
+
+@pytest.fixture
+def fault_config(monkeypatch):
+    """Serve a fault configuration without S3, and count the reads."""
+    state = {"config": None, "reads": 0}
+
+    def read():
+        state["reads"] += 1
+        return state["config"]
+
+    monkeypatch.setattr(chaos, "_read_config", read)
+    monkeypatch.setitem(chaos._cache, "read_at", float("-inf"))
+    monkeypatch.setitem(chaos._cache, "config", None)
+    monkeypatch.setattr(chaos, "_now", lambda: NOW)
+    return state
+
+
+def test_usable_config_enforces_the_15_minute_expiry_and_the_shape():
+    assert chaos.usable_config(fault(), NOW)
+    assert chaos.usable_config(fault(expiresAt=(NOW + timedelta(minutes=15)).isoformat()), NOW) is None  # 16 min long
+    assert chaos.usable_config(fault(expiresAt=(NOW - timedelta(seconds=1)).isoformat()), NOW) is None  # expired
+    assert chaos.usable_config(fault(startsAt=(NOW + timedelta(minutes=1)).isoformat()), NOW) is None  # not started
+    assert chaos.usable_config(fault(percent=150), NOW) is None
+    assert chaos.usable_config(fault(action="explode"), NOW) is None
+    assert chaos.usable_config(fault(run="bad run!"), NOW) is None
+    assert chaos.usable_config(fault(delayMs=600_000), NOW) is None
+    assert chaos.usable_config("not a dict", NOW) is None
+
+
+def test_injector_never_reads_anything_while_chaos_is_disabled(fault_config, monkeypatch):
+    monkeypatch.setenv("CHAOS_ENABLED", "false")
+    fault_config["config"] = fault()
+    run_of_calls = []
+    chaos.inject_fault("reserve_inventory", lambda: run_of_calls.append(1) or "E1-test")
+    assert fault_config["reads"] == 0 and run_of_calls == []  # no S3 read, no order read
+
+
+def test_injector_touches_only_orders_of_the_run(fault_config, chaos_on, monkeypatch):
+    fault_config["config"] = fault()
+    chaos.inject_fault("reserve_inventory", lambda: None)  # a storefront order: untouched
+    chaos.inject_fault("reserve_inventory", lambda: "E1-other")  # another run: untouched
+    chaos.inject_fault("fulfill_item", lambda: "E1-test")  # function not targeted: untouched
+    with pytest.raises(chaos.ChaosInjectedFault):
+        chaos.inject_fault("reserve_inventory", lambda: "E1-test")
+
+
+def test_injector_rate_delay_and_cache(fault_config, chaos_on, monkeypatch):
+    fault_config["config"] = fault(percent=30)
+    chaos.inject_fault("reserve_inventory", lambda: "E1-test", roll=lambda: 0.30)  # 30.0 >= 30: spared
+    with pytest.raises(chaos.ChaosInjectedFault):
+        chaos.inject_fault("reserve_inventory", lambda: "E1-test", roll=lambda: 0.29)
+    fault_config["config"] = fault(action="delay", delayMs=25_000)  # changed, but the 30 s cache still holds the old one
+    slept = []
+    with pytest.raises(chaos.ChaosInjectedFault):
+        chaos.inject_fault("reserve_inventory", lambda: "E1-test", roll=lambda: 0.0, sleep=slept.append)
+    assert fault_config["reads"] == 1
+    monkeypatch.setitem(chaos._cache, "read_at", float("-inf"))  # 30 s later
+    chaos.inject_fault("reserve_inventory", lambda: "E1-test", roll=lambda: 0.0, sleep=slept.append)
+    assert slept == [25.0] and fault_config["reads"] == 2
+
+
+def test_read_config_from_s3_and_missing_object_means_no_fault(aws, monkeypatch):
+    s3 = boto3.client("s3", region_name="ap-south-1")
+    s3.create_bucket(Bucket="chaos-test", CreateBucketConfiguration={"LocationConstraint": "ap-south-1"})
+    monkeypatch.setenv("CHAOS_FAULT_BUCKET", "chaos-test")
+    monkeypatch.setattr(chaos, "_s3", s3)
+    assert chaos._read_config() is None  # NoSuchKey
+    s3.put_object(Bucket="chaos-test", Key=chaos.FAULT_KEY, Body=json.dumps(fault()).encode())
+    assert chaos._read_config()["run"] == "E1-test"
+    s3.put_object(Bucket="chaos-test", Key=chaos.FAULT_KEY, Body=b"{not json")
+    assert chaos._read_config() is None
+
+
+def test_create_order_accepts_chaos_run_only_while_enabled(aws, load_handler, monkeypatch):
+    body = {"customerName": "Asha", "items": [{"productId": "WIRELESS-MOUSE", "quantity": 1}], "chaosRun": "E1-abc"}
+    monkeypatch.setenv("CHAOS_ENABLED", "false")
+    handler = load_handler("create_order")
+    assert handler.lambda_handler(api_event(body), None)["statusCode"] == 400
+    monkeypatch.setenv("CHAOS_ENABLED", "true")
+    assert handler.lambda_handler(api_event({**body, "chaosRun": "no spaces!"}), None)["statusCode"] == 400
+    ok = handler.lambda_handler(api_event(body), None)
+    order = aws.orders.get_item(Key={"orderId": json.loads(ok["body"])["orderId"]})["Item"]
+    assert order["chaosRun"] == "E1-abc"
+
+
+def test_reserve_injected_error_happens_before_any_write(aws, load_handler, fault_config, chaos_on, monkeypatch):
+    fault_config["config"] = fault()
+    order = seed_order(aws.orders, chaosRun="E1-test")
+    with pytest.raises(chaos.ChaosInjectedFault):
+        load_handler("reserve_inventory").lambda_handler({"orderId": order["orderId"]}, None)
+    assert stock_of(aws, "WIRELESS-MOUSE") == (100, 0)  # nothing reserved
+
+
+def test_provider_fault_fails_only_that_record_and_the_message_carries_the_run(aws, payments, fault_config, chaos_on, monkeypatch):
+    fault_config["config"] = fault(functions=["payment_provider"])
+    order = seed_order(aws.orders)
+    seed_intent(aws, order)
+    marked = payments.provider.lambda_handler(sqs_event(psp_request(order, chaosRun="E1-test")), None)
+    assert marked["batchItemFailures"] and ledger(aws) == []  # failed before the debit
+    clean = payments.provider.lambda_handler(sqs_event(psp_request(order)), None)  # an unmarked request: untouched
+    assert clean == {"batchItemFailures": []} and len(ledger(aws)) == 1

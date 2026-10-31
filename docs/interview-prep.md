@@ -1497,8 +1497,9 @@ Two things, built together in step 3.2:
   write-off records. Findings are VIOLATION (money or stock doesn't add up: always a bug) or STUCK (an order not
   terminal 30+ minutes after creation, with its execution status). Metrics `OrderSaga/Audit`, alarms
   `order-saga-invariant-violation` and `order-saga-stuck-orders`.
-- **Chaos experiments** that break things on purpose while traffic flows: AWS FIS Lambda faults (E1 errors, E2 delays,
-  E5 refund outage), test-only crash-after-write switches (E3), duplicate deliveries (E4), with the auditor watching.
+- **Chaos experiments** that break things on purpose while traffic flows: injected Lambda faults (E1 errors, E2 delays,
+  E5 refund outage; designed for AWS FIS, built ourselves when FIS turned out to be unavailable, see below),
+  test-only crash-after-write switches (E3), duplicate deliveries (E4), with the auditor watching.
 
 ### Why (the problem it solves)
 Every saga step is designed to be idempotent and every money movement exactly-once. Those are claims; failures in
@@ -1518,9 +1519,23 @@ code that wrote the data, it re-derives the books, like a finance team reconcili
 - **Legacy shapes:** pre-DemoPay orders (no money), pre-2.1 direct debits (no intent), pre-2.3 refunds (no running
   `refundedAmount`), pre-2.3 COMPLETED orders (no per-line state; reservations before the last seed are ignored), poison
   orders parked in the DLQ by design (PARKED, not STUCK).
-- **FIS on Lambda:** the AWS FIS extension layer (+ `AWS_LAMBDA_EXEC_WRAPPER`, `AWS_FIS_CONFIGURATION_LOCATION`) on the
-  9 saga Lambdas; a running experiment writes a fault config to a private S3 prefix that the extension polls. Every
-  template has the violation alarm as its stop condition and a fixed duration.
+- **Fault injection (E1/E2/E5), FIS's contract built in-house:** the plan was AWS FIS (extension layer on the 9 saga
+  Lambdas, 3 experiment templates). The first deploy failed: the account is on the **AWS Free plan**, and every FIS
+  call (even `ListActions` with the admin user) answers `SubscriptionRequiredException`. Rather than upgrade the
+  account plan, `src/common/chaos.py` gained an injector that mirrors FIS's Lambda actions:
+  - *configuration*: one S3 object, `faults/active.json` in a private SSE-S3 bucket (`run`, `functions`,
+    `action` = error | delay, `percent`, `delayMs`, `startsAt`, `expiresAt`), written by `scripts/chaos_run.py`;
+  - *rate*: each target invocation rolls against `percent` (FIS: `invocationPercentage`); *error* fails before any
+    write (FIS: `invocation-error` with `preventExecution`), *delay* sleeps first (FIS: `invocation-add-delay`);
+  - *duration*: a configuration longer than 15 minutes, or past `expiresAt`, is ignored by the Lambdas themselves,
+    so faults switch off even if the harness dies (FIS: the action's `duration`);
+  - *stop condition*: the harness polls `order-saga-invariant-violation` every 15 s and deletes the configuration
+    when it fires (FIS: a stop-condition alarm on the template); Lambdas re-read it every 30 s (FIS extension: 60 s);
+  - *blast radius, narrower than FIS*: only orders created by that harness run (`chaosRun` = the run id) are
+    affected; FIS would hit a percentage of ALL invocations, storefront orders included;
+  - *idle cost*: gated by `CHAOS_ENABLED`; while it is false the hook returns without reading S3 or the order.
+  The FIS layer, wrapper variables, role and templates were removed in the same fix commit (nothing half-applied);
+  the bucket stayed for the injector.
 - **Crash-after-write switches:** `src/common/chaos.py`. Only when `CHAOS_ENABLED=true` (Terraform variable, default
   false) AND the order carries `chaos = "crash_after:<point>"` (refused by POST /orders while disabled). The handler
   commits its write, then raises before returning; it fires only in the invocation that did the write.
@@ -1531,8 +1546,14 @@ code that wrote the data, it re-derives the books, like a finance team reconcili
   intents and ledger into per-order running balances; only orders that changed are re-checked).
 - **Detect vs repair:** the auditor never repairs. A job that "fixes" money on its own can turn one bug into two;
   findings page a human with a runbook (redrive for parked executions).
-- **FIS vs code switches:** FIS needs no code change and tests the real failure path, but hits a percentage of ALL
-  invocations; switches hit one chosen order at one chosen point but are code that ships (inert, and proven inert).
+- **FIS vs in-house injector vs code switches:** FIS needs no code change and is the honest "real platform" fault,
+  but hits a percentage of ALL invocations and wasn't available on the Free plan. The injector is ~100 lines that
+  ship in every saga Lambda (inert unless `CHAOS_ENABLED`), with a narrower blast radius than FIS; the cost is that
+  it injects at the top of my handler, not in the Lambda runtime, so it can't simulate an init/runtime crash.
+  Crash-after-write switches hit one chosen order at one chosen point INSIDE a handler, which neither FIS nor the
+  injector can.
+- **Upgrade the account vs build it:** upgrading to the Paid plan would have made FIS work in minutes, but is
+  irreversible and removes the Free plan's spending cap. A course project keeps the cap.
 
 ### Numbers
 Filled in after the experiment runs (docs/evidence/upgrade-3.2-chaos.md).

@@ -44,6 +44,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     order_id = event["orderId"]
     log = logger.bind(orderId=order_id)
     order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+    chaos.inject_fault("write_off_lines", lambda: order.get("chaosRun"), log)  # E1/E5 fault injection (common/chaos.py)
 
     written_off, units = [], 0
     for request in event["lines"]:

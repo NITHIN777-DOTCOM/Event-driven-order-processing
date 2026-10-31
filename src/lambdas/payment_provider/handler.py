@@ -117,6 +117,8 @@ def handle_sqs_batch(event: dict[str, Any]) -> dict[str, Any]:
         request = json.loads(record["body"])
         log = logger.bind(orderId=request.get("orderId"), paymentIntentId=request.get("paymentIntentId"))
         try:
+            # E1/E2 fault injection (common/chaos.py): only requests of a chaos-run order carry chaosRun.
+            chaos.inject_fault("payment_provider", lambda: request.get("chaosRun"), log)
             process_request(request, int(record.get("attributes", {}).get("ApproximateReceiveCount", "1")), log)
         except Exception as err:  # noqa: BLE001 - any failure: let SQS retry this one message
             log.error("Payment request failed; SQS will redeliver it", error=type(err).__name__, reason=str(err))

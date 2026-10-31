@@ -125,6 +125,12 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         log.error("Webhook does not match the payment intent; ignored", intentAmount=intent["amount"], callbackAmount=callback["amount"])
         return response(400, {"error": "callback does not match the payment intent"})
 
+    # E1/E2 fault injection (common/chaos.py), before any write: an error answers 500 and DemoPay sends it again.
+    chaos.inject_fault(
+        "payment_webhook",
+        lambda: orders_table.get_item(Key={"orderId": intent["orderId"]}, ConsistentRead=True).get("Item", {}).get("chaosRun"),
+        log,
+    )
     log = log.bind(callbackDelayMs=delay_ms(intent))
     if callback["type"] == "payment.succeeded":
         result = on_succeeded(intent, callback, log)

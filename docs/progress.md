@@ -222,6 +222,17 @@ report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports
   src/common/chaos.py, CHAOS_ENABLED = Terraform var chaos_enabled (default false).
 - Bootstrap applied locally after "APPLY" (0/1/0): FIS templates (no StartExperiment), fis-config bucket, FIS layer,
   audit schedule, PassRole to scheduler + fis. Layer overhead "before" window: docs/evidence/upgrade-3.2/layer-overhead.md.
+- Commit A d7b296e: CI 41215618729 green; Deploy 41215796239 FAILED mid-apply (49 of 64 changes applied, no smoke test,
+  no frontend publish): (1) audit schedule: trust condition used schedule/<group>/* as aws:SourceArn, Scheduler sends
+  the schedule-GROUP ARN; (2) FIS: the account is on the AWS Free plan (`aws freetier get-account-plan-state` = FREE),
+  every FIS call -> SubscriptionRequiredException. Full e2e on that partial state: 35/35 PASS.
+- User decision: build our own injector (src/common/chaos.py inject_fault, config s3://<bucket>/faults/active.json,
+  only orders with chaosRun = the harness run id, expiry <= 15 min, stop = harness deletes it on the violation alarm),
+  and remove the FIS templates, role, layer + its env vars in the SAME fix commit (user override of expand/contract
+  for these: FIS never worked). Bucket kept. Bootstrap FIS grants (FisExtensionLayer, FisExperimentTemplates,
+  PassRole fis) to be removed after Deploy is green.
+- Predicted E3 findings to confirm live: reserve crash -> Catch -> FAILED without ReleaseInventory (I5 leak);
+  fulfill crash -> LineUnavailable -> PartialRefund refuses a FULFILLED line -> execution FAILED (STUCK).
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).

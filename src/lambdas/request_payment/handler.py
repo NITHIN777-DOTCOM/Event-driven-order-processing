@@ -78,6 +78,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     log = logger.bind(orderId=order_id, paymentIntentId=intent_id, simulate=simulate)
 
     order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+    chaos.inject_fault("request_payment", lambda: order.get("chaosRun"), log)  # E1/E5 fault injection (common/chaos.py)
     if "cancelRequestedAt" in order:
         log.info("Order was cancelled before the payment was requested; not charging")
         raise OrderCancelled(f"Order {order_id} was cancelled by the customer")
@@ -118,6 +119,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     }
     if chaos.crash_point(order):  # step 3.2 E3: passed on like `simulate`, only while CHAOS_ENABLED
         message["chaos"] = order["chaos"]
+    if chaos.enabled() and order.get("chaosRun"):  # step 3.2 E1/E2: DemoPay can't read the order to see the run
+        message["chaosRun"] = order["chaosRun"]
     sqs.send_message(QueueUrl=PSP_QUEUE_URL, DelaySeconds=delay, MessageBody=json.dumps(message))
     log.info("Payment requested; saga paused until the webhook", intentStatus=REQUESTED, amount=amount, providerDelaySeconds=delay)
     return {"paymentIntentId": intent_id, "status": REQUESTED}

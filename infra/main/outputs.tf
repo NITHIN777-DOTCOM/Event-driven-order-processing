@@ -191,13 +191,8 @@ output "invariant_auditor_function_name" {
   value       = aws_lambda_function.fn["invariant_auditor"].function_name
 }
 
-output "fis_experiment_template_ids" {
-  description = "FIS experiment template id per chaos experiment (scripts/chaos_run.py starts them)"
-  value       = { for key, template in aws_fis_experiment_template.chaos : key => template.id }
-}
-
-output "fis_config_bucket" {
-  description = "Where FIS writes Lambda fault configurations while an experiment runs"
+output "chaos_fault_bucket" {
+  description = "Where scripts/chaos_run.py writes the fault configuration (faults/active.json) during E1/E2/E5"
   value       = aws_s3_bucket.fis_config.bucket
 }
 

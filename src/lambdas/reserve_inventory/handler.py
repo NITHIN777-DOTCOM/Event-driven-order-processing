@@ -66,6 +66,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     log = logger.bind(orderId=order_id)
 
     order = orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True)["Item"]
+    chaos.inject_fault("reserve_inventory", lambda: order.get("chaosRun"), log)  # E1/E5 fault injection (common/chaos.py)
     stamp = {"cancellable": True} if event.get("cancellable") is True else {}
 
     if order.get("reservedItems"):
