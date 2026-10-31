@@ -201,6 +201,8 @@ Next: step 3.2 invariant/chaos checker. Steps 2.3 and 2.4 are DONE (reports docs
   products; recovery 638 s. Peak Lambda concurrency 200. Evidence: docs/evidence/upgrade-3.1-oversell.md (+ upgrade-3.1/*.md).
 - Harness fix: "Fired" was stamped before the TLS pre-connects; now stamped in the barrier's action (after-fix-2.md
   annotated with the CloudWatch release times 11:38:30 / 11:38:48).
+- Final commit `1b27b94` (evidence, report, docs, harness timestamp fix): CI 41199119449 + Deploy 41199290860 green
+  (0 added, 0 changed, 0 destroyed). Local: 339 tests passed, coverage 93.54%.
 - Leftovers by design: 160 Cognito users race-001..160 and their SSM passwords; RACE-* products (listed = false, at seed).
 - Direct orders only won units in `before-fix` round 2 (4 RESERVED then cancelled); holds answer faster than the
   saga's ReserveInventory, so they usually drain the stock first.

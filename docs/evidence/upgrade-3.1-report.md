@@ -80,4 +80,10 @@
 
 9. **Manual actions.** None. (The 160 race users and their SSM parameters stay for re-runs; nothing was deleted.)
 
-10. **Git.** See `docs/progress.md` ("Step 3.1") for the commit hashes and CI / Deploy run IDs of this step.
+10. **Git** (all pushed to origin main):
+    - `8471de8` prep (unlisted test products): CI 41181937338, Deploy 41182050402 green.
+    - `56ae364` harness + negative control + run before-fix: its CI 41183356083 was superseded (cancel-in-progress) by bbc7bcd's, same tree plus the fix.
+    - `bbc7bcd` fix 1: CI 41183372836, Deploy 41183541011 green (0 added, 19 changed).
+    - `365c6a5` fix 2: CI 41184787213, Deploy 41184914270 green.
+    - `1b27b94` final run, evidence, docs: CI 41199119449, Deploy 41199290860 green (0 added, 0 changed, 0 destroyed).
+    - This commit records the run IDs (docs only).
