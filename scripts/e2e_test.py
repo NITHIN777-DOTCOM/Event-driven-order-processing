@@ -135,8 +135,12 @@ scheduler = boto3.client("scheduler", region_name=REGION)
 lambda_client = boto3.client("lambda", region_name=REGION)
 psp_table = ddb.Table(OUT["psp_transactions_table"])
 SEEDED_STOCK = {p["productId"]: p["stock"] for p in SEED_PRODUCTS}  # I5 baseline (run seed_inventory.py first)
-# When seed_inventory.py last reset the counters (the earliest seededAt; "" if seeded before step 2.3).
-SEEDED_AT = min((str(i.get("seededAt", "")) for i in inventory_table.scan(ProjectionExpression="seededAt")["Items"]), default="")
+# When seed_inventory.py last reset the counters (the earliest seededAt; "" if seeded before step 2.3). Only the demo
+# catalogue counts: the test-only RACE-* products (oversell_race.py) are seeded on their own schedule.
+SEEDED_AT = min(
+    (str(i.get("seededAt", "")) for i in inventory_table.scan(ProjectionExpression="productId, seededAt")["Items"] if i["productId"] in SEEDED_STOCK),
+    default="",
+)
 SHORT_HOLD_SECONDS = 30
 cloudwatch = boto3.client("cloudwatch", region_name=REGION)
 RUN_STARTED = datetime.now(timezone.utc)

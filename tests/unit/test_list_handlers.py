@@ -29,6 +29,14 @@ def test_products_sorted_by_price_with_stock(aws, products):
     assert set(body[0]) >= {"category", "mrp", "rating", "ratingCount", "highlights", "description", "imageKey"}
 
 
+
+def test_products_leaves_out_unlisted_test_products(aws, products):
+    aws.inventory.put_item(Item={"productId": "RACE-1", "name": "Race test product", "price": 1, "stock": 20, "reserved": 0, "listed": False})
+
+    body = json.loads(products.lambda_handler({}, None)["body"])["products"]
+
+    assert [p["productId"] for p in body] == ["WIRELESS-MOUSE", "MECH-KEYBOARD"]
+
 def seed_user_order(aws, user, order_id, created):
     return seed_order(
         aws.orders, orderId=order_id, userId=user, walletId=user, createdAt=created,

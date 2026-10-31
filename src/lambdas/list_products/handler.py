@@ -2,6 +2,9 @@
 
 The catalogue is small and bounded (one item per product), so a Scan is the right tool here.
 Orders, which grow without limit, are never scanned: they're listed through a GSI query instead.
+
+Products with `listed = false` are left out: the test-only race products (RACE-*, seeded by scripts/oversell_race.py,
+step 3.1) live in the same table, so the saga treats them like any other product, but shoppers never see them.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
     products = sorted(
-        ({field: item.get(field) for field in FIELDS} for item in items),
+        ({field: item.get(field) for field in FIELDS} for item in items if item.get("listed", True) is not False),
         key=lambda product: product["price"],
     )
     logger.info("Products listed", count=len(products))

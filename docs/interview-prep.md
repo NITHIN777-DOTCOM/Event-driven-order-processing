@@ -977,6 +977,10 @@ minutes off still shows the right mm:ss. Leaving checkout releases the hold (`DE
 Creates and releases go through a small promise queue, so React StrictMode's double mount can't let an older
 create land after a newer one.
 
+**Test-only products stay off the shelf (step 3.1).** The oversell race test needs products of its own (RACE-*), in
+the same inventory table so the real hold and saga code runs against them. They carry `listed = false`, and
+`GET /products` leaves those out, so shoppers (and the demo) never see them.
+
 ### Trade-offs / alternatives considered
 | Option | Why not (here) |
 |---|---|
