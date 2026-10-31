@@ -305,8 +305,9 @@ def fire(race: Round) -> None:
     """Release every attempt at the same instant, with the sampler running."""
     sampler_thread = threading.Thread(target=race.sampler.run, daemon=True)
     sampler_thread.start()
-    barrier = threading.Barrier(len(race.attempts), timeout=120)
-    race.fired_at = now_iso()
+    # The action runs once, when the last thread arrives: that is the release, after every TCP + TLS pre-connect
+    # (stamping before the pool starts would include ~10-30 s of connecting for 100-200 threads).
+    barrier = threading.Barrier(len(race.attempts), action=lambda: setattr(race, "fired_at", now_iso()), timeout=120)
     with ThreadPoolExecutor(max_workers=len(race.attempts)) as pool:
         list(pool.map(lambda a: send(a, barrier), race.attempts))
     sends = [a.first_send for a in race.attempts]

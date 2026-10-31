@@ -94,7 +94,8 @@ up half-reserved.
 - Out of stock: stock/reserved `(100, 0) -> (100, 0)` unchanged and ReleaseInventory not run (scenario d; that
   run uses `simulate=out_of_stock`).
 - A real decline after reservation: USB-MIC `(18, 0) -> (18, 0)` after compensation (scenario h).
-- A concurrent oversell race test: none recorded yet (planned in step 3.1).
+- Concurrent oversell race (step 3.1, live): 200 simultaneous buyers on 20 units -> exactly 20 claimed, 180 clean
+  out-of-stock, 0 errors; never stock < 0 (section 14).
 
 ### Likely interview questions
 1. *How do you prevent oversell without locks?* A conditional update (`stock >= :qty`) evaluated atomically
@@ -1359,6 +1360,57 @@ don't show up in single-request tests or code review, and a race test that has n
 - **Recovery:** winners are cancelled (direct orders use `payment_manual`, so DemoPay never charges them) or left to
   expire on their EventBridge Scheduler schedules; then every product must be back at its seed with held = 0.
 - **Test products off the shelf:** RACE-1 / RACE-X / RACE-Y carry `listed = false`, so `GET /products` hides them.
+- **Negative control:** `BrokenReserve` (test-only) reads the stock, checks it, sleeps a few ms, then writes without a
+  condition. The same 50-thread race on 5 units against moto must oversell with it and claim exactly 5 with the real
+  `reserve_inventory` handler. Marker `race`, in `pytest.ini` testpaths, so every CI run includes it (~12 s).
+
+### Trade-offs / alternatives considered
+- **Conditional write vs a lock** (a lock row, Redis `SETNX`, a mutex): a lock needs acquire, release, a lease for
+  crashed holders, and a second store; every buyer waits in line even when there is plenty of stock. The condition
+  `stock >= :qty` is checked and applied atomically by DynamoDB in one request: no lock to leak, and losers learn at once.
+- **Retrying TransactionConflict vs failing fast:** retries add up to ~5.6 s of worst-case latency for a few buyers;
+  failing fast would send them away from stock that is still there. Retrying is safe because a cancelled transaction
+  applied nothing and every transaction carries its own conditions.
+- **503 vs 409 when conflicts never clear:** a consistent read decides. Answering "sold out" for a busy product loses
+  a sale; answering "busy, retry" for a sold-out product only costs one more request.
+- **Hot item:** every buyer of one product writes the same DynamoDB item (~1,000 WCU/s per partition). Fine for 200
+  buyers; a much bigger flash sale would split stock into N sub-counters (buckets) and pick one at random.
+- **Live test vs only unit tests:** the live run costs ~$0.05 and 15 minutes (mostly hold expiry) but tests the real
+  DynamoDB concurrency control, cold starts and API Gateway, which moto cannot.
+
+### Numbers
+- Final run `after-fix-2` (`docs/evidence/upgrade-3.1-oversell.md`): round 1, 200 attempts within 63 ms on 20 units ->
+  **20 claimed, 180 clean out-of-stock, 0 errors, 0 throttled**; round 2, 100 two-item carts within 37 ms on 10 + 10 ->
+  **10 carts claimed, 0 half carts, 0 errors**.
+- Sampler: min stock 0, max claimed 20 / 10 / 10, I5 on every one of 108 samples.
+- Hold latency p50 / p95 / max: 1375 / 2004 / 3040 ms (round 1, ~150 cold starts), 546 / 909 / 1571 ms (round 2).
+- Server-side conflict retries: 3 holds (round 1) + 1 hold (round 2), 1 retry each.
+- 90 losing direct orders: FAILED, out of stock, net ₹0; I1-I9 hold for all 90.
+- Recovery: back to the seeded stock, held 0, 638 s after the last hold (holds last 600 s).
+- Before the fix: 112 phantom out-of-stock answers (409 with 3-14 units left). After fix 1: 0, but 1 hold per round
+  answered 503. After fix 2: 0 and 0.
+- Negative control: BrokenReserve claimed 40-50 of 5 units (stock down to -45); the real code exactly 5.
+- Peak Lambda concurrency 200 of 400; API stage burst 100 / 50 rps; 0 throttles observed.
+
+### Likely interview questions
+1. *How do you guarantee no overselling under concurrency?* Every claim of stock is one DynamoDB write whose condition
+   (`stock >= :qty`) is evaluated atomically with the decrement; multi-item carts put all lines in one
+   TransactWriteItems, so they all succeed or none do. There is no read-then-write window to race in. Proven live: 200
+   simultaneous buyers on 20 units -> exactly 20, a sampler never saw stock below 0.
+2. *Why a conditional write and not a lock?* A lock adds a second round trip, a lease or timeout for crashed holders,
+   and serialises every buyer even when stock is plentiful. The condition is the lock, scoped to one item for one
+   request, held by DynamoDB itself, so nothing can leak.
+3. *What is a TransactionConflict and how do you handle it?* DynamoDB transactions are optimistic: if two touch the
+   same item at the same moment, one is cancelled with reason `TransactionConflict`. Nothing was written and no
+   condition failed. We retry with full-jitter backoff (10 tries, 50 ms to 1 s); only `ConditionalCheckFailed` means out
+   of stock. If conflicts never clear, a consistent read decides between 409 (really short) and 503 + Retry-After.
+4. *How did you prove the test can fail?* A negative control: a deliberately broken reserve (read, check, write without
+   a condition) in the same thread race oversells (40-50 of 5), and the real code claims exactly 5. And the live test
+   did fail for real the first time: it caught 112 false out-of-stock answers.
+5. *What did throttling look like and how did you separate it from stock rejections?* The harness classifies by
+   response: 429 / TooManyRequests is THROTTLED and retried with jittered backoff until a real 201/409 arrives, and is
+   reported in its own column; only a 409 (or a saga FAILED with OUT_OF_STOCK) counts as out of stock. In practice 0
+   requests were throttled (stage burst 100, Lambda peak 200 of 400), so the throttle path stayed ready but unused.
 
 ### Debugging story
 The first live run (`docs/evidence/upgrade-3.1/before-fix.md`) passed the headline check, exactly 20 of 20 claimed

@@ -38,6 +38,11 @@ At checkout, open **Test scenario** and try *Payment glitch*, *Payment declined*
   with its stock back (I8). The cancel answers the paused payment with `SendTaskFailure("OrderCancelled")`, never
   `StopExecution`, so the saga runs its own clean-up: void or refund what's left, release stock, CANCELLED, email.
   Proven live with a 20-order race (cancel API and DemoPay's charge fired at the same moment).
+- **Proven under concurrency: no oversell.** `scripts/oversell_race.py` fires 200 signed requests at the live API
+  within 63 ms for the last 20 units: exactly **20 claimed, 180 clean out-of-stock, 0 errors**, stock never below 0;
+  100 two-item carts on 10 + 10 units: exactly 10 carts, never half a cart; every loser charged ₹0; all stock back
+  after the 10-minute holds expire. The test found a real bug (DynamoDB `TransactionConflict` answered as "sold out"),
+  now retried; a local negative control proves it catches an oversell (a broken unconditional reserve sells 50 of 5).
 - **Retries where they help, not where they hurt.** Transient payment errors are retried with exponential backoff (2 s → 4 s → 8 s). A permanent decline goes straight to compensation.
 - **Transactional outbox, no dual write.** `create_order` makes exactly one write: the DynamoDB transaction. The new order row *is* the outbox record. A **DynamoDB stream → EventBridge Pipe** (INSERT-only filter) delivers it to SQS, so a crash right after the write can't lose the order.
 - **Sign-in and row-level isolation.** Cognito managed login (authorization code + PKCE). API Gateway's **JWT authorizer**

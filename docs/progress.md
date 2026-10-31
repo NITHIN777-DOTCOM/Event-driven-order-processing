@@ -3,8 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 2.4 — customer cancellation mid-saga: DONE (2026-10-30, report docs/evidence/upgrade-2.4-report.md).**
-Now: step 3.1 oversell race test (IN PROGRESS, see "Step 3.1" below). Step 2.3 is DONE (report docs/evidence/upgrade-2.3-report.md).
+**Upgrade step 3.1 — oversell race test: DONE (2026-10-31, report docs/evidence/upgrade-3.1-report.md).**
+Next: step 3.2 invariant/chaos checker. Steps 2.3 and 2.4 are DONE (reports docs/evidence/upgrade-2.3-report.md, upgrade-2.4-report.md).
 (Step-by-step notes for 2.1 to 2.4 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
@@ -178,7 +178,7 @@ Now: step 3.1 oversell race test (IN PROGRESS, see "Step 3.1" below). Step 2.3 i
 - Docs commit: evidence docs/evidence/upgrade-2.4-cancellation.md, report, README, interview-prep section 13 numbers +
   debugging story. Docs commit `cb5b002`: CI 41066644918 + Deploy 41066893944 green (0 changed; recorded after they finished).
 
-### Step 3.1 (oversell race test) — IN PROGRESS
+### Step 3.1 (oversell race test) — DONE
 - Pre-flight: Lambda account concurrency 400 (unreserved 400, no reserved concurrency anywhere); API stage
   `$default` burst 100 / rate 50 rps, no route overrides.
 - Prep `8471de8`: GET /products hides `listed = false` (the RACE-* test products); e2e SEEDED_AT = demo catalogue
@@ -193,6 +193,17 @@ Now: step 3.1 oversell race test (IN PROGRESS, see "Step 3.1" below). Step 2.3 i
   superseded (cancel-in-progress) by bbc7bcd's, which tested the same tree plus the fix.
 - Run `after-fix-1`: 0 phantom out-of-stock (was 112), 20/20 + 10/10, I1-I9, I5, recovery 646 s; FAIL: 1 hold per
   round ran out of conflict retries -> 503. Fix 2: 10 tries, 50 ms-1 s, and a consistent stock read before a 503.
+- Fix 2 `365c6a5` (10 tries, 50 ms-1 s; an exhausted hold does a consistent read: short -> 409, else 503 +
+  Retry-After): CI 41184787213 + Deploy 41184914270 green.
+- Run `after-fix-2` (11:38 UTC): **PASS**. Round 1: 200 within 63 ms -> 20 claimed / 180 out of stock / 0 throttled /
+  0 ERROR; round 2: 100 carts within 37 ms -> 10 / 90 / 0 / 0, no half cart. Sampler min stock 0, max claimed 20/10/10.
+  Server conflict retries (Logs Insights): 3 + 1 holds, 1 retry each. 90 losing orders FAILED net 0; I1-I9; I5 all 16
+  products; recovery 638 s. Peak Lambda concurrency 200. Evidence: docs/evidence/upgrade-3.1-oversell.md (+ upgrade-3.1/*.md).
+- Harness fix: "Fired" was stamped before the TLS pre-connects; now stamped in the barrier's action (after-fix-2.md
+  annotated with the CloudWatch release times 11:38:30 / 11:38:48).
+- Leftovers by design: 160 Cognito users race-001..160 and their SSM passwords; RACE-* products (listed = false, at seed).
+- Direct orders only won units in `before-fix` round 2 (4 RESERVED then cancelled); holds answer faster than the
+  saga's ReserveInventory, so they usually drain the stock first.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
