@@ -58,6 +58,7 @@ from common.orders import cancellation_codes
 from common.secrets import get_secret
 from common.timeutil import utc_now_iso
 from common.tracing import instrument_aws_sdk
+from common.transact import transact_write
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
@@ -76,6 +77,11 @@ scheduler = boto3.client("scheduler")
 logger = get_logger("holds_api")
 
 CREATE_ATTEMPTS = 3  # retries only when the same user creates two holds at the same moment
+
+
+class Busy(Exception):
+    """503: the products' rows stayed contended through every retry (a flash sale on one item). Nothing was held;
+    the client may simply retry. Never reported as out of stock: the stock may well still be there."""
 
 
 class Conflict(Exception):
@@ -109,6 +115,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         return response(400, {"error": str(err)})
     except Conflict as err:
         return response(409, {"error": str(err), **err.fields})
+    except Busy as err:
+        return response(503, {"error": str(err)}, headers={"Retry-After": "1"})
 
 
 # --------------------------------------------------------------------------------------------
@@ -240,8 +248,10 @@ def write_hold(hold: dict[str, Any], log: StructuredLogger) -> bool:
         for item in hold["items"]
     ]
     try:
-        ddb_client.transact_write_items(
-            TransactItems=[
+        # Retries TransactionConflict (many buyers holding the same product at once, step 3.1): see common/transact.py.
+        transact_write(
+            ddb_client,
+            [
                 {
                     "Put": {
                         "TableName": HOLDS_TABLE,
@@ -251,7 +261,8 @@ def write_hold(hold: dict[str, Any], log: StructuredLogger) -> bool:
                 },
                 {"Put": {"TableName": HOLDS_TABLE, "Item": hold, "ConditionExpression": "attribute_not_exists(holdId)"}},
                 *stock_updates,
-            ]
+            ],
+            log,
         )
     except ClientError as err:
         if err.response["Error"]["Code"] != "TransactionCanceledException":
@@ -261,7 +272,10 @@ def write_hold(hold: dict[str, Any], log: StructuredLogger) -> bool:
             return False
         delete_schedule(scheduler, SCHEDULE_GROUP, hold["holdId"], log)
         short = [hold["items"][i]["productId"] for i, code in enumerate(codes[2:]) if code == "ConditionalCheckFailed"]
-        product_id = short[0] if short else hold["items"][0]["productId"]
+        if not short:  # cancelled only by conflicts, every retry: busy, not out of stock
+            log.warning("Hold not created: the products stayed contended through every retry", codes=codes)
+            raise Busy("These products are in very high demand right now; please retry") from err
+        product_id = short[0]
         available = int(inventory_table.get_item(Key={"productId": product_id}, ConsistentRead=True)["Item"]["stock"])
         log.info("Hold refused: not enough stock", productId=product_id, available=available)
         raise Conflict(f"Not enough stock to hold {product_id} (available: {available})", productId=product_id, available=available) from err

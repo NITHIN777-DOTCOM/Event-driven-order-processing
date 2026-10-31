@@ -23,6 +23,7 @@ from botocore.exceptions import ClientError
 from common.logger import get_logger
 from common.orders import INVENTORY_RELEASED, LINE_FULFILLED, LINE_WRITTEN_OFF, cancellation_codes, order_lines, status_update
 from common.tracing import instrument_aws_sdk
+from common.transact import transact_write
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
@@ -102,7 +103,7 @@ def release(order_id: str, reserved_items: list[dict[str, Any]], states: dict[st
     )
 
     try:
-        ddb_client.transact_write_items(TransactItems=transact_items)
+        transact_write(ddb_client, transact_items)  # retries TransactionConflict (common/transact.py)
     except ClientError as err:
         if err.response["Error"]["Code"] == "TransactionCanceledException":
             codes = cancellation_codes(err.response)

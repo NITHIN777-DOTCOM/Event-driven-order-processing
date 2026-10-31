@@ -34,6 +34,7 @@ from common.holds import ACTIVE, EXPIRED, consume_items, delete_schedule, end_ho
 from common.logger import StructuredLogger, get_logger
 from common.orders import OUT_OF_STOCK, RESERVED, cancellation_codes, order_lines, status_update
 from common.tracing import instrument_aws_sdk
+from common.transact import transact_write
 
 instrument_aws_sdk()  # X-Ray subsegments for every boto3 call (see common/tracing.py)
 
@@ -130,7 +131,7 @@ def consume_hold(order: dict[str, Any], log: StructuredLogger, stamp: dict[str, 
         }
     }
     try:
-        ddb_client.transact_write_items(TransactItems=[*consume_items(HOLDS_TABLE, INVENTORY_TABLE, hold, order["orderId"]), order_update])
+        transact_write(ddb_client, [*consume_items(HOLDS_TABLE, INVENTORY_TABLE, hold, order["orderId"]), order_update], hlog)
     except ClientError as err:
         if lost_the_race(err):  # expired or released at this very moment: exactly one of us won
             hlog.info("Hold ended while consuming it (lost the race); reserving stock afresh")
@@ -172,10 +173,12 @@ def reserve_stock(order: dict[str, Any], fresh_after_hold: bool = False, stamp: 
     )
 
     try:
-        ddb_client.transact_write_items(TransactItems=transact_items)
+        # Many orders for one product reserve at the same moment: conflicts are retried (common/transact.py).
+        transact_write(ddb_client, transact_items, logger.bind(orderId=order["orderId"]))
     except ClientError as err:
-        if err.response["Error"]["Code"] != "TransactionCanceledException":
-            raise
+        codes = cancellation_codes(err.response)[: len(items)] if err.response["Error"]["Code"] == "TransactionCanceledException" else []
+        if "ConditionalCheckFailed" not in codes:
+            raise  # not a stock answer (e.g. conflicts that never cleared): fail loudly, never claim "out of stock"
         raise OutOfStock(_describe_shortage(err, items)) from err
 
 

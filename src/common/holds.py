@@ -34,6 +34,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from common.orders import cancellation_codes
+from common.transact import transact_write
 from common.timeutil import utc_now_iso
 
 ACTIVE = "ACTIVE"
@@ -152,9 +153,7 @@ def end_hold(
     """Release or expire an ACTIVE hold, giving its stock back. True if THIS call made the transition,
     False if the hold had already left ACTIVE (consumed, released or expired by someone else): a no-op."""
     try:
-        ddb_client.transact_write_items(
-            TransactItems=give_back_items(holds_table, inventory_table, hold, new_status, detail or {})
-        )
+        transact_write(ddb_client, give_back_items(holds_table, inventory_table, hold, new_status, detail or {}))
     except ClientError as err:
         if lost_the_race(err):
             return False
