@@ -1332,7 +1332,43 @@ execution still ran the old definition (no `OrderCancelled` Catch: a cancel woul
 asked were refused with 409 NOT_CANCELLABLE. Lesson: a feature flag and the code it guards can't be assumed to
 switch together; the guard has to be a fact on the data itself.
 
-## 14. Known gaps (and where they get fixed)
+## 14. Oversell race test
+
+### What
+`scripts/oversell_race.py` fires hundreds of real, signed requests at the LIVE API in the same instant, all trying to
+claim the last units of a product, and proves that exactly the available units are claimed, every other buyer gets a
+clean out-of-stock answer, nobody is charged for a unit they didn't get, and all the stock comes back afterwards. A
+local negative control (`tests/race/test_oversell_negative_control.py`) proves the same race catches a broken
+implementation.
+
+### Why (the problem it solves)
+"We use a conditional write, so we can't oversell" is a claim; a flash sale is where it gets tested. Concurrency bugs
+don't show up in single-request tests or code review, and a race test that has never been seen failing proves nothing.
+
+### How
+- **Truly simultaneous:** every request is built and signed (Cognito access token fetched beforehand), its TCP + TLS
+  connection opened, then a `threading.Barrier` releases all of them together: 200 requests left within ~50 ms.
+- **Distinct buyers:** one ACTIVE hold per user is a product rule, so each hold attempt has its own Cognito test buyer
+  (160 in all, made exactly like test users A/B: example.com address, password only in an SSM SecureString).
+- **Two paths at once:** checkout holds (`POST /holds`, an instant 201 or 409) and direct orders (`POST /orders`; the
+  stock answer comes later from the saga: RESERVED, or FAILED with OUT_OF_STOCK).
+- **Classification:** CLAIMED | OUT_OF_STOCK | THROTTLED | ERROR. A 429 is retried with full-jitter backoff until a
+  real answer arrives and is counted separately, never as out of stock.
+- **Sampler:** consistent reads of the race products every 200 ms record the lowest `stock` and the highest claimed
+  ever seen, and check I5 (stock + held + reserved + sold + writtenOff = seed) on every sample.
+- **Recovery:** winners are cancelled (direct orders use `payment_manual`, so DemoPay never charges them) or left to
+  expire on their EventBridge Scheduler schedules; then every product must be back at its seed with held = 0.
+- **Test products off the shelf:** RACE-1 / RACE-X / RACE-Y carry `listed = false`, so `GET /products` hides them.
+
+### Debugging story
+The first live run (`docs/evidence/upgrade-3.1/before-fix.md`) passed the headline check, exactly 20 of 20 claimed
+and never more, but the harness also asks every 409 how much stock was left: **112 holds were refused "not enough
+stock" with 3-14 units still available**, and 5 direct orders failed "Insufficient stock for: one or more items". The
+cause: DynamoDB cancels one of two transactions that touch the same item at the same moment with the reason
+`TransactionConflict`; nothing was written and no condition failed, but the code read every cancelled transaction as
+"out of stock". Nobody was oversold or charged, but real buyers were turned away from a product that still had stock.
+
+## 15. Known gaps (and where they get fixed)
 
 ### What
 Design limits found and documented, each with a planned fix.

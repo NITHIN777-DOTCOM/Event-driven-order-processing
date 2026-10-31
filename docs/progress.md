@@ -4,7 +4,7 @@ Use this to resume work in a new session. See CLAUDE.md for the full spec and th
 
 ## Current phase
 **Upgrade step 2.4 — customer cancellation mid-saga: DONE (2026-10-30, report docs/evidence/upgrade-2.4-report.md).**
-Next: upgrade Phase 3 (3.1 oversell race test). Step 2.3 is DONE (report docs/evidence/upgrade-2.3-report.md).
+Now: step 3.1 oversell race test (IN PROGRESS, see "Step 3.1" below). Step 2.3 is DONE (report docs/evidence/upgrade-2.3-report.md).
 (Step-by-step notes for 2.1 to 2.4 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
@@ -177,6 +177,17 @@ Next: upgrade Phase 3 (3.1 oversell race test). Step 2.3 is DONE (report docs/ev
 - States per one-line COMPLETED order 9 -> 12; cancel while waiting 8; after payment 12.
 - Docs commit: evidence docs/evidence/upgrade-2.4-cancellation.md, report, README, interview-prep section 13 numbers +
   debugging story. Docs commit `cb5b002`: CI 41066644918 + Deploy 41066893944 green (0 changed; recorded after they finished).
+
+### Step 3.1 (oversell race test) — IN PROGRESS
+- Pre-flight: Lambda account concurrency 400 (unreserved 400, no reserved concurrency anywhere); API stage
+  `$default` burst 100 / rate 50 rps, no route overrides.
+- Prep `8471de8`: GET /products hides `listed = false` (the RACE-* test products); e2e SEEDED_AT = demo catalogue
+  only. CI 41181937338 + Deploy 41182050402 green.
+- Harness `scripts/oversell_race.py` (160 Cognito race buyers race-001..160: one ACTIVE hold per user, so each hold
+  attempt has its own buyer); negative control `tests/race/` (BrokenReserve 40 of 5 claimed; real code exactly 5).
+- Run `before-fix` (2026-10-31): exactly 20/20 and 10/10 claimed, never more, 0 ERROR, 0 throttled, I1-I9, recovery
+  652 s; but FAIL: 112 holds got 409 with 3-14 units available, 5 orders "Insufficient stock for: one or more items":
+  TransactionConflict read as out of stock. Fix next (separate commit), then re-run.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
