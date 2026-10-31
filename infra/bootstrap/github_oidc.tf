@@ -131,6 +131,18 @@ data "aws_iam_policy_document" "github_deploy" {
     actions   = ["lambda:GetLayerVersion"]
     resources = ["arn:aws:lambda:${var.region}:017000801446:layer:AWSLambdaPowertoolsPythonV3-*"]
   }
+  # Step 3.2: the AWS-published FIS Lambda extension layer on the saga Lambdas.
+  statement {
+    sid       = "FisExtensionLayer"
+    actions   = ["lambda:GetLayerVersion"]
+    resources = ["arn:aws:lambda:${var.region}:058264376524:layer:aws-fis-extension-*"]
+  }
+  # Step 3.2: the FIS fault-configuration bucket (order-saga-fis-config-<account>).
+  statement {
+    sid       = "FisConfigBucket"
+    actions   = ["s3:*"]
+    resources = ["arn:aws:s3:::${local.p}-fis-config-*", "arn:aws:s3:::${local.p}-fis-config-*/*"]
+  }
   statement {
     sid     = "StepFunctions"
     actions = ["states:*"]
@@ -232,7 +244,8 @@ data "aws_iam_policy_document" "github_deploy" {
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["lambda.amazonaws.com", "states.amazonaws.com", "pipes.amazonaws.com"]
+      # step 3.2: scheduler (the hourly audit schedule's role) and fis (the experiment role in the templates)
+      values = ["lambda.amazonaws.com", "states.amazonaws.com", "pipes.amazonaws.com", "scheduler.amazonaws.com", "fis.amazonaws.com"]
     }
   }
 
@@ -309,6 +322,30 @@ data "aws_iam_policy_document" "github_deploy" {
       "scheduler:TagResource", "scheduler:UntagResource", "scheduler:ListTagsForResource",
     ]
     resources = ["arn:aws:scheduler:${var.region}:${local.account_id}:schedule-group/${local.p}-*"]
+  }
+  # Step 3.2: Terraform manages ONE recurring schedule, the hourly invariant audit, in group order-saga-audit.
+  # (The holds group's one-time schedules stay runtime-only: this grant names the audit group alone.)
+  statement {
+    sid = "SchedulerAuditSchedule"
+    actions = [
+      "scheduler:CreateSchedule", "scheduler:GetSchedule", "scheduler:UpdateSchedule", "scheduler:DeleteSchedule",
+    ]
+    resources = ["arn:aws:scheduler:${var.region}:${local.account_id}:schedule/${local.p}-audit/*"]
+  }
+
+  # Step 3.2: FIS experiment TEMPLATES only (create, read, update, delete, tag). Deliberately NO fis:StartExperiment:
+  # CI defines experiments, a person runs them (scripts/chaos_run.py, with the local admin profile).
+  # Template ids are random, so the ARN can't carry the project prefix; the action resources are AWS's Lambda actions.
+  statement {
+    sid = "FisExperimentTemplates"
+    actions = [
+      "fis:CreateExperimentTemplate", "fis:GetExperimentTemplate", "fis:UpdateExperimentTemplate",
+      "fis:DeleteExperimentTemplate", "fis:TagResource", "fis:UntagResource", "fis:ListTagsForResource",
+    ]
+    resources = [
+      "arn:aws:fis:${var.region}:${local.account_id}:experiment-template/*",
+      "arn:aws:fis:${var.region}:${local.account_id}:action/aws:lambda:*",
+    ]
   }
 
   # SSM Parameter Store under /order-saga/* (e.g. the test-user password as a SecureString). It uses the

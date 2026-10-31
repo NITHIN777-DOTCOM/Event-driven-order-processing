@@ -29,6 +29,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.logger import StructuredLogger, get_logger
 from common.orders import ITEM_FULFILLED, LINE_FULFILLED, LINE_WRITTEN_OFF, cancellation_codes, find_line, history_entry, order_lines
 from common.timeutil import utc_now_iso
@@ -72,6 +73,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     if pick(order_id, line, log):
         log.info("Line fulfilled", fulfillmentEvent="fulfilled", productId=line["productId"], quantity=line["quantity"])
+        chaos.crash_after_write(order, "fulfill", log)  # E3 test switch: inert unless CHAOS_ENABLED
     return {"orderId": order_id, "lineId": line_id, "status": LINE_FULFILLED}
 
 

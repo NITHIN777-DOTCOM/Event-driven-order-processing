@@ -20,6 +20,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.logger import StructuredLogger, get_logger
 from common.orders import ITEM_WRITTEN_OFF, LINE_FULFILLED, LINE_WRITTEN_OFF, cancellation_codes, find_line, history_entry
 from common.timeutil import utc_now_iso
@@ -54,6 +55,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if write_off(order_id, line, reason, log.bind(lineId=line["lineId"])):
             units += int(line["quantity"])
         written_off.append(line["lineId"])
+    if units:
+        chaos.crash_after_write(order, "write_off", log)  # E3 test switch (only when this call wrote something off)
     return {"orderId": order_id, "writtenOffLineIds": written_off, "unitsWrittenOff": units}
 
 

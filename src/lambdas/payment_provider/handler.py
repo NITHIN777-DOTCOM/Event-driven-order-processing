@@ -58,6 +58,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.logger import StructuredLogger, get_logger
 from common.money import format_inr
 from common.orders import cancellation_codes
@@ -197,6 +198,7 @@ def charge_once(request: dict[str, Any], simulate: str, log: StructuredLogger) -
                 continue  # the balance changed between read and write: re-read
             raise
         log.info("Wallet debited", paymentId=charge["paymentId"], amount=amount, balanceAfter=after, walletId=wid)
+        chaos.crash_after_write(request, "debit", log)  # E3: SQS redelivers; the CHARGE record replays (no 2nd debit)
         return charge
     raise BalanceConflict("Wallet is busy with other payments")
 

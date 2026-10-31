@@ -16,6 +16,7 @@ import { DELIVER_TO } from "../catalog";
 import { useSession } from "../auth";
 import { SCENARIOS, formatPrice } from "../format";
 import type { Simulate } from "../types";
+import { retryWhenBusy } from "../retry";
 import { useWallet } from "../wallet";
 import { ErrorBanner, ProductImage } from "../components/ui";
 import { formatCountdown, useCheckoutHold, type HoldState } from "../hold";
@@ -56,6 +57,7 @@ export function Checkout() {
   const [simulate, setSimulate] = useState<Simulate>("none");
   const [busy, setBusy] = useState<"order" | "duplicate" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState<string | null>(null); // "busy, retrying…" while a 503 is retried
   const [duplicateResult, setDuplicateResult] = useState<{ requests: number; orderIds: string[] } | null>(null);
   const checkoutHold = useCheckoutHold(cart.lines.map((line) => ({ productId: line.productId, quantity: line.quantity })));
 
@@ -83,12 +85,19 @@ export function Checkout() {
     setBusy("order");
     setError(null);
     try {
-      const result = await createOrder({ ...buildOrder(), holdId: checkoutHold.holdId }, crypto.randomUUID());
+      // One Idempotency-Key for every try: a 503 retry can never create a second order.
+      const key = crypto.randomUUID();
+      const order = { ...buildOrder(), holdId: checkoutHold.holdId };
+      const result = await retryWhenBusy(() => createOrder(order, key), {
+        onRetry: (attempt, attempts) => setRetrying(`The store is busy, retrying… (attempt ${attempt} of ${attempts})`),
+      });
+      setRetrying(null);
       checkoutHold.markConsumed(); // the order owns the hold now: leaving the page must not release it
       cart.clear();
       window.setTimeout(refresh, 4000); // the saga debits within a few seconds
       navigate(`/orders/${result.orderId}`);
     } catch (err) {
+      setRetrying(null);
       setError((err as Error).message);
       setBusy(null);
     }
@@ -135,6 +144,11 @@ export function Checkout() {
       <h1 className="mb-4 text-[32px] font-semibold leading-tight">Checkout</h1>
       <StepHeader step={step} />
       <HoldBanner state={checkoutHold.state} secondsLeft={checkoutHold.secondsLeft} onHoldAgain={checkoutHold.holdAgain} />
+      {retrying && (
+        <div className="mb-6 rounded-card border border-line bg-retry-bg px-4 py-3 text-sm text-retry" role="status" data-testid="busy-retry">
+          {retrying}
+        </div>
+      )}
       {error && (
         <div className="mb-6">
           <ErrorBanner message={error} />
@@ -294,6 +308,13 @@ function HoldBanner({ state, secondsLeft, onHoldAgain }: { state: HoldState; sec
     return (
       <div className={`${base} border-line bg-white text-muted`} role="status" data-testid="hold-banner">
         Holding your items…
+      </div>
+    );
+  }
+  if (state.phase === "busy") {
+    return (
+      <div className={`${base} border-line bg-retry-bg text-retry`} role="status" data-testid="hold-banner">
+        The store is busy, retrying… (attempt {state.attempt} of {state.attempts})
       </div>
     );
   }

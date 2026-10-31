@@ -38,6 +38,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.logger import StructuredLogger, get_logger
 from common.money import format_inr
 from common.orders import LINE_FULFILLED, LINE_REFUNDED, find_line, history_entry, order_lines
@@ -102,6 +103,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         amount=refund.get("amount"),
         **cancel_event(cancelled, "refunded"),
     )
+    if refund.get("refunded") and chaos.enabled():  # E3 test switch: the order is read only while chaos is on
+        chaos.crash_after_write(orders_table.get_item(Key={"orderId": order_id}).get("Item"), "full_refund", log)
     return {
         "orderId": order_id,
         "refunded": bool(refund.get("refunded")),
@@ -182,6 +185,8 @@ def refund_lines(order_id: str, line_ids: list[str], log: StructuredLogger) -> d
     lost = [line for line in order_lines(order) if line["lineId"] in refunded_ids]
     outcome = {"fulfillmentEvent": "partially_fulfilled" if kept else "all_unavailable"} if newly_refunded else {}
     log.info("Unavailable lines refunded", refundedAmount=float(refunded), refundedLines=len(lost), keptLines=len(kept), **outcome)
+    if newly_refunded:
+        chaos.crash_after_write(order, "line_refund", log)  # E3 test switch: inert unless CHAOS_ENABLED
     return {
         "orderId": order_id,
         "refunded": True,

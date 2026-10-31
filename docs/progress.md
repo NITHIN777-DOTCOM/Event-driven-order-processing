@@ -3,8 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 3.1 — oversell race test: DONE (2026-10-31, report docs/evidence/upgrade-3.1-report.md).**
-Next: step 3.2 invariant/chaos checker. Steps 2.3 and 2.4 are DONE (reports docs/evidence/upgrade-2.3-report.md, upgrade-2.4-report.md).
+**Upgrade step 3.2 — chaos experiments + invariant auditor: IN PROGRESS (commit A).** Step 3.1 DONE (2026-10-31,
+report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports docs/evidence/upgrade-2.3-report.md, upgrade-2.4-report.md).
 (Step-by-step notes for 2.1 to 2.4 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
 
@@ -206,6 +206,22 @@ Next: step 3.2 invariant/chaos checker. Steps 2.3 and 2.4 are DONE (reports docs
 - Leftovers by design: 160 Cognito users race-001..160 and their SSM passwords; RACE-* products (listed = false, at seed).
 - Direct orders only won units in `before-fix` round 2 (4 RESERVED then cancelled); holds answer faster than the
   saga's ReserveInventory, so they usually drain the stock first.
+
+### Step 3.2 (chaos experiments + invariant auditor) — IN PROGRESS
+- Part 0: interview-prep §14 (fix 2's read only chooses 409 vs 503), tests/unit/test_race_harness.py (429 -> THROTTLED),
+  frontend/src/retry.ts ("busy, retrying…" on 503, Vitest in CI: `npm test`), capture_ui scenario busy_retry.
+- Auditor: src/common/invariants.py (I1-I9, legacy shapes, settle window + confirm twice), Lambda
+  order-saga-invariant-auditor (hourly schedule order-saga-invariant-audit-hourly in group order-saga-audit),
+  scripts/audit_invariants.py (--invoke runs the Lambda), alarms order-saga-invariant-violation / order-saga-stuck-orders.
+- Baseline (local, before deploy): 9 findings -> 2 checker bugs fixed (DEMOPAY_STARTED_AT, REFUND_COUNTER_SINCE) + 1 real
+  data bug: ORD-20261030-399cf6c3 (the 2.3 probe, COMPLETED with L2 written off) corrected to PARTIALLY_FULFILLED by
+  scripts/fix_probe_order.py (user chose "correct the data"). Then 0 violations / 0 stuck / 34 parked.
+- seededStock now on every inventory row (seed_inventory.py writes it; --stamp-seeded-stock stamped the 19 rows).
+- FIS: bucket order-saga-fis-config-<acct>, role order-saga-fis-experiment-role, layer aws-fis-extension-arm64:422 on 9
+  saga Lambdas (tag ChaosTarget=saga), templates E1/E2/E5 (stop condition = violation alarm). Chaos switches
+  src/common/chaos.py, CHAOS_ENABLED = Terraform var chaos_enabled (default false).
+- Bootstrap applied locally after "APPLY" (0/1/0): FIS templates (no StartExperiment), fis-config bucket, FIS layer,
+  audit schedule, PassRole to scheduler + fis. Layer overhead "before" window: docs/evidence/upgrade-3.2/layer-overhead.md.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).

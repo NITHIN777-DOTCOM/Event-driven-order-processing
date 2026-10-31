@@ -26,6 +26,30 @@ data "aws_iam_policy_document" "lambda_base" {
     actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
     resources = ["*"]
   }
+
+  # Step 3.2: the AWS FIS extension of a FIS-target function reads its fault configuration from the config prefix
+  # (read only; FIS itself writes there with the experiment role). Exactly the two grants the FIS docs list.
+  dynamic "statement" {
+    for_each = contains(local.fis_target_functions, each.key) ? [1] : []
+    content {
+      sid       = "FisExtensionListConfigPrefix"
+      actions   = ["s3:ListBucket"]
+      resources = [aws_s3_bucket.fis_config.arn]
+      condition {
+        test     = "StringLike"
+        variable = "s3:prefix"
+        values   = ["${local.fis_config_prefix}/*"]
+      }
+    }
+  }
+  dynamic "statement" {
+    for_each = contains(local.fis_target_functions, each.key) ? [1] : []
+    content {
+      sid       = "FisExtensionReadConfig"
+      actions   = ["s3:GetObject"]
+      resources = ["${aws_s3_bucket.fis_config.arn}/${local.fis_config_prefix}/*"]
+    }
+  }
 }
 
 data "aws_iam_policy_document" "create_order" {
@@ -409,6 +433,38 @@ data "aws_iam_policy_document" "hold_expiry" {
   }
 }
 
+# The invariant auditor (step 3.2): READ-ONLY on the seven tables it reconciles, the status of saga executions (to
+# label STUCK orders), and its own metrics namespace. No write action on any table.
+data "aws_iam_policy_document" "invariant_auditor" {
+  source_policy_documents = [data.aws_iam_policy_document.lambda_base["invariant_auditor"].json]
+
+  statement {
+    sid     = "ScanTablesItReconciles"
+    actions = ["dynamodb:Scan"]
+    resources = [
+      aws_dynamodb_table.orders.arn, aws_dynamodb_table.payments.arn, aws_dynamodb_table.psp_transactions.arn,
+      aws_dynamodb_table.wallet_txns.arn, aws_dynamodb_table.inventory.arn, aws_dynamodb_table.write_offs.arn,
+      aws_dynamodb_table.holds.arn,
+    ]
+  }
+  statement {
+    sid       = "ExecutionStatusOfStuckOrders"
+    actions   = ["states:DescribeExecution"]
+    resources = ["${replace(local.state_machine_arn, ":stateMachine:", ":execution:")}:*"]
+  }
+  # PutMetricData has no resource-level permissions; the namespace condition limits it to OrderSaga/Audit.
+  statement {
+    sid       = "PublishAuditMetrics"
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "cloudwatch:namespace"
+      values   = ["OrderSaga/Audit"]
+    }
+  }
+}
+
 locals {
   lambda_policies = {
     create_order      = data.aws_iam_policy_document.create_order.json
@@ -429,6 +485,7 @@ locals {
     write_off_lines   = data.aws_iam_policy_document.write_off_lines.json
     cancel_order      = data.aws_iam_policy_document.cancel_order.json
     begin_fulfillment = data.aws_iam_policy_document.begin_fulfillment.json
+    invariant_auditor = data.aws_iam_policy_document.invariant_auditor.json
     # The Cognito trigger touches no AWS resource: own logs + X-Ray only.
     pre_token = data.aws_iam_policy_document.lambda_base["pre_token"].json
   }

@@ -43,6 +43,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.auth import Caller, Forbidden, Unauthorized, caller_from
 from common.http import BadRequest, get_header, parse_json_body, response
 from common.logger import StructuredLogger, get_logger
@@ -229,7 +230,18 @@ def validate_request(body: dict[str, Any]) -> dict[str, Any]:
     if hold_id is not None and (not isinstance(hold_id, str) or not HOLD_ID_PATTERN.match(hold_id)):
         raise BadRequest("holdId must look like HOLD-YYYYMMDD-<10 hex characters>")
 
+    # Step 3.2 chaos experiments: "crash_after:<point>" (common/chaos.py). Refused unless CHAOS_ENABLED=true, so with
+    # chaos off no order can ever carry the field.
+    chaos_value = body.get("chaos")
+    if chaos_value is not None:
+        if not chaos.enabled():
+            raise BadRequest("chaos is disabled")
+        if not chaos.valid_value(chaos_value):
+            raise BadRequest(f"chaos must be one of: {', '.join(chaos.PREFIX + p for p in chaos.POINTS)}")
+
     normalised: dict[str, Any] = {"customerName": name.strip(), "items": normalised_items, "simulate": simulate}
+    if chaos_value is not None:
+        normalised["chaos"] = chaos_value
     if simulate_line is not None:
         normalised["simulateLine"] = simulate_line
     if hold_id:
@@ -305,6 +317,7 @@ def build_order(request: dict[str, Any], idempotency_key: str, caller: Caller) -
         "statusHistory": [history_entry(PENDING, "Order received via API", now)],
         "simulate": request["simulate"],
         **({"simulateLine": request["simulateLine"]} if "simulateLine" in request else {}),
+        **({"chaos": request["chaos"]} if "chaos" in request else {}),
         **({"holdId": request["holdId"]} if request.get("holdId") else {}),
         "createdAt": now,
         "updatedAt": now,

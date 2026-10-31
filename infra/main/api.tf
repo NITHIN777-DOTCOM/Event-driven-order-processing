@@ -9,7 +9,7 @@ resource "aws_apigatewayv2_api" "orders" {
     allow_methods = ["GET", "POST", "DELETE", "OPTIONS"]                 # DELETE: release a checkout hold
     allow_headers = ["authorization", "content-type", "idempotency-key"] # authorization: the Cognito access token
     # Lets browser JavaScript read the idempotency response headers.
-    expose_headers = ["idempotency-key", "idempotent-replayed"]
+    expose_headers = ["idempotency-key", "idempotent-replayed", "retry-after"] # retry-after: the 503 "busy" answer (step 3.2)
     max_age        = 300
   }
 }

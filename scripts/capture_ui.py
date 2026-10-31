@@ -331,6 +331,52 @@ class Run:
         })
         print(f"hold expiry UI: {hold_id} -> {again}, released on leaving: {released}")
 
+    def busy_retry(self, page: Page) -> None:
+        """Step 3.2: the API answers 503 "busy" (a product row stayed contended). Playwright fakes two 503s on POST /holds
+        and one on POST /orders; the storefront must show "busy, retrying…", retry with backoff, and end with exactly one
+        order (the same Idempotency-Key on every try) and one DEBIT."""
+        origin = self.base
+        faked = {"holds": 2, "orders": 1}
+        sent_keys: list[str] = []
+
+        def busy_then_real(route, request) -> None:
+            path = request.url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+            if request.method == "POST" and path in faked:
+                if path == "orders":
+                    sent_keys.append(request.headers.get("idempotency-key", ""))
+                if faked[path] > 0:
+                    faked[path] -= 1
+                    route.fulfill(
+                        status=503,
+                        content_type="application/json",
+                        headers={"Access-Control-Allow-Origin": origin, "Access-Control-Expose-Headers": "retry-after", "Retry-After": "1"},
+                        body=json.dumps({"error": "RACE busy: the product is contended, retry shortly"}),
+                    )
+                    return
+            route.continue_()
+
+        page.route(f"{self.api}/**", busy_then_real)
+        self.sign_in(page)
+        self.add_from_listing(page, "Slim Wireless Mouse")
+        page.goto(self.base + "/checkout")
+        expect(page.get_by_test_id("hold-banner")).to_contain_text("The store is busy, retrying")
+        self.shot(page, "desktop-07e-checkout-hold-busy-retrying", full_page=False)
+        expect(page.get_by_test_id("hold-countdown")).to_be_visible(timeout=15000)  # held after the retries
+        page.locator("#name").fill(NAME)
+        page.get_by_role("button", name="Continue to payment").click()
+        pay = page.get_by_role("button", name=re.compile(r"^Pay ₹"))
+        expect(page.get_by_text(re.compile(r"^₹[\d,]+$")).first).to_be_visible()  # wallet balance loaded
+        pay.click()
+        expect(page.get_by_test_id("busy-retry")).to_contain_text("The store is busy, retrying")
+        self.shot(page, "desktop-07f-checkout-order-busy-retrying", full_page=False)
+        page.wait_for_url(re.compile(r"/orders/ORD-\d{8}-[0-9a-f]{8}$"), timeout=20_000)
+        order_id = page.url.rsplit("/", 1)[-1]
+        result = self.wait_terminal(page)
+        one_key = len(sent_keys) == 2 and len(set(sent_keys)) == 1
+        print(f"busy retry UI: hold retried {2 - faked['holds']}x, order retried with one key: {one_key} ({len(sent_keys)} POSTs)")
+        self.record("Busy 503 -> retried (hold x2, order x1)", order_id, result if one_key else f"{result} (keys {sent_keys})", 1)
+        self.results[-1]["ok"] = self.results[-1]["ok"] and one_key and faked == {"holds": 0, "orders": 0}
+
     def mobile(self, phone: Page) -> None:
         base = self.base
         self.sign_in(phone)
@@ -395,6 +441,10 @@ def main() -> None:
         held = browser.new_context(viewport=DESKTOP).new_page()
         held.on("console", lambda msg: msg.type == "error" and run.console_errors.append(msg.text))
         run.hold_expiry(held)
+        busy = browser.new_context(viewport=DESKTOP).new_page()
+        # The faked 503s log "Failed to load resource" by design; every other console error still counts.
+        busy.on("console", lambda msg: msg.type == "error" and "status of 503" not in msg.text and run.console_errors.append(msg.text))
+        run.busy_retry(busy)
         phone = browser.new_context(viewport=MOBILE, device_scale_factor=2, is_mobile=True, has_touch=True).new_page()
         phone.on("console", lambda msg: msg.type == "error" and run.console_errors.append(msg.text))
         run.mobile(phone)

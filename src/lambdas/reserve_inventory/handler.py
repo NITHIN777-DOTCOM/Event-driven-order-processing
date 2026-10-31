@@ -30,6 +30,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.holds import ACTIVE, EXPIRED, consume_items, delete_schedule, end_hold, is_overdue, lost_the_race
 from common.logger import StructuredLogger, get_logger
 from common.orders import OUT_OF_STOCK, RESERVED, cancellation_codes, order_lines, status_update
@@ -75,7 +76,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         log.warning("Simulated out-of-stock")
         raise record_out_of_stock(order_id, f"Insufficient stock for: {order['items'][0]['productId']} (simulated)")
     elif order.get("holdId") and consume_hold(order, log, stamp):
-        pass  # the checkout hold's units became this order's reservation
+        chaos.crash_after_write(order, "reserve", log)  # E3 test switch: inert unless CHAOS_ENABLED (common/chaos.py)
     else:
         try:
             reserve_stock(order, fresh_after_hold=bool(order.get("holdId")), stamp=stamp)
@@ -83,6 +84,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             log.warning("Out of stock", reason=str(err))
             raise record_out_of_stock(order_id, str(err)) from err
         log.info("Inventory reserved", items=[(i["productId"], i["quantity"]) for i in order["items"]])
+        chaos.crash_after_write(order, "reserve", log)
 
     # Only what later states need goes back to the state machine.
     return {

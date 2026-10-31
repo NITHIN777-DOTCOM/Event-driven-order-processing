@@ -10,10 +10,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createHold, releaseHold, type HoldItems } from "./api";
 import { getAccessToken } from "./auth";
+import { retryWhenBusy } from "./retry";
 import type { Hold } from "./types";
 
 export type HoldState =
   | { phase: "holding" }
+  | { phase: "busy"; attempt: number; attempts: number } // 503: the store is busy; retrying with backoff (retry.ts)
   | { phase: "active"; hold: Hold; offsetMs: number }
   | { phase: "expired"; hold: Hold }
   | { phase: "unavailable"; message: string }; // e.g. 409: a product is short; checkout still works without a hold
@@ -42,7 +44,9 @@ export function useCheckoutHold(items: HoldItems) {
     enqueue(async () => {
       try {
         token.current = await getAccessToken();
-        const created = await createHold(JSON.parse(itemsKey) as HoldItems);
+        const created = await retryWhenBusy(() => createHold(JSON.parse(itemsKey) as HoldItems), {
+          onRetry: (attempt, attempts) => setState({ phase: "busy", attempt, attempts }),
+        });
         heldId.current = created.holdId;
         consumed.current = false;
         setState({ phase: "active", hold: created, offsetMs: Date.parse(created.serverTime) - Date.now() });

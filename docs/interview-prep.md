@@ -1373,6 +1373,14 @@ don't show up in single-request tests or code review, and a race test that has n
   applied nothing and every transaction carries its own conditions.
 - **503 vs 409 when conflicts never clear:** a consistent read decides. Answering "sold out" for a busy product loses
   a sale; answering "busy, retry" for a sold-out product only costs one more request.
+- **Why that read can't cause an oversell (step 3.2 follow-up):** fix 2's direct stock read only CHOOSES THE ANSWER
+  (409 vs 503) after the claim already failed; it never claims stock and writes nothing. Every unit is still claimed
+  only by the conditional write (`stock >= :qty`). A stale or racing read can at worst pick the wrong one of two
+  refusals ("sold out" vs "busy"): nobody gets a unit from it, so it can't oversell.
+- **The storefront's side of a 503 (step 3.2):** `frontend/src/retry.ts` shows "The store is busy, retrying… (attempt n
+  of 4)" and retries POST /holds and POST /orders with backoff (the server's Retry-After, else 0.5/1/2 s with jitter).
+  An order keeps ONE Idempotency-Key across every try, so a retry can never create a second order. Only 503 is
+  retried; 409 is a real answer. Vitest unit tests + a capture_ui scenario that fakes two 503s in the browser.
 - **Hot item:** every buyer of one product writes the same DynamoDB item (~1,000 WCU/s per partition). Fine for 200
   buyers; a much bigger flash sale would split stock into N sub-counters (buckets) and pick one at random.
 - **Live test vs only unit tests:** the live run costs ~$0.05 and 15 minutes (mostly hold expiry) but tests the real
@@ -1411,6 +1419,9 @@ don't show up in single-request tests or code review, and a race test that has n
    response: 429 / TooManyRequests is THROTTLED and retried with jittered backoff until a real 201/409 arrives, and is
    reported in its own column; only a 409 (or a saga FAILED with OUT_OF_STOCK) counts as out of stock. In practice 0
    requests were throttled (stage burst 100, Lambda peak 200 of 400), so the throttle path stayed ready but unused.
+   Since step 3.2 a unit test (`tests/unit/test_race_harness.py`) feeds the real `send()` fake 429s: they are retried,
+   counted as THROTTLED, and only the answer after them (201, or a 409 out of stock) becomes the outcome; a request
+   throttled on every try ends as ERROR, never OUT_OF_STOCK.
 
 ### Debugging story
 The first live run (`docs/evidence/upgrade-3.1/before-fix.md`) passed the headline check, exactly 20 of 20 claimed
@@ -1452,8 +1463,9 @@ claiming there are no gaps.
 - ~~ID token used as the API credential~~ **fixed in step 2.0**: access tokens only, with a pre-token-generation
   trigger (section 9).
 - **A charge whose callback never arrives** (webhook down for longer than DemoPay's 5 retries) leaves a debit for a
-  FAILED order until someone redrives `order-saga-psp-dlq` (the alarm says so). Fix: a scheduled reconciliation job
-  that asks the provider about intents in TIMED_OUT/FAILED and refunds any charge it finds.
+  FAILED order until someone redrives `order-saga-psp-dlq` (the alarm says so). Since step 3.2 the hourly invariant
+  auditor DETECTS it (I2: a FAILED order with net charge > 0 -> alarm `order-saga-invariant-violation`, section 16);
+  it does not repair it. Remaining fix: an automatic refund for charges the auditor finds on failed orders.
 - Compensation failures are recorded in the execution (`refundError`/`releaseError`). Since step 2.3, refund and
   write-off Lambda errors raise the alarm `order-saga-refund-or-write-off-errors`; since step 2.4, ReleaseInventory,
   BeginFulfillment and cancel-API errors raise `order-saga-cancellation-errors`.
@@ -1474,3 +1486,69 @@ None recorded.
 
 ### Debugging story
 None recorded.
+
+## 16. Chaos testing and reconciliation
+
+### What
+Two things, built together in step 3.2:
+- **An invariant auditor**, a reconciliation job (Lambda `order-saga-invariant-auditor`, hourly via EventBridge
+  Scheduler, also `scripts/audit_invariants.py`). It re-checks I1-I9 over everything stored: orders, payment intents,
+  DemoPay's own charge/refund records, the customers' wallet ledger, the five stock counters per product, holds and
+  write-off records. Findings are VIOLATION (money or stock doesn't add up: always a bug) or STUCK (an order not
+  terminal 30+ minutes after creation, with its execution status). Metrics `OrderSaga/Audit`, alarms
+  `order-saga-invariant-violation` and `order-saga-stuck-orders`.
+- **Chaos experiments** that break things on purpose while traffic flows: AWS FIS Lambda faults (E1 errors, E2 delays,
+  E5 refund outage), test-only crash-after-write switches (E3), duplicate deliveries (E4), with the auditor watching.
+
+### Why (the problem it solves)
+Every saga step is designed to be idempotent and every money movement exactly-once. Those are claims; failures in
+production are partial (a Lambda dies after its write but before it returns), duplicated (SQS, webhooks and users all
+retry) and slow (a provider answers after the timeout). The auditor is the independent check: it doesn't trust the
+code that wrote the data, it re-derives the books, like a finance team reconciling bank statements against orders.
+
+### How
+- **Auditor, read-only:** paginated, strongly consistent scans of 7 tables. Per order: I1/I2/I6 (net charge = what was
+  delivered), I3 (at most one DEBIT, each refund once, and every ledger entry matched 1:1 with a DemoPay record), I4,
+  I7, I8, I9, and "a terminal order holds no reservation". Per product (I5): the five counters add up to `seededStock`
+  (exact: every stock move is one transaction on one item), and each counter is explained by the records (held =
+  ACTIVE holds, reserved = open reservations, sold = fulfilled lines, writtenOff = audit records).
+- **Live data, not a snapshot:** in-flight orders (< 30 min) are skipped; anything changed in the last 2 minutes is
+  "settling"; and a violation must appear in two audits 10 s apart to count, so a refund landing between two scans
+  can't raise a false alarm.
+- **Legacy shapes:** pre-DemoPay orders (no money), pre-2.1 direct debits (no intent), pre-2.3 refunds (no running
+  `refundedAmount`), pre-2.3 COMPLETED orders (no per-line state; reservations before the last seed are ignored), poison
+  orders parked in the DLQ by design (PARKED, not STUCK).
+- **FIS on Lambda:** the AWS FIS extension layer (+ `AWS_LAMBDA_EXEC_WRAPPER`, `AWS_FIS_CONFIGURATION_LOCATION`) on the
+  9 saga Lambdas; a running experiment writes a fault config to a private S3 prefix that the extension polls. Every
+  template has the violation alarm as its stop condition and a fixed duration.
+- **Crash-after-write switches:** `src/common/chaos.py`. Only when `CHAOS_ENABLED=true` (Terraform variable, default
+  false) AND the order carries `chaos = "crash_after:<point>"` (refused by POST /orders while disabled). The handler
+  commits its write, then raises before returning; it fires only in the invocation that did the write.
+
+### Trade-offs / alternatives considered
+- **Full scan hourly vs streams:** at this size (~1,000 orders) a full scan is seconds and cents, and it is the
+  simplest correct reconciliation. At scale: incremental, stream-based reconciliation (DynamoDB Streams of orders,
+  intents and ledger into per-order running balances; only orders that changed are re-checked).
+- **Detect vs repair:** the auditor never repairs. A job that "fixes" money on its own can turn one bug into two;
+  findings page a human with a runbook (redrive for parked executions).
+- **FIS vs code switches:** FIS needs no code change and tests the real failure path, but hits a percentage of ALL
+  invocations; switches hit one chosen order at one chosen point but are code that ships (inert, and proven inert).
+
+### Numbers
+Filled in after the experiment runs (docs/evidence/upgrade-3.2-chaos.md).
+- Baseline before any chaos (2026-10-31): 1,016 orders, 360 charges, 19 products audited: **0 violations, 0 stuck**,
+  34 parked (poison orders in the DLQ by design + the outbox probe), after fixing 2 checker bugs (legacy shapes) and
+  1 real data inconsistency (below).
+
+### Likely interview questions
+Answers are completed with measured numbers in the step's final commit.
+
+### Debugging story
+The first baseline run reported 9 violations before any chaos. Seven were the checker not understanding history:
+an order created 1 s after my guessed DemoPay cutoff (no money ever moved), and five 2026-10-29 refunds made before
+the CHARGE record had a running `refundedAmount`. Two were real: `ORD-20261030-399cf6c3` said COMPLETED, but L2 had
+been written off and refunded. It was step 2.3's own test probe, which invoked the per-line Lambdas directly on an
+order already completed by the old definition. Money and stock were consistent; only the status lied. Fixed with a
+one-off conditional correction (`scripts/fix_probe_order.py`, status PARTIALLY_FULFILLED plus a history entry).
+Lesson: a test harness that bypasses the orchestrator can leave states the orchestrator could never produce.
+

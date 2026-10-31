@@ -4,11 +4,18 @@ Idempotent: re-running it overwrites each product, which resets stock to its see
 reserved, held, sold and writtenOff to 0. The first 5 productIds are the original Phase 1 ones, so old orders and scripts
 keep working.
 
-Usage: python scripts/seed_inventory.py
+Every row records `seededStock` (step 3.2): the invariant auditor checks I5 against it,
+stock + held + reserved + sold + writtenOff = seededStock.
+
+Usage:
+    python scripts/seed_inventory.py                       # (re-)seed the catalogue
+    python scripts/seed_inventory.py --stamp-seeded-stock  # only record seededStock on rows seeded before 3.2,
+                                                           # and only where the five counters already add up to it
 """
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -134,11 +141,44 @@ PRODUCTS = [
 ]
 
 
+def stamp_seeded_stock(table, seeds: dict[str, int]) -> None:
+    """Record seededStock on existing rows WITHOUT re-seeding. Conditional: the attribute is absent and the five counters
+    add up to the catalogue value right now (each counter move is one transaction on this row, so the sum is exact).
+    A row that doesn't add up is left alone and reported: that would be an I5 violation to investigate, not to paper over."""
+    for product_id, seeded in seeds.items():
+        item = table.get_item(Key={"productId": product_id}, ConsistentRead=True).get("Item")
+        if not item or "seededStock" in item:
+            print(f"  {product_id:<17} {'missing' if not item else 'already has seededStock = ' + str(item['seededStock'])}")
+            continue
+        total = sum(int(item.get(k, 0)) for k in ("stock", "held", "reserved", "sold", "writtenOff"))
+        if total != seeded:
+            print(f"  {product_id:<17} NOT stamped: counters add up to {total}, catalogue says {seeded}")
+            continue
+        try:
+            table.update_item(
+                Key={"productId": product_id},
+                UpdateExpression="SET seededStock = :s",
+                # Unchanged since the read above (conditions can't add, so each counter must still equal what was summed).
+                ConditionExpression="attribute_not_exists(seededStock) AND stock = :st AND held = :h AND reserved = :r AND sold = :so AND writtenOff = :w",
+                ExpressionAttributeValues={
+                    ":s": seeded, ":st": item["stock"], ":h": item.get("held", 0), ":r": item.get("reserved", 0),
+                    ":so": item.get("sold", 0), ":w": item.get("writtenOff", 0),
+                },
+            )
+            print(f"  {product_id:<17} seededStock = {seeded}")
+        except table.meta.client.exceptions.ConditionalCheckFailedException:
+            print(f"  {product_id:<17} changed while stamping; re-run")
+
+
 def main() -> None:
     outputs = load_outputs()
     table = boto3.resource("dynamodb", region_name=outputs["region"]).Table(outputs["inventory_table"])
     # When the counters were reset; e2e_test.py's I5 compares writtenOff with the write-off records made since then.
     seeded_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    if "--stamp-seeded-stock" in sys.argv:
+        print(f"Recording seededStock on {table.name} (no re-seed):")
+        stamp_seeded_stock(table, {p["productId"]: p["stock"] for p in PRODUCTS} | {"RACE-1": 20, "RACE-X": 10, "RACE-Y": 10})
+        return
 
     with table.batch_writer() as batch:
         for product in PRODUCTS:
@@ -153,6 +193,7 @@ def main() -> None:
                     "sold": 0,  # step 2.3: units in fulfilled order lines
                     "writtenOff": 0,  # step 2.3: units of unavailable (damaged) lines, never back on sale
                     "seededAt": seeded_at,
+                    "seededStock": product["stock"],  # step 3.2: what I5 must add up to (invariant auditor)
                     "imageKey": f"products/{product['productId'].lower()}.webp",
                 }
             )

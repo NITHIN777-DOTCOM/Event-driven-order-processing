@@ -27,6 +27,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The server's Retry-After (seconds), sent with a 503 "busy" (see retry.ts). */
+    readonly retryAfterSeconds?: number,
   ) {
     super(message);
   }
@@ -45,7 +47,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<{ status: n
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new ApiError((body as { error?: string }).error ?? `Request failed (HTTP ${res.status})`, res.status);
+    const retryAfter = Number(res.headers.get("Retry-After")) || undefined;
+    throw new ApiError((body as { error?: string }).error ?? `Request failed (HTTP ${res.status})`, res.status, retryAfter);
   }
   return { status: res.status, body: body as T };
 }

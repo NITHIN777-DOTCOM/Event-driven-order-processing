@@ -47,6 +47,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.http import response
 from common.logger import StructuredLogger, get_logger
 from common.money import format_inr
@@ -172,6 +173,7 @@ def on_succeeded(intent: dict[str, Any], callback: dict[str, Any], log: Structur
         if captured == "cancelled":
             return refund_cancelled_payment(intent, callback, log)
         if captured:
+            chaos.crash_after_write(intent, "webhook_capture", log)  # E3: 500 -> DemoPay redelivers the callback
             return resume(intent, "success", callback, log)
         # Lost a race (the saga timed out, or a duplicate got here first): decide again on the fresh intent.
         intent = payments_table.get_item(Key={"paymentIntentId": intent["paymentIntentId"]}, ConsistentRead=True)["Item"]

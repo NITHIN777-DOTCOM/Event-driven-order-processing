@@ -159,12 +159,51 @@ locals {
         ORDERS_TABLE = aws_dynamodb_table.orders.name
       }
     }
+    invariant_auditor = {
+      description = "Reconciliation job - audits invariants I1-I9 over orders - payments - DemoPay ledger and stock - hourly via EventBridge Scheduler - metrics OrderSaga/Audit - read-only"
+      timeout     = 180 # two full audits (a few seconds each at this size) with a 10 s pause between them
+      memory_size = 512 # holds every order and ledger entry in memory while reconciling
+      environment = {
+        ORDERS_TABLE      = aws_dynamodb_table.orders.name
+        PAYMENTS_TABLE    = aws_dynamodb_table.payments.name
+        PSP_TABLE         = aws_dynamodb_table.psp_transactions.name
+        WALLET_TXNS_TABLE = aws_dynamodb_table.wallet_txns.name
+        INVENTORY_TABLE   = aws_dynamodb_table.inventory.name
+        WRITE_OFFS_TABLE  = aws_dynamodb_table.write_offs.name
+        HOLDS_TABLE       = aws_dynamodb_table.holds.name
+      }
+    }
     pre_token = {
       description = "Cognito pre-token-generation trigger (V2_0) for order-saga-users - adds email + email_verified to ACCESS tokens"
       # Cognito waits at most 5 s for a trigger; the function makes no AWS calls and finishes in milliseconds.
       timeout     = 5
       environment = {} # no tables, no topics: it only reads the event Cognito sends
     }
+  }
+
+  # Step 3.2 chaos experiments (chaos.tf, src/common/chaos.py).
+  # FIS targets: the saga Lambdas get the AWS FIS extension layer and its two variables. With no experiment running,
+  # the extension only polls the S3 config prefix (every 60 s while the function is active) and changes nothing.
+  fis_target_functions = toset([
+    "reserve_inventory", "request_payment", "payment_provider", "payment_webhook", "fulfill_item",
+    "refund_payment", "release_inventory", "write_off_lines", "begin_fulfillment",
+  ])
+  fis_environment = {
+    AWS_LAMBDA_EXEC_WRAPPER        = "/opt/aws-fis/bootstrap"
+    AWS_FIS_CONFIGURATION_LOCATION = "${aws_s3_bucket.fis_config.arn}/${local.fis_config_prefix}/"
+  }
+  # Functions with a crash-after-write switch (E3) or that pass the chaos field on. CHAOS_ENABLED is the Terraform
+  # variable chaos_enabled: "false" unless a chaos run flips it for E3, and flipped back right after.
+  chaos_switch_functions = toset([
+    "create_order", "reserve_inventory", "request_payment", "payment_provider", "payment_webhook",
+    "refund_payment", "fulfill_item", "write_off_lines", "release_inventory",
+  ])
+  lambda_environment = {
+    for key, fn in local.lambda_functions : key => merge(
+      fn.environment,
+      contains(local.fis_target_functions, key) ? local.fis_environment : {},
+      contains(local.chaos_switch_functions, key) ? { CHAOS_ENABLED = tostring(var.chaos_enabled) } : {},
+    )
   }
 
   # order-saga-create-order, order-saga-get-order, ...
@@ -214,15 +253,15 @@ resource "aws_lambda_function" "fn" {
   runtime          = "python3.12"
   architectures    = ["arm64"] # Graviton: about 20% cheaper per GB-second than x86
   handler          = "handler.lambda_handler"
-  layers           = [local.powertools_layer_arn]
+  layers           = contains(local.fis_target_functions, each.key) ? [local.powertools_layer_arn, local.fis_extension_layer_arn] : [local.powertools_layer_arn]
   filename         = data.archive_file.lambda[each.key].output_path
   source_code_hash = data.archive_file.lambda[each.key].output_base64sha256
   timeout          = try(each.value.timeout, local.default_lambda_timeout)
-  memory_size      = 256
+  memory_size      = try(each.value.memory_size, 256)
 
   # Omitted when a function needs no variables (an empty block shows up as a change on every plan).
   dynamic "environment" {
-    for_each = length(each.value.environment) > 0 ? [each.value.environment] : []
+    for_each = length(local.lambda_environment[each.key]) > 0 ? [local.lambda_environment[each.key]] : []
     content {
       variables = environment.value
     }
@@ -237,9 +276,8 @@ resource "aws_lambda_function" "fn" {
     log_group  = aws_cloudwatch_log_group.lambda[each.key].name
   }
 
-  tags = {
-    Name = local.lambda_names[each.key]
-  }
+  # ChaosTarget = saga marks the FIS targets (chaos.tf): experiment E1 selects all of them by this tag.
+  tags = merge({ Name = local.lambda_names[each.key] }, contains(local.fis_target_functions, each.key) ? { ChaosTarget = "saga" } : {})
 
   depends_on = [aws_iam_role_policy.lambda]
 }

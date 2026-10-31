@@ -184,3 +184,24 @@ output "cancellation_function_names" {
     hold_expiry       = local.lambda_names["hold_expiry"]
   }
 }
+
+# Step 3.2: chaos experiments + the invariant auditor.
+output "invariant_auditor_function_name" {
+  description = "The reconciliation Lambda (hourly; scripts/audit_invariants.py --invoke runs it on demand)"
+  value       = aws_lambda_function.fn["invariant_auditor"].function_name
+}
+
+output "fis_experiment_template_ids" {
+  description = "FIS experiment template id per chaos experiment (scripts/chaos_run.py starts them)"
+  value       = { for key, template in aws_fis_experiment_template.chaos : key => template.id }
+}
+
+output "fis_config_bucket" {
+  description = "Where FIS writes Lambda fault configurations while an experiment runs"
+  value       = aws_s3_bucket.fis_config.bucket
+}
+
+output "chaos_enabled" {
+  description = "CHAOS_ENABLED on the saga Lambdas (must be false outside a chaos run)"
+  value       = var.chaos_enabled
+}

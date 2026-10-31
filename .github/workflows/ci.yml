@@ -69,6 +69,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test # vitest: unit tests of the storefront (e.g. the 503 "busy, retrying" logic)
       - run: npm run build
 
   plan:

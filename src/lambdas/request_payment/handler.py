@@ -35,6 +35,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.logger import StructuredLogger, get_logger
 from common.money import format_inr
 from common.orders import PAYMENT_PENDING, PAYMENT_RETRY, status_update
@@ -81,6 +82,9 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         log.info("Order was cancelled before the payment was requested; not charging")
         raise OrderCancelled(f"Order {order_id} was cancelled by the customer")
     intent = upsert_intent(order, intent_id, token, simulate)
+    if intent is not None and chaos.crash_point(order):
+        # E3: the webhook reads the switch from the intent (it never reads the order before capturing).
+        payments_table.update_item(Key={"paymentIntentId": intent_id}, UpdateExpression="SET chaos = :c", ExpressionAttributeValues={":c": order["chaos"]})
     if intent is None:
         return answer_from_finished_intent(intent_id, token, log)
 
@@ -104,20 +108,17 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         ),
     )
     # Last, so a failure before this line can't leave DemoPay working on a request the saga never paused for.
-    sqs.send_message(
-        QueueUrl=PSP_QUEUE_URL,
-        DelaySeconds=delay,
-        MessageBody=json.dumps(
-            {
-                "paymentIntentId": intent_id,
-                "orderId": order_id,
-                "walletId": order.get("walletId"),
-                "amount": str(amount),
-                "currency": order.get("currency", "INR"),
-                "simulate": simulate,
-            }
-        ),
-    )
+    message = {
+        "paymentIntentId": intent_id,
+        "orderId": order_id,
+        "walletId": order.get("walletId"),
+        "amount": str(amount),
+        "currency": order.get("currency", "INR"),
+        "simulate": simulate,
+    }
+    if chaos.crash_point(order):  # step 3.2 E3: passed on like `simulate`, only while CHAOS_ENABLED
+        message["chaos"] = order["chaos"]
+    sqs.send_message(QueueUrl=PSP_QUEUE_URL, DelaySeconds=delay, MessageBody=json.dumps(message))
     log.info("Payment requested; saga paused until the webhook", intentStatus=REQUESTED, amount=amount, providerDelaySeconds=delay)
     return {"paymentIntentId": intent_id, "status": REQUESTED}
 

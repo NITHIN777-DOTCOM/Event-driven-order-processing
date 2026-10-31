@@ -219,7 +219,7 @@ def seed_race_products() -> None:
                 Item={
                     "productId": product, "name": f"Race test product {product}", "category": "Test",
                     "price": RACE_PRICE, "mrp": RACE_PRICE, "stock": units, "held": 0, "reserved": 0, "sold": 0,
-                    "writtenOff": 0, "listed": False, "seededAt": seeded_at,
+                    "writtenOff": 0, "listed": False, "seededAt": seeded_at, "seededStock": units,
                     "description": "Test-only product for scripts/oversell_race.py (step 3.1); never listed in the storefront.",
                 },
                 ConditionExpression="attribute_not_exists(productId) OR (held = :z AND reserved = :z AND sold = :z AND writtenOff = :z)",

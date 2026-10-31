@@ -26,7 +26,8 @@ locals {
 }
 
 # -----------------------------------------------------------------------------
-# Alarms (10 alarms = 12 alarm metrics: 2 over the 10-metric free tier since step 2.1, about $0.20/month)
+# Alarms (15 in all since step 3.2, the 2 audit alarms in audit.tf; standard alarms cost $0.10 per alarm metric per
+# month beyond the 10 free: a few dollars at most)
 # -----------------------------------------------------------------------------
 resource "aws_cloudwatch_metric_alarm" "outbox_dlq_not_empty" {
   alarm_name        = "${var.project_prefix}-outbox-dlq-not-empty"
@@ -812,6 +813,41 @@ locals {
     },
   ]
 
+  # Row y=71 (step 3.2): the invariant auditor. Both lines must stay at 0; each point is one audit run.
+  audit_widgets = [
+    {
+      type   = "metric"
+      x      = 0
+      y      = 71
+      width  = 12
+      height = 6
+      properties = {
+        title  = "Invariant audit: violations and stuck orders per run (must be 0; alarms at > 0)"
+        region = var.region
+        view   = "timeSeries"
+        stat   = "Maximum"
+        period = 60
+        metrics = [
+          ["OrderSaga/Audit", "Violations", { label = "Violations (I1-I9)", color = "#d62728" }],
+          ["OrderSaga/Audit", "Stuck", { label = "Stuck orders (30+ min, not terminal)", color = "#ff7f0e" }],
+          ["OrderSaga/Audit", "Parked", { label = "Parked by design (dead-lettered)", color = "#7f7f7f" }],
+        ]
+        yAxis = { left = { min = 0 } }
+      }
+    },
+    {
+      type   = "alarm"
+      x      = 12
+      y      = 71
+      width  = 12
+      height = 6
+      properties = {
+        title  = "Reconciliation alarms (also the stop condition of every FIS experiment)"
+        alarms = [aws_cloudwatch_metric_alarm.invariant_violation.arn, aws_cloudwatch_metric_alarm.stuck_orders.arn]
+      }
+    },
+  ]
+
   dashboard_widgets = concat(
     [
       # ---- Row 0: title + alarm status ----
@@ -1134,7 +1170,8 @@ locals {
     local.payment_widgets,
     local.hold_widgets,
     local.fulfillment_widgets,
-    local.cancel_widgets
+    local.cancel_widgets,
+    local.audit_widgets,
   )
 }
 

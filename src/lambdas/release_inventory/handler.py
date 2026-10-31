@@ -20,6 +20,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from common import chaos
 from common.logger import get_logger
 from common.orders import INVENTORY_RELEASED, LINE_FULFILLED, LINE_WRITTEN_OFF, cancellation_codes, order_lines, status_update
 from common.tracing import instrument_aws_sdk
@@ -55,6 +56,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         return {"orderId": order_id, "released": False, "reason": "already released"}
 
     log.info("Inventory released", items=[(i["productId"], i["quantity"]) for i in reserved_items])
+    chaos.crash_after_write(order, "release", log)  # E3 test switch: inert unless CHAOS_ENABLED
     return {"orderId": order_id, "released": True, "itemCount": len(reserved_items)}
 
 
