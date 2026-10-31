@@ -23,8 +23,11 @@ from botocore.exceptions import ClientError
 
 from common.orders import cancellation_codes
 
-CONFLICT_ATTEMPTS = 8  # with the backoff below: at most ~1.3 s of waiting in total
-BACKOFF_BASE_S, BACKOFF_CAP_S = 0.02, 0.4
+# 150 buyers on one row (the race test's round 1) still left 1 in ~150 conflicting through 8 tries with a 0.4 s cap,
+# so: 10 tries, waits from 50 ms capped at 1 s. At most ~5.6 s of waiting (typically ~2.8 s), well inside the 30 s
+# Lambda and API timeouts.
+CONFLICT_ATTEMPTS = 10
+BACKOFF_BASE_S, BACKOFF_CAP_S = 0.05, 1.0
 
 
 def is_conflict(err: ClientError) -> bool:

@@ -272,9 +272,14 @@ def write_hold(hold: dict[str, Any], log: StructuredLogger) -> bool:
             return False
         delete_schedule(scheduler, SCHEDULE_GROUP, hold["holdId"], log)
         short = [hold["items"][i]["productId"] for i, code in enumerate(codes[2:]) if code == "ConditionalCheckFailed"]
-        if not short:  # cancelled only by conflicts, every retry: busy, not out of stock
-            log.warning("Hold not created: the products stayed contended through every retry", codes=codes)
-            raise Busy("These products are in very high demand right now; please retry") from err
+        if not short:
+            # Cancelled only by conflicts, on every try. A consistent read settles it: if a product really is short
+            # now, that is a clean out-of-stock answer; if the stock is still there, the honest answer is "busy".
+            stock = {i["productId"]: int(inventory_table.get_item(Key={"productId": i["productId"]}, ConsistentRead=True)["Item"]["stock"]) for i in hold["items"]}
+            short = [i["productId"] for i in hold["items"] if stock[i["productId"]] < i["quantity"]]
+            if not short:
+                log.warning("Hold not created: the products stayed contended through every retry", codes=codes)
+                raise Busy("These products are in very high demand right now; please retry") from err
         product_id = short[0]
         available = int(inventory_table.get_item(Key={"productId": product_id}, ConsistentRead=True)["Item"]["stock"])
         log.info("Hold refused: not enough stock", productId=product_id, available=available)

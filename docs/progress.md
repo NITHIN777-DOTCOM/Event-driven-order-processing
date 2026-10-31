@@ -188,6 +188,11 @@ Now: step 3.1 oversell race test (IN PROGRESS, see "Step 3.1" below). Step 2.3 i
 - Run `before-fix` (2026-10-31): exactly 20/20 and 10/10 claimed, never more, 0 ERROR, 0 throttled, I1-I9, recovery
   652 s; but FAIL: 112 holds got 409 with 3-14 units available, 5 orders "Insufficient stock for: one or more items":
   TransactionConflict read as out of stock. Fix next (separate commit), then re-run.
+- Fix 1 `bbc7bcd` (common/transact.py: retry TransactionConflict on every stock path; 8 tries, 20-400 ms): CI
+  41183372836 + Deploy 41183541011 green (0 added, 19 changed). Harness commit `56ae364`'s CI 41183356083 was
+  superseded (cancel-in-progress) by bbc7bcd's, which tested the same tree plus the fix.
+- Run `after-fix-1`: 0 phantom out-of-stock (was 112), 20/20 + 10/10, I1-I9, I5, recovery 646 s; FAIL: 1 hold per
+  round ran out of conflict retries -> 503. Fix 2: 10 tries, 50 ms-1 s, and a consistent stock read before a 503.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).

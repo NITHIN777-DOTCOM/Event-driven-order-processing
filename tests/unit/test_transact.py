@@ -137,3 +137,13 @@ def test_hold_answers_busy_not_out_of_stock_when_conflicts_never_clear(aws, load
     assert code == 503 and "productId" not in body and headers["Retry-After"] == "1"
     assert aws.inventory.get_item(Key={"productId": "MECH-KEYBOARD"})["Item"]["stock"] == 2  # nothing held
     assert aws.scheduler.list_schedules(GroupName="test-holds")["Schedules"] == []  # its schedule was removed
+
+
+def test_hold_answers_out_of_stock_when_conflicts_never_clear_and_the_stock_is_gone(aws, load_handler):
+    api = load_handler("holds_api")
+    api.ddb_client = Contended(api.ddb_client, conflicts=99)
+    aws.inventory.update_item(Key={"productId": "MECH-KEYBOARD"}, UpdateExpression="SET stock = :z", ExpressionAttributeValues={":z": 0})
+
+    code, body, _ = post_hold(api)
+
+    assert code == 409 and body["productId"] == "MECH-KEYBOARD" and body["available"] == 0  # a clean answer, not 503

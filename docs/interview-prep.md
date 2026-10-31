@@ -1369,10 +1369,12 @@ cause: DynamoDB cancels one of two transactions that touch the same item at the 
 "out of stock". Nobody was oversold or charged, but real buyers were turned away from a product that still had stock.
 
 The fix (`src/common/transact.py`, a separate commit): `transact_write` retries a transaction while any cancellation
-reason is `TransactionConflict` (up to 8 tries, full-jitter backoff from 20 ms, capped at 400 ms). Retrying is safe
-because a cancelled transaction applied nothing and every one of these transactions is guarded by conditions. Only a
-`ConditionalCheckFailed` on a stock item is out of stock now. If conflicts never clear, a hold answers **503 + Retry-After**
-(not 409) and a reservation raises a Lambda error (not OutOfStock): busy is never reported as sold out. Used on every
+reason is `TransactionConflict` (10 tries, full-jitter backoff from 50 ms, capped at 1 s: at most ~5.6 s). Retrying is
+safe because a cancelled transaction applied nothing and every one of these transactions is guarded by conditions. Only
+a `ConditionalCheckFailed` on a stock item is out of stock now. If conflicts never clear, a hold does a consistent read:
+stock really short -> a clean 409; stock still there -> **503 + Retry-After** (busy is never reported as sold out). A
+reservation raises a Lambda error, not OutOfStock. The first version (8 tries, 20-400 ms) still let 1 of ~150 holds
+per round run out of tries with a 503 in run `after-fix-1`; the wider budget plus the read is the second fix. Used on every
 stock path: create / release / expire / consume a hold, reserve, release (fulfill_item and write_off_lines already had
 their own conflict loops). 8 unit tests in `tests/unit/test_transact.py`.
 
