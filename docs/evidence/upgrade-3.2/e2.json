@@ -1,0 +1,448 @@
+{
+  "experiment": "E2",
+  "runId": "(recheck)",
+  "startedAt": "(orders from ORD-20261031-00ba68c8)",
+  "endedAt": "2026-11-01T03:05:19Z",
+  "fault": {
+    "status": "ended",
+    "reason": "recheck after the run; see progress.md",
+    "config": {
+      "functions": [
+        "payment_provider",
+        "payment_webhook"
+      ],
+      "action": "delay",
+      "percent": 50,
+      "delayMs": 25000,
+      "minutes": 10
+    }
+  },
+  "auditorBefore": {},
+  "auditorFinal": {
+    "at": "2026-11-01T03:05:19Z",
+    "violations": 0,
+    "stuck": 0,
+    "parked": 40,
+    "orders": null,
+    "violationList": [],
+    "stuckList": []
+  },
+  "auditorRuns": [],
+  "orders": [
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-5a8c920e",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "799",
+      "expected_net": "799",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none_multi",
+      "order_id": "ORD-20261031-0af74705",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_declined",
+      "order_id": "ORD-20261031-88258147",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_flaky",
+      "order_id": "ORD-20261031-ff662f85",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RequestPayment": 2
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "out_of_stock",
+      "order_id": "ORD-20261031-ff6d36a5",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "partial",
+      "order_id": "ORD-20261031-41ddbcd9",
+      "http": 202,
+      "status": "PARTIALLY_FULFILLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "L2"
+      ],
+      "net": "2098",
+      "expected_net": "2098",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-f82efdd9",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "3499",
+      "expected_net": "3499",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "cancel_after_payment",
+      "order_id": "ORD-20261031-7415add8",
+      "http": 202,
+      "status": "CANCELLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": "cancel -> 202"
+    },
+    {
+      "kind": "webhook_duplicate",
+      "order_id": "ORD-20261031-d76851c1",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "6499",
+      "expected_net": "6499",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-2e5b1d41",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-6dd5d055",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "799",
+      "expected_net": "799",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none_multi",
+      "order_id": "ORD-20261031-8dc62a92",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "4597",
+      "expected_net": "4597",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_declined",
+      "order_id": "ORD-20261031-c78d64f8",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_flaky",
+      "order_id": "ORD-20261031-841dcccc",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RequestPayment": 2
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "out_of_stock",
+      "order_id": "ORD-20261031-c2c859b6",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "partial",
+      "order_id": "ORD-20261031-6f42d6b4",
+      "http": 202,
+      "status": "PARTIALLY_FULFILLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "L2"
+      ],
+      "net": "2098",
+      "expected_net": "2098",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-14e091a0",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "3499",
+      "expected_net": "3499",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "cancel_after_payment",
+      "order_id": "ORD-20261031-78e7de5e",
+      "http": 202,
+      "status": "CANCELLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": "cancel -> 202"
+    },
+    {
+      "kind": "webhook_duplicate",
+      "order_id": "ORD-20261031-d8ba019c",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-a9290fd0",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-2769b328",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none_multi",
+      "order_id": "ORD-20261031-d840cfb5",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_declined",
+      "order_id": "ORD-20261031-5ab4ad9b",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_flaky",
+      "order_id": "ORD-20261031-87a299b6",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "2299",
+      "expected_net": "2299",
+      "retries": {
+        "RequestPayment": 2
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "out_of_stock",
+      "order_id": "ORD-20261031-00ba68c8",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    }
+  ],
+  "alarms": {
+    "invariant-violation": [
+      "16:50:51Z Alarm updated from INSUFFICIENT_DATA to OK"
+    ],
+    "stuck-orders": [
+      "16:50:48Z Alarm updated from INSUFFICIENT_DATA to OK"
+    ],
+    "refund-or-write-off-errors": [
+      "17:27:13Z Alarm updated from OK to ALARM",
+      "17:37:13Z Alarm updated from ALARM to OK"
+    ]
+  }
+}

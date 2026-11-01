@@ -1,0 +1,47 @@
+[
+  {
+    "kind": "partial",
+    "order_id": "ORD-20261101-e1e8a847",
+    "http": 202,
+    "status": "",
+    "execution": "",
+    "executions": 0,
+    "debits": 0,
+    "credit_keys": [],
+    "net": "0",
+    "expected_net": "0",
+    "retries": {},
+    "problems": [],
+    "note": ""
+  },
+  {
+    "kind": "cancel_after_payment",
+    "order_id": "ORD-20261101-51c442a3",
+    "http": 202,
+    "status": "",
+    "execution": "",
+    "executions": 0,
+    "debits": 0,
+    "credit_keys": [],
+    "net": "0",
+    "expected_net": "0",
+    "retries": {},
+    "problems": [],
+    "note": "cancel -> 202"
+  },
+  {
+    "kind": "decline_after_hold",
+    "order_id": "ORD-20261101-d3c44007",
+    "http": 202,
+    "status": "",
+    "execution": "",
+    "executions": 0,
+    "debits": 0,
+    "credit_keys": [],
+    "net": "0",
+    "expected_net": "0",
+    "retries": {},
+    "problems": [],
+    "note": "hold HOLD-20261101-2d06ab91db"
+  }
+]

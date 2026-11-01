@@ -1,0 +1,154 @@
+{
+  "experiment": "E5-redrive",
+  "startedAt": "2026-11-01T03:52:15+00:00",
+  "endedAt": "2026-11-01T04:03:01Z",
+  "fault": {
+    "run": "E5-2544c62e",
+    "config": {
+      "run": "E5-2544c62e",
+      "functions": [
+        "refund_payment"
+      ],
+      "action": "error",
+      "percent": 100,
+      "delayMs": 0,
+      "startsAt": "2026-11-01T03:52:23+00:00",
+      "expiresAt": "2026-11-01T03:58:23+00:00"
+    },
+    "status": "completed",
+    "reason": "expired",
+    "stopAlarmChecks": 24,
+    "startedAt": "2026-11-01T03:52:24Z",
+    "endedAt": "2026-11-01T03:58:35Z"
+  },
+  "redriven": [
+    "ORD-20261101-e1e8a847 (from PartialRefund)",
+    "ORD-20261101-51c442a3 (from RefundWhatIsLeft)",
+    "ORD-20261101-d3c44007 (from RefundPayment)"
+  ],
+  "auditorBefore": {
+    "at": "2026-11-01T04:02:06Z",
+    "violations": 0,
+    "stuck": 5,
+    "parked": 40,
+    "orders": null,
+    "violationList": [],
+    "stuckList": [
+      {
+        "kind": "STUCK",
+        "invariant": "CANCEL_REQUESTED",
+        "subject": "ORD-20261101-51c442a3",
+        "detail": "CANCEL_REQUESTED for 9 min, execution FAILED (parked: redrive the execution)"
+      },
+      {
+        "kind": "STUCK",
+        "invariant": "FULFILLING",
+        "subject": "ORD-20261101-e10c6683",
+        "detail": "FULFILLING for 54 min, execution FAILED (parked: redrive the execution)"
+      },
+      {
+        "kind": "STUCK",
+        "invariant": "FULFILLING",
+        "subject": "ORD-20261101-11f6e7e1",
+        "detail": "FULFILLING for 52 min, execution FAILED (parked: redrive the execution)"
+      },
+      {
+        "kind": "STUCK",
+        "invariant": "FULFILLING",
+        "subject": "ORD-20261101-e1e8a847",
+        "detail": "FULFILLING for 9 min, execution FAILED (parked: redrive the execution)"
+      },
+      {
+        "kind": "STUCK",
+        "invariant": "PAYMENT_DECLINED",
+        "subject": "ORD-20261101-d3c44007",
+        "detail": "PAYMENT_DECLINED for 8 min, execution FAILED (parked: redrive the execution)"
+      }
+    ]
+  },
+  "auditorFinal": {
+    "at": "2026-11-01T04:03:01Z",
+    "violations": 0,
+    "stuck": 2,
+    "parked": 40,
+    "orders": null,
+    "violationList": [],
+    "stuckList": [
+      {
+        "kind": "STUCK",
+        "invariant": "FULFILLING",
+        "subject": "ORD-20261101-e10c6683",
+        "detail": "FULFILLING for 55 min, execution FAILED (parked: redrive the execution)"
+      },
+      {
+        "kind": "STUCK",
+        "invariant": "FULFILLING",
+        "subject": "ORD-20261101-11f6e7e1",
+        "detail": "FULFILLING for 53 min, execution FAILED (parked: redrive the execution)"
+      }
+    ]
+  },
+  "auditorRuns": [],
+  "orders": [
+    {
+      "kind": "partial",
+      "order_id": "ORD-20261101-e1e8a847",
+      "http": 0,
+      "status": "PARTIALLY_FULFILLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "L2"
+      ],
+      "net": "2098",
+      "expected_net": "2098",
+      "retries": {
+        "PartialRefund": 5
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "cancel_after_payment",
+      "order_id": "ORD-20261101-51c442a3",
+      "http": 0,
+      "status": "CANCELLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundWhatIsLeft": 5
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "decline_after_hold",
+      "order_id": "ORD-20261101-d3c44007",
+      "http": 0,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundPayment": 5
+      },
+      "problems": [],
+      "note": ""
+    }
+  ],
+  "alarms": {
+    "invariant-violation": [],
+    "stuck-orders": [],
+    "refund-or-write-off-errors": []
+  }
+}

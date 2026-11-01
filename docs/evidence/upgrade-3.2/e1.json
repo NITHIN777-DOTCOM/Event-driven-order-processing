@@ -1,0 +1,765 @@
+{
+  "experiment": "E1",
+  "runId": "E1-1665164e",
+  "startedAt": "2026-11-01T03:35:01+00:00",
+  "endedAt": "2026-11-01T03:45:55Z",
+  "fault": {
+    "run": "E1-1665164e",
+    "config": {
+      "run": "E1-1665164e",
+      "functions": [
+        "reserve_inventory",
+        "request_payment",
+        "payment_provider",
+        "payment_webhook",
+        "fulfill_item",
+        "refund_payment",
+        "release_inventory",
+        "write_off_lines",
+        "begin_fulfillment"
+      ],
+      "action": "error",
+      "percent": 30,
+      "delayMs": 0,
+      "startsAt": "2026-11-01T03:35:06+00:00",
+      "expiresAt": "2026-11-01T03:45:06+00:00"
+    },
+    "status": "completed",
+    "reason": "expired",
+    "stopAlarmChecks": 39,
+    "startedAt": "2026-11-01T03:35:07Z",
+    "endedAt": "2026-11-01T03:45:09Z"
+  },
+  "auditorBefore": {
+    "at": "2026-11-01T03:35:06Z",
+    "violations": 0,
+    "stuck": 0,
+    "parked": 40,
+    "orders": null,
+    "violationList": [],
+    "stuckList": []
+  },
+  "auditorFinal": {
+    "at": "2026-11-01T03:45:55Z",
+    "violations": 0,
+    "stuck": 2,
+    "parked": 40,
+    "orders": null,
+    "violationList": [],
+    "stuckList": [
+      {
+        "kind": "STUCK",
+        "invariant": "FULFILLING",
+        "subject": "ORD-20261101-e10c6683",
+        "detail": "FULFILLING for 37 min, execution FAILED (parked: redrive the execution)"
+      },
+      {
+        "kind": "STUCK",
+        "invariant": "FULFILLING",
+        "subject": "ORD-20261101-11f6e7e1",
+        "detail": "FULFILLING for 36 min, execution FAILED (parked: redrive the execution)"
+      }
+    ]
+  },
+  "auditorRuns": [
+    {
+      "at": "2026-11-01T03:35:09Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-11-01T03:36:11Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-11-01T03:37:14Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-11-01T03:38:19Z",
+      "violations": 0,
+      "stuck": 1,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": [
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-e10c6683",
+          "detail": "FULFILLING for 30 min, execution FAILED (parked: redrive the execution)"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-01T03:39:24Z",
+      "violations": 0,
+      "stuck": 1,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": [
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-e10c6683",
+          "detail": "FULFILLING for 31 min, execution FAILED (parked: redrive the execution)"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-01T03:40:29Z",
+      "violations": 0,
+      "stuck": 2,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": [
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-e10c6683",
+          "detail": "FULFILLING for 32 min, execution FAILED (parked: redrive the execution)"
+        },
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-11f6e7e1",
+          "detail": "FULFILLING for 30 min, execution FAILED (parked: redrive the execution)"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-01T03:41:35Z",
+      "violations": 0,
+      "stuck": 2,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": [
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-e10c6683",
+          "detail": "FULFILLING for 33 min, execution FAILED (parked: redrive the execution)"
+        },
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-11f6e7e1",
+          "detail": "FULFILLING for 31 min, execution FAILED (parked: redrive the execution)"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-01T03:42:40Z",
+      "violations": 0,
+      "stuck": 2,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": [
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-e10c6683",
+          "detail": "FULFILLING for 34 min, execution FAILED (parked: redrive the execution)"
+        },
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-11f6e7e1",
+          "detail": "FULFILLING for 32 min, execution FAILED (parked: redrive the execution)"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-01T03:43:45Z",
+      "violations": 0,
+      "stuck": 2,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": [
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-e10c6683",
+          "detail": "FULFILLING for 35 min, execution FAILED (parked: redrive the execution)"
+        },
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-11f6e7e1",
+          "detail": "FULFILLING for 34 min, execution FAILED (parked: redrive the execution)"
+        }
+      ]
+    },
+    {
+      "at": "2026-11-01T03:44:50Z",
+      "violations": 0,
+      "stuck": 2,
+      "parked": 40,
+      "orders": null,
+      "violationList": [],
+      "stuckList": [
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-e10c6683",
+          "detail": "FULFILLING for 36 min, execution FAILED (parked: redrive the execution)"
+        },
+        {
+          "kind": "STUCK",
+          "invariant": "FULFILLING",
+          "subject": "ORD-20261101-11f6e7e1",
+          "detail": "FULFILLING for 35 min, execution FAILED (parked: redrive the execution)"
+        }
+      ]
+    }
+  ],
+  "orders": [
+    {
+      "kind": "none",
+      "order_id": "ORD-20261101-6a5d8f27",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "799",
+      "expected_net": "799",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none_multi",
+      "order_id": "ORD-20261101-71032fb8",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "4597",
+      "expected_net": "4597",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_declined",
+      "order_id": "ORD-20261101-95f07dc0",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReleaseInventory": 4
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_flaky",
+      "order_id": "ORD-20261101-1acd4a9e",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "2299",
+      "expected_net": "2299",
+      "retries": {
+        "RequestPayment": 2
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "out_of_stock",
+      "order_id": "ORD-20261101-be809a00",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "partial",
+      "order_id": "ORD-20261101-103c1e5d",
+      "http": 202,
+      "status": "PARTIALLY_FULFILLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "L2"
+      ],
+      "net": "2098",
+      "expected_net": "2098",
+      "retries": {
+        "RequestPayment": 1,
+        "FulfillItem": 1,
+        "WriteOffLines": 2
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261101-77fe8cb3",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "cancel_after_payment",
+      "order_id": "ORD-20261101-fbd518b3",
+      "http": 202,
+      "status": "CANCELLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundWhatIsLeft": 1
+      },
+      "problems": [],
+      "note": "cancel -> 202"
+    },
+    {
+      "kind": "webhook_duplicate",
+      "order_id": "ORD-20261101-eab25bc2",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "6499",
+      "expected_net": "6499",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261101-e2a2b20d",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261101-bc40f75e",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "799",
+      "expected_net": "799",
+      "retries": {
+        "RequestPayment": 1,
+        "BeginFulfillment": 1,
+        "FulfillItem": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none_multi",
+      "order_id": "ORD-20261101-9ad57ab8",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "4597",
+      "expected_net": "4597",
+      "retries": {
+        "FulfillItem": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_declined",
+      "order_id": "ORD-20261101-d25dd734",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_flaky",
+      "order_id": "ORD-20261101-106fefe9",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RequestPayment": 4,
+        "RefundPayment": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "out_of_stock",
+      "order_id": "ORD-20261101-ef73b8a7",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "partial",
+      "order_id": "ORD-20261101-e5c4643a",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261101-f9bf00c7",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "3499",
+      "expected_net": "3499",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "cancel_after_payment",
+      "order_id": "ORD-20261101-49f2c6b5",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReserveInventory": 1
+      },
+      "problems": [],
+      "note": "never reached PAYMENT_CAPTURED (status FAILED); not cancelled"
+    },
+    {
+      "kind": "webhook_duplicate",
+      "order_id": "ORD-20261101-65628eca",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "6499",
+      "expected_net": "6499",
+      "retries": {
+        "FulfillItem": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261101-fe53d56e",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "4999",
+      "expected_net": "4999",
+      "retries": {
+        "BeginFulfillment": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261101-1bb5c002",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReserveInventory": 1,
+        "RequestPayment": 2
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none_multi",
+      "order_id": "ORD-20261101-a8681b5e",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReserveInventory": 3
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_declined",
+      "order_id": "ORD-20261101-c3c1d02e",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReserveInventory": 1,
+        "RequestPayment": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_flaky",
+      "order_id": "ORD-20261101-2775e913",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RequestPayment": 3,
+        "ReleaseInventory": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "out_of_stock",
+      "order_id": "ORD-20261101-1c3d22b0",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReserveInventory": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "partial",
+      "order_id": "ORD-20261101-702f6885",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReleaseInventory": 4
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261101-8625f853",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "3499",
+      "expected_net": "3499",
+      "retries": {
+        "RequestPayment": 1,
+        "FulfillItem": 2
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "cancel_after_payment",
+      "order_id": "ORD-20261101-12a69762",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": "never reached PAYMENT_CAPTURED (status FAILED); not cancelled"
+    },
+    {
+      "kind": "webhook_duplicate",
+      "order_id": "ORD-20261101-5369b5e3",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "6499",
+      "expected_net": "6499",
+      "retries": {
+        "ReserveInventory": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261101-a93f7c76",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundPayment": 1
+      },
+      "problems": [],
+      "note": ""
+    }
+  ],
+  "alarms": {
+    "invariant-violation": [],
+    "stuck-orders": [
+      "03:39:48Z Alarm updated from OK to ALARM"
+    ],
+    "refund-or-write-off-errors": [
+      "03:38:13Z Alarm updated from OK to ALARM"
+    ]
+  }
+}

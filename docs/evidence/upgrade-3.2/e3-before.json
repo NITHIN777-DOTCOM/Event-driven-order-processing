@@ -1,0 +1,264 @@
+{
+  "experiment": "E3",
+  "runId": "(recheck)",
+  "startedAt": "(orders from ORD-20261101-07f358fc)",
+  "endedAt": "2026-11-01T03:31:49Z",
+  "fault": {
+    "status": "ended",
+    "reason": "recheck after the run; see progress.md",
+    "config": {}
+  },
+  "auditorBefore": {},
+  "auditorFinal": {
+    "at": "2026-11-01T03:31:49Z",
+    "violations": 2,
+    "stuck": 0,
+    "parked": 40,
+    "orders": null,
+    "violationList": [
+      {
+        "kind": "VIOLATION",
+        "invariant": "I5",
+        "subject": "ORD-20261101-24e3b42f",
+        "detail": "FAILED order still holds reserved units {'DESK-MAT': 2} (never released, fulfilled or written off)"
+      },
+      {
+        "kind": "VIOLATION",
+        "invariant": "I5",
+        "subject": "ORD-20261101-3dce4969",
+        "detail": "FAILED order still holds reserved units {'WIRELESS-MOUSE': 1} (never released, fulfilled or written off)"
+      }
+    ],
+    "stuckList": []
+  },
+  "auditorRuns": [],
+  "orders": [
+    {
+      "kind": "crash_after:reserve",
+      "order_id": "ORD-20261101-3dce4969",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:debit",
+      "order_id": "ORD-20261101-87ce8ca0",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:webhook_capture",
+      "order_id": "ORD-20261101-fde335d2",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:fulfill",
+      "order_id": "ORD-20261101-e10c6683",
+      "http": 202,
+      "status": "FULFILLING",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "1799",
+      "expected_net": "0",
+      "retries": {
+        "RefundAllLines": 4
+      },
+      "problems": [
+        "not terminal: FULFILLING (execution FAILED)"
+      ],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:line_refund",
+      "order_id": "ORD-20261101-3b3d0731",
+      "http": 202,
+      "status": "PARTIALLY_FULFILLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "L2"
+      ],
+      "net": "799",
+      "expected_net": "799",
+      "retries": {
+        "PartialRefund": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:write_off",
+      "order_id": "ORD-20261101-07f358fc",
+      "http": 202,
+      "status": "PARTIALLY_FULFILLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "L2"
+      ],
+      "net": "1299",
+      "expected_net": "1299",
+      "retries": {
+        "WriteOffLines": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:release",
+      "order_id": "ORD-20261101-a6001595",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReleaseInventory": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:full_refund",
+      "order_id": "ORD-20261101-c4e416a3",
+      "http": 202,
+      "status": "CANCELLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundWhatIsLeft": 1
+      },
+      "problems": [],
+      "note": "cancel -> 202"
+    },
+    {
+      "kind": "crash_after:reserve",
+      "order_id": "ORD-20261101-24e3b42f",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:debit",
+      "order_id": "ORD-20261101-5966103b",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RequestPayment": 2
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:fulfill",
+      "order_id": "ORD-20261101-11f6e7e1",
+      "http": 202,
+      "status": "FULFILLING",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "3298",
+      "expected_net": "0",
+      "retries": {
+        "RefundAllLines": 4
+      },
+      "problems": [
+        "not terminal: FULFILLING (execution FAILED)"
+      ],
+      "note": ""
+    },
+    {
+      "kind": "crash_after:release",
+      "order_id": "ORD-20261101-63f025a9",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReleaseInventory": 1
+      },
+      "problems": [],
+      "note": ""
+    }
+  ],
+  "alarms": {
+    "invariant-violation": [
+      "16:50:51Z Alarm updated from INSUFFICIENT_DATA to OK",
+      "03:10:51Z Alarm updated from OK to ALARM"
+    ],
+    "stuck-orders": [
+      "16:50:48Z Alarm updated from INSUFFICIENT_DATA to OK"
+    ],
+    "refund-or-write-off-errors": [
+      "17:27:13Z Alarm updated from OK to ALARM",
+      "17:37:13Z Alarm updated from ALARM to OK",
+      "03:09:13Z Alarm updated from OK to ALARM",
+      "03:16:13Z Alarm updated from ALARM to OK"
+    ]
+  }
+}

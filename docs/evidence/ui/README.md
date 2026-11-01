@@ -6,16 +6,17 @@ After each order the DemoPay ledger was checked through `GET /wallet`.
 
 | Scenario | orderId | Tracker result | Wallet DEBITs (expected) |
 |---|---|---|---|
-| Normal | `ORD-20261030-cdf65d78` | Order completed; balance 1,000,000 -> 996,501; hold consumed: True | 1 (1) ✓ |
-| Payment glitch (retries) | `ORD-20261030-2364e968` | Order completed | 1 (1) ✓ |
-| Payment declined | `ORD-20261030-f62f5711` | Order failed | 0 (0) ✓ |
-| Item damaged (partial refund) | `ORD-20261030-89072ffe` | Order partially fulfilled; CREDITs [1799] (L2 = 1799) | 1 (1) ✓ |
-| Cancel after payment | `ORD-20261030-806ae80a` | Order cancelled; Cancelled — refunded ₹1,299; CREDITs [1299] | 1 (1) ✓ |
-| Low balance (real decline) | `ORD-20261030-031cc71b` | Order failed | 0 (0) ✓ |
-| Duplicate test (3 requests) | `ORD-20261030-cbe11a35` | Order completed · 1 order | 1 (1) ✓ |
-| Late payment (auto-refund) | `ORD-20261030-124cd0c5` | Order failed; refund row shown: True | 1 (1) ✓ |
-| Poison message (to DLQ) | `ORD-20261030-06ada3e5` | Stuck in the dead-letter queue | 0 (0) ✓ |
-| Checkout hold: expired, held again, released on leaving | `-` | HOLD-20261030-b96e11554e -> HOLD-20261030-5a39b4cbe7; released: True | 0 (0) ✓ |
+| Normal | `ORD-20261031-d984f520` | Order completed; balance 1,000,000 -> 996,501; hold consumed: True | 1 (1) ✓ |
+| Payment glitch (retries) | `ORD-20261031-6ab2893f` | Order completed | 1 (1) ✓ |
+| Payment declined | `ORD-20261031-741bdd6d` | Order failed | 0 (0) ✓ |
+| Item damaged (partial refund) | `ORD-20261031-ead71e5b` | Order partially fulfilled; CREDITs [1799] (L2 = 1799) | 1 (1) ✓ |
+| Cancel after payment | `ORD-20261031-6c2db64b` | Order cancelled; Cancelled — refunded ₹1,299; CREDITs [1299] | 1 (1) ✓ |
+| Low balance (real decline) | `ORD-20261031-c30ba83e` | Order failed | 0 (0) ✓ |
+| Duplicate test (3 requests) | `ORD-20261031-411d629a` | Order completed · 1 order | 1 (1) ✓ |
+| Late payment (auto-refund) | `ORD-20261031-7d9e1c8e` | Order failed; refund row shown: True | 1 (1) ✓ |
+| Poison message (to DLQ) | `ORD-20261031-bd221d09` | Stuck in the dead-letter queue | 0 (0) ✓ |
+| Checkout hold: expired, held again, released on leaving | `-` | HOLD-20261031-834b759808 -> HOLD-20261031-05ae4889ef; released: True | 0 (0) ✓ |
+| Busy 503 -> retried (hold x2, order x1) | `ORD-20261031-97bee8d2` | Order completed | 1 (1) ✓ |
 
 Browser console errors during the run: 0
 
@@ -72,6 +73,14 @@ Browser console errors during the run: 0
 ### desktop-07d-checkout-hold-expired
 
 ![desktop-07d-checkout-hold-expired](desktop-07d-checkout-hold-expired.png)
+
+### desktop-07e-checkout-hold-busy-retrying
+
+![desktop-07e-checkout-hold-busy-retrying](desktop-07e-checkout-hold-busy-retrying.png)
+
+### desktop-07f-checkout-order-busy-retrying
+
+![desktop-07f-checkout-order-busy-retrying](desktop-07f-checkout-order-busy-retrying.png)
 
 ### desktop-08-tracker-completed
 

@@ -1,0 +1,650 @@
+{
+  "experiment": "E1",
+  "runId": "E1-ac010f87",
+  "startedAt": "2026-10-31T17:24:19+00:00",
+  "endedAt": "2026-10-31T17:35:11Z",
+  "fault": {
+    "run": "E1-ac010f87",
+    "config": {
+      "run": "E1-ac010f87",
+      "functions": [
+        "reserve_inventory",
+        "request_payment",
+        "payment_provider",
+        "payment_webhook",
+        "fulfill_item",
+        "refund_payment",
+        "release_inventory",
+        "write_off_lines",
+        "begin_fulfillment"
+      ],
+      "action": "error",
+      "percent": 30,
+      "delayMs": 0,
+      "startsAt": "2026-10-31T17:24:24+00:00",
+      "expiresAt": "2026-10-31T17:34:24+00:00"
+    },
+    "status": "completed",
+    "reason": "expired",
+    "stopAlarmChecks": 38,
+    "startedAt": "2026-10-31T17:24:25Z",
+    "endedAt": "2026-10-31T17:34:25Z"
+  },
+  "auditorBefore": {
+    "at": "2026-10-31T17:24:24Z",
+    "violations": 0,
+    "stuck": 0,
+    "parked": 38,
+    "orders": null,
+    "violationList": [],
+    "stuckList": []
+  },
+  "auditorFinal": {
+    "at": "2026-10-31T17:35:11Z",
+    "violations": 0,
+    "stuck": 0,
+    "parked": 38,
+    "orders": null,
+    "violationList": [],
+    "stuckList": []
+  },
+  "auditorRuns": [
+    {
+      "at": "2026-10-31T17:24:26Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:25:28Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:26:30Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:27:32Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:28:34Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:29:35Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:30:37Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:31:39Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:32:41Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:33:43Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    },
+    {
+      "at": "2026-10-31T17:34:45Z",
+      "violations": 0,
+      "stuck": 0,
+      "parked": 38,
+      "orders": null,
+      "violationList": [],
+      "stuckList": []
+    }
+  ],
+  "orders": [
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-99fbb383",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none_multi",
+      "order_id": "ORD-20261031-5b1b4802",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "ReleaseInventory": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_declined",
+      "order_id": "ORD-20261031-54196304",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundPayment": 1,
+        "ReleaseInventory": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_flaky",
+      "order_id": "ORD-20261031-2def3542",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundPayment": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "out_of_stock",
+      "order_id": "ORD-20261031-f4d7746d",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "partial",
+      "order_id": "ORD-20261031-88216c37",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-df424b7b",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "3499",
+      "expected_net": "3499",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "cancel_after_payment",
+      "order_id": "ORD-20261031-3bf4ee0b",
+      "http": 202,
+      "status": "CANCELLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "CancelReleaseInventory": 2
+      },
+      "problems": [],
+      "note": "cancel -> 202"
+    },
+    {
+      "kind": "webhook_duplicate",
+      "order_id": "ORD-20261031-477d9993",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-13aeac0a",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-aafc6b81",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "L1"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "BeginFulfillment": 1,
+        "RefundAllLines": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none_multi",
+      "order_id": "ORD-20261031-bb37af44",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_declined",
+      "order_id": "ORD-20261031-f6889a35",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundPayment": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_flaky",
+      "order_id": "ORD-20261031-2abde821",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "out_of_stock",
+      "order_id": "ORD-20261031-6e2d8157",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "partial",
+      "order_id": "ORD-20261031-ec2be3db",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundPayment": 1,
+        "ReleaseInventory": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-e0e847e5",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "cancel_after_payment",
+      "order_id": "ORD-20261031-970e8ac3",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": "never reached PAYMENT_CAPTURED (status FAILED); not cancelled"
+    },
+    {
+      "kind": "webhook_duplicate",
+      "order_id": "ORD-20261031-2471b3ca",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-61d0ae40",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "*"
+      ],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-dba54205",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none_multi",
+      "order_id": "ORD-20261031-b7474ed1",
+      "http": 202,
+      "status": "COMPLETED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [],
+      "net": "4597",
+      "expected_net": "4597",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_declined",
+      "order_id": "ORD-20261031-e7acfd8c",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "payment_flaky",
+      "order_id": "ORD-20261031-976595ce",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundPayment": 3,
+        "ReleaseInventory": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "out_of_stock",
+      "order_id": "ORD-20261031-d8a0cdce",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "partial",
+      "order_id": "ORD-20261031-39effce4",
+      "http": 202,
+      "status": "PARTIALLY_FULFILLED",
+      "execution": "SUCCEEDED",
+      "executions": 1,
+      "debits": 1,
+      "credit_keys": [
+        "L2"
+      ],
+      "net": "2098",
+      "expected_net": "2098",
+      "retries": {
+        "BeginFulfillment": 1
+      },
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-182176d5",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "cancel_after_payment",
+      "order_id": "ORD-20261031-9536c284",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {
+        "RefundPayment": 1
+      },
+      "problems": [],
+      "note": "never reached PAYMENT_CAPTURED (status FAILED); not cancelled"
+    },
+    {
+      "kind": "webhook_duplicate",
+      "order_id": "ORD-20261031-adacbd1d",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    },
+    {
+      "kind": "none",
+      "order_id": "ORD-20261031-b54b47a8",
+      "http": 202,
+      "status": "FAILED",
+      "execution": "FAILED",
+      "executions": 1,
+      "debits": 0,
+      "credit_keys": [],
+      "net": "0",
+      "expected_net": "0",
+      "retries": {},
+      "problems": [],
+      "note": ""
+    }
+  ],
+  "alarms": {
+    "invariant-violation": [],
+    "stuck-orders": [],
+    "refund-or-write-off-errors": [
+      "22:57:13 Alarm updated from OK to ALARM"
+    ]
+  },
+  "e2e": {
+    "exit": 0,
+    "seconds": 407,
+    "tail": "zg) https://ap-south-1.console.aws.amazon.com/states/home?region=ap-south-1#/v2/executions/details/arn:aws:states:ap-south-1:876889172858:execution:order-saga-workflow:ORD-20261031-de2270d8\nzh) https://ap-south-1.console.aws.amazon.com/states/home?region=ap-south-1#/v2/executions/details/arn:aws:states:ap-south-1:876889172858:execution:order-saga-workflow:ORD-20261031-db9ef865\nzi) https://ap-south-1.console.aws.amazon.com/states/home?region=ap-south-1#/v2/executions/details/arn:aws:states:ap-south-1:876889172858:execution:order-saga-workflow:ORD-20261031-b52d2d91\n\nEvidence written to C:\\Users\\Juju\\Desktop\\Event-driven-order-processing\\docs\\evidence\\e2e-failure-tests.md\n35/35 scenarios passed in 402s"
+  }
+}

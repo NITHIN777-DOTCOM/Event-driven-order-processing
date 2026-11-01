@@ -1584,6 +1584,13 @@ Filled in after the experiment runs (docs/evidence/upgrade-3.2-chaos.md).
 - Baseline before any chaos (2026-10-31): 1,016 orders, 360 charges, 19 products audited: **0 violations, 0 stuck**,
   34 parked (poison orders in the DLQ by design + the outbox probe), after fixing 2 checker bugs (legacy shapes) and
   1 real data inconsistency (below).
+- E1 (30% errors on 9 Lambdas, 10 min, 30 orders) before -> after the fix: orders on their no-fault path 10 -> 19,
+  violations 0 -> 0, ₹ lost 0 -> 0. E3 (crash after each write, 12 orders): 5 -> 9, violations 2 -> 0.
+  E2 (DemoPay/webhook +25 s on half the calls): 0 problems. E4 (duplicates): PASS. E5 (refund outage): 3 parked,
+  flagged by a drill audit, redriven -> terminal, ₹0 lost.
+- What still fails is one thing: a DemoPay/webhook crash is redelivered by SQS after the queue's visibility timeout
+  (6x the provider timeout), later than the saga's 120 s payment wait, so the order times out and is refunded. Safe,
+  but a lost sale; the fix is a shorter redelivery for that queue (open).
 
 ### Likely interview questions
 Answers are completed with measured numbers in the step's final commit.

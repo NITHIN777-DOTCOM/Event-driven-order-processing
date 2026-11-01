@@ -21,8 +21,9 @@ fulfilled (₹ lost = 0), plus SFN retry counts. Writes docs/evidence/upgrade-3.
 
     python scripts/chaos_run.py E1 --orders 30 --seed
     python scripts/chaos_run.py E3                 # needs `terraform apply -var chaos_enabled=true` first
-    python scripts/chaos_run.py E5                 # parks 3 orders, waits for the STUCK alarm
+    python scripts/chaos_run.py E5                 # parks 3 orders, drill audit (2-min threshold) -> STUCK alarm
     python scripts/chaos_run.py E5 --redrive       # redrives the parked executions and re-checks
+    python scripts/chaos_run.py E2 --recheck       # re-run the per-order checks on e2-placed.json only
 
 Never run during a demo.
 """
@@ -45,6 +46,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
 
 import e2e_test as e2e
 from auth_tokens import auth_header
@@ -71,7 +73,8 @@ STOP_ALARM = "order-saga-invariant-violation"
 s3 = boto3.client("s3", region_name=REGION)
 cloudwatch = boto3.client("cloudwatch", region_name=REGION)
 lambda_client = boto3.client("lambda", region_name=REGION)
-sfn = e2e.sfn
+# Our own client with adaptive retries: a run makes a few hundred Step Functions reads in a burst.
+sfn = boto3.client("stepfunctions", region_name=REGION, config=Config(retries={"mode": "adaptive", "max_attempts": 10}))
 sqs = e2e.sqs
 
 
@@ -89,7 +92,7 @@ class Placed:
     http: int = 0
     status: str = ""
     execution: str = ""  # SFN execution status
-    executions: int = 0  # executions with this name (must be 1)
+    executions: int = 0  # saga starts: PROCESSING entries in statusHistory (must be 1; the name is the orderId)
     debits: int = 0
     credit_keys: list[str] = field(default_factory=list)
     net: str = "0"  # ledger DEBIT - CREDIT
@@ -256,8 +259,12 @@ class AuditLoop(threading.Thread):
         self.stop_event.set()
 
 
-def invoke_auditor() -> dict:
-    resp = lambda_client.invoke(FunctionName=OUT["invariant_auditor_function_name"], Payload=b'{"source":"chaos_run"}')
+def invoke_auditor(stuck_after_minutes: int | None = None) -> dict:
+    """One audit run. stuck_after_minutes: the auditor's drill-only threshold (E5), instead of waiting 30 minutes."""
+    event: dict = {"source": "chaos_run"}
+    if stuck_after_minutes:
+        event["stuckAfterMinutes"] = stuck_after_minutes
+    resp = lambda_client.invoke(FunctionName=OUT["invariant_auditor_function_name"], Payload=json.dumps(event).encode())
     payload = json.loads(resp["Payload"].read() or b"{}")
     if resp.get("FunctionError"):
         return {"at": now_iso(), "error": str(payload)[:300]}
@@ -361,7 +368,9 @@ def check(placed: Placed) -> Placed:
         placed.execution = sfn.describe_execution(executionArn=execution_arn(placed.order_id))["status"]
     except sfn.exceptions.ExecutionDoesNotExist:
         placed.execution = "-"
-    placed.executions = e2e.executions_named({placed.order_id})
+    # The execution name IS the orderId, so a second execution can't exist (start_workflow treats
+    # ExecutionAlreadyExists as done). What a duplicate could still do is restart the saga's work: count the starts.
+    placed.executions = e2e.statuses(order).count("PROCESSING")
     entries = e2e.ledger_for(placed.order_id, e2e.USER)
     debits = [e["amount"] for e in entries if e["type"] == "DEBIT"]
     credits = [e for e in entries if e["type"] == "CREDIT"]
@@ -383,18 +392,40 @@ def check(placed: Placed) -> Placed:
     if len(placed.credit_keys) != len(set(placed.credit_keys)):
         placed.problems.append(f"duplicate CREDITs {placed.credit_keys}")
     if placed.executions > 1:
-        placed.problems.append(f"{placed.executions} executions")
+        placed.problems.append(f"saga started {placed.executions} times (PROCESSING entries)")
     history = e2e.statuses(order)
     if history.count("PAYMENT_CAPTURED") > 1:
         placed.problems.append("PAYMENT_CAPTURED twice")
     return placed
 
 
-def wait_all_terminal(placed: list[Placed], timeout: int) -> None:
+def order_status(order_id: str) -> str:
+    return e2e.orders_table.get_item(Key={"orderId": order_id}, ConsistentRead=True).get("Item", {}).get("status", "?")
+
+
+def parked(order_id: str) -> bool:
+    """The execution stopped (FAILED) while the order is not terminal: it waits for a redrive (E5)."""
+    try:
+        return sfn.describe_execution(executionArn=execution_arn(order_id))["status"] == "FAILED"
+    except sfn.exceptions.ExecutionDoesNotExist:
+        return False
+
+
+def failed_state(order_id: str) -> str:
+    """The state an execution failed on (the last state entered before ExecutionFailed)."""
+    events = sfn.get_execution_history(executionArn=execution_arn(order_id), reverseOrder=True, maxResults=40)["events"]
+    return next((e["stateEnteredEventDetails"]["name"] for e in events if "stateEnteredEventDetails" in e), "?")
+
+
+def wait_all_terminal(placed: list[Placed], timeout: int, parked_ok: bool = False) -> None:
     deadline = time.monotonic() + timeout
     pending = [p for p in placed if p.order_id]
     while pending and time.monotonic() < deadline:
-        pending = [p for p in pending if e2e.get_order(p.order_id).get("status") not in TERMINAL]
+        try:  # straight from DynamoDB; a network blip (E2/E3 died on one: getaddrinfo failed) just skips a round
+            pending = [p for p in pending if order_status(p.order_id) not in TERMINAL
+                       and not (parked_ok and parked(p.order_id))]
+        except Exception as err:  # noqa: BLE001 - keep waiting; the checks after this re-read everything
+            print(f"  status poll failed ({type(err).__name__}: {err}); retrying")
         if pending:
             print(f"  {len(pending)} orders not terminal yet")
             time.sleep(15)
@@ -403,7 +434,7 @@ def wait_all_terminal(placed: list[Placed], timeout: int) -> None:
 def alarm_history(name: str, since: datetime) -> list[str]:
     items = cloudwatch.describe_alarm_history(AlarmName=f"{OUT.get('project_prefix', 'order-saga')}-{name}",
                                               HistoryItemType="StateUpdate", StartDate=since)["AlarmHistoryItems"]
-    return [f"{i['Timestamp']:%H:%M:%S} {i['HistorySummary']}" for i in sorted(items, key=lambda i: i["Timestamp"])]
+    return [f"{i['Timestamp'].astimezone(timezone.utc):%H:%M:%S}Z {i['HistorySummary']}" for i in sorted(items, key=lambda i: i["Timestamp"])]
 
 
 # --------------------------------------------------------------------------------------------
@@ -470,13 +501,18 @@ def run(experiment: str, orders: int, seed: bool, e2e_after: bool) -> int:
         if fault:  # don't leave a fault behind (it would expire by itself within 15 min anyway)
             fault.finish("aborted", "the harness failed while placing orders")
         raise
+    # Keep the orderIds even if a later step fails (the checks can be re-run from this file).
+    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    (EVIDENCE_DIR / f"{experiment.lower()}-placed.json").write_text(
+        json.dumps([asdict(p) for p in placed], indent=2, default=str), encoding="utf-8")
+    print(f"Placed {len(placed)} orders: {[p.order_id for p in placed]}")
 
     if fault:
         print("Waiting for the fault window to end...")
         fault_record = fault.wait()
 
     print("Waiting for every order to reach a terminal status...")
-    wait_all_terminal(placed, timeout=900 if experiment != "E5" else 300)
+    wait_all_terminal(placed, timeout=900 if experiment != "E5" else 300, parked_ok=experiment == "E5")
     time.sleep(30)  # let the last writes settle before the final audit
     placed = [check(p) for p in placed]
     auditor.stop()
@@ -489,39 +525,88 @@ def run(experiment: str, orders: int, seed: bool, e2e_after: bool) -> int:
     }
 
     if experiment == "E5":
-        parked = [p.order_id for p in placed if p.order_id and p.execution == "FAILED"]
+        parked = [p.order_id for p in placed if p.order_id and p.execution == "FAILED" and p.status not in TERMINAL]
+        for p in placed:
+            if p.order_id and p.execution == "FAILED":
+                p.note = f"parked on {failed_state(p.order_id)} (order {p.status})" if p.status not in TERMINAL else                     f"execution FAILED at {failed_state(p.order_id)} with the order terminal: not redriven"
+        record["orders"] = [asdict(p) for p in placed]
         STATE_FILE.write_text(json.dumps({"orders": record["orders"], "startedAt": record["startedAt"], "parked": parked,
                                           "fault": fault_record}, indent=2, default=str), encoding="utf-8")
         print(f"Parked (execution FAILED): {parked}. Saved {STATE_FILE}.")
-        print("Wait ~30 min for the auditor to flag them STUCK (hourly schedule or --audit-now), then run --redrive.")
+        record["drill"] = drill_audit(parked)
+        STATE_FILE.write_text(json.dumps({"orders": record["orders"], "startedAt": record["startedAt"], "parked": parked,
+                                          "fault": fault_record, "drill": record["drill"]}, indent=2, default=str), encoding="utf-8")
+        print("Now run: python scripts/chaos_run.py E5 --redrive")
     elif e2e_after:
         record["e2e"] = run_e2e()
 
     return write_evidence(record)
 
 
+DRILL_STUCK_MINUTES = 2
+
+
+def drill_audit(parked: list[str]) -> dict:
+    """E5 drill: audit with a 2-minute STUCK threshold (not 30) and wait for order-saga-stuck-orders to fire."""
+    time.sleep(DRILL_STUCK_MINUTES * 60 + 10)  # every parked order is now older than the drill threshold
+    result = invoke_auditor(DRILL_STUCK_MINUTES)
+    flagged = sorted({f["subject"] for f in result.get("stuckList", [])} & set(parked))
+    print(f"Drill audit (stuck after {DRILL_STUCK_MINUTES} min): {result.get('stuck')} stuck; parked orders flagged: {flagged}")
+    state = alarm_state("order-saga-stuck-orders")
+    for _ in range(12):  # 60 s period: the alarm evaluates within ~2 minutes
+        if state == "ALARM":
+            break
+        time.sleep(15)
+        state = alarm_state("order-saga-stuck-orders")
+    print(f"order-saga-stuck-orders: {state}")
+    return {"at": now_iso(), "stuckAfterMinutes": DRILL_STUCK_MINUTES, "stuck": result.get("stuck"), "flagged": flagged,
+            "stuckList": result.get("stuckList", []), "alarm": state}
+
+
 def redrive() -> int:
     state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    before = invoke_auditor()
-    print(f"Auditor before the redrive: {before.get('violations')} violations, {before.get('stuck')} stuck")
+    before = invoke_auditor(DRILL_STUCK_MINUTES)
+    print(f"Auditor before the redrive (drill threshold): {before.get('violations')} violations, {before.get('stuck')} stuck")
     for item in before.get("stuckList", []):
         print(f"  STUCK {item.get('subject')}: {item.get('detail')}")
     redriven = []
     for order_id in state["parked"]:
         arn = execution_arn(order_id)
-        print(f"aws stepfunctions redrive-execution --execution-arn {arn}")
+        info = sfn.describe_execution(executionArn=arn)
+        at = failed_state(order_id)
+        if info.get("redriveStatus") != "REDRIVABLE" or at == "OrderFailed":  # a Fail state can't be usefully redriven
+            print(f"  NOT redriving {order_id}: {info.get('redriveStatus')} at {at}")
+            continue
+        print(f"aws stepfunctions redrive-execution --execution-arn {arn}   # failed on {at}")
         sfn.redrive_execution(executionArn=arn, clientToken=f"redrive-{order_id}"[:64])
-        redriven.append(order_id)
+        redriven.append(f"{order_id} (from {at})")
     placed = [Placed(o["kind"], order_id=o["order_id"]) for o in state["orders"]]
     wait_all_terminal(placed, timeout=300)
     time.sleep(30)
     placed = [check(p) for p in placed]
-    after = invoke_auditor()
+    after = invoke_auditor(DRILL_STUCK_MINUTES)
     record = {
         "experiment": "E5-redrive", "startedAt": state["startedAt"], "endedAt": now_iso(), "fault": state.get("fault", {}),
         "redriven": redriven, "auditorBefore": before, "auditorFinal": after, "auditorRuns": [],
         "orders": [asdict(p) for p in placed],
         "alarms": {name: alarm_history(name, datetime.fromisoformat(state["startedAt"]))
+                   for name in ("invariant-violation", "stuck-orders", "refund-or-write-off-errors")},
+    }
+    return write_evidence(record)
+
+
+def recheck(experiment: str) -> int:
+    """Re-run the per-order checks from <experiment>-placed.json (when a run died after placing its orders)."""
+    saved = json.loads((EVIDENCE_DIR / f"{experiment.lower()}-placed.json").read_text(encoding="utf-8"))
+    e2e.RUN_STARTED = datetime.now(timezone.utc) - timedelta(days=2)  # ledger_for only reads entries after this
+    placed = [check(Placed(o["kind"], order_id=o["order_id"], http=o["http"], note=o.get("note", ""))) for o in saved]
+    final = invoke_auditor()
+    started = min((o["order_id"] for o in saved if o["order_id"]), default="")
+    record = {
+        "experiment": experiment, "runId": "(recheck)", "startedAt": f"(orders from {started})", "endedAt": now_iso(),
+        "fault": {"status": "ended", "reason": "recheck after the run; see progress.md", "config": FAULTS.get(experiment, {})},
+        "auditorBefore": {}, "auditorFinal": final, "auditorRuns": [], "orders": [asdict(p) for p in placed],
+        "alarms": {name: alarm_history(name, datetime.now(timezone.utc) - timedelta(hours=24))
                    for name in ("invariant-violation", "stuck-orders", "refund-or-write-off-errors")},
     }
     return write_evidence(record)
@@ -557,11 +642,15 @@ def write_evidence(record: dict) -> int:
     ]
     if record.get("redriven"):
         lines.append(f"- Redriven executions: {', '.join(record['redriven'])}")
+    if record.get("drill"):
+        d = record["drill"]
+        lines.append(f"- Drill audit at {d['at']} (stuck after {d['stuckAfterMinutes']} min): {d['stuck']} stuck, "
+                     f"parked orders flagged {d['flagged']}; order-saga-stuck-orders -> {d['alarm']}")
     if record.get("e2e"):
         lines.append(f"- e2e suite after: exit {record['e2e']['exit']} in {record['e2e']['seconds']} s")
     lines += ["", "## Alarms (state changes since the start)", ""]
-    for name, history in record["alarms"].items():
-        lines.append(f"- order-saga-{name}: " + ("; ".join(history) if history else "no change"))
+    for alarm, history in record["alarms"].items():
+        lines.append(f"- order-saga-{alarm}: " + ("; ".join(history) if history else "no change"))
     lines += ["", "## Orders", "", "| Scenario | orderId | HTTP | Status | Execution | DEBITs | CREDITs | Net ₹ | Expected ₹ | Retries | Note / problems |",
               "|---|---|---|---|---|---|---|---|---|---|---|"]
     for o in orders:
@@ -588,10 +677,13 @@ def main() -> int:
     parser.add_argument("--seed", action="store_true", help="re-seed the demo catalogue first (nothing may be in flight)")
     parser.add_argument("--no-e2e", action="store_true", help="skip the e2e suite after the experiment")
     parser.add_argument("--redrive", action="store_true", help="E5 only: redrive the parked executions")
+    parser.add_argument("--recheck", action="store_true", help="re-run the checks on <experiment>-placed.json only")
     args = parser.parse_args()
     random.seed(32)
     if args.redrive:
         return redrive()
+    if args.recheck:
+        return recheck(args.experiment)
     return run(args.experiment, args.orders, args.seed, not args.no_e2e)
 
 

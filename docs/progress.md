@@ -3,7 +3,7 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 3.2 — chaos experiments + invariant auditor: IN PROGRESS (commit A).** Step 3.1 DONE (2026-10-31,
+**Upgrade step 3.2 — chaos experiments + invariant auditor: IN PROGRESS (commit B done; final report next).** Step 3.1 DONE (2026-10-31,
 report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports docs/evidence/upgrade-2.3-report.md, upgrade-2.4-report.md).
 (Step-by-step notes for 2.1 to 2.4 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
@@ -231,8 +231,33 @@ report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports
   and remove the FIS templates, role, layer + its env vars in the SAME fix commit (user override of expand/contract
   for these: FIS never worked). Bucket kept. Bootstrap FIS grants (FisExtensionLayer, FisExperimentTemplates,
   PassRole fis) to be removed after Deploy is green.
-- Predicted E3 findings to confirm live: reserve crash -> Catch -> FAILED without ReleaseInventory (I5 leak);
-  fulfill crash -> LineUnavailable -> PartialRefund refuses a FULFILLED line -> execution FAILED (STUCK).
+- Fix commit 57e925d: CI 41221066278 + Deploy 41221265475 GREEN (1 added, 34 changed, 2 destroyed). Bootstrap FIS grants
+  removed locally after "APPLY" (0/1/0, uncommitted file infra/bootstrap/github_oidc.tf). Post-deploy: auditor Lambda
+  0 violations / 0 stuck; e2e 35/35; UI suite all PASS incl. busy-retry; overhead windows in layer-overhead.md.
+- Experiments so far (evidence docs/evidence/upgrade-3.2/e*.md/json): E4 PASS (24 orders); CHAOS_ENABLED flipped ON
+  2026-10-31T17:23:59Z; E1 PASS (30 orders, 0 violations, ₹0 lost, BUT resilience finding: ReserveInventory /
+  RequestPayment retry only Lambda.* errors -> order FAILED on first transient error; FulfillItem catches any error as
+  LineUnavailable -> a good item written off + refunded); E2 ran (25 orders) - check e2.md; flipped OFF
+  2026-10-31T17:54:09Z (local apply, 0/10/0). NEXT: E3 (flip ON again), E5 + redrive drill, commit B.
+- E2 (rechecked from e2-placed.json; the run died on a DNS blip while polling): 25 orders, 0 problems, ₹0 lost.
+- E3 before the fix (e3-before.md): both predictions confirmed: crash_after:reserve x2 -> FAILED, units never released
+  (I5, 2 violations); crash_after:fulfill x2 -> LineUnavailable -> RefundAllLines refused a FULFILLED line -> STUCK.
+- Fix commit e02658d (CI 41271597942 + Deploy 41271751719 green, e2e 35/35): States.ALL retry (3x, jitter) on Reserve /
+  RequestPayment / FulfillItem with MaxAttempts-0 retriers for business errors; reserve failures -> ReleaseInventory;
+  only ItemUnavailable -> LineUnavailable; RefundPayment + ReleaseInventory without Catch (a Fail state is not
+  usefully redrivable: proven on ORD-20261031-88258147, ExecutionRedriven -> ExecutionFailed, no state re-run);
+  auditor event field stuckAfterMinutes (drills only).
+- After the fix (orders on their no-fault path / violations): E1 10/30 -> 19/30, 0 -> 0; E3 5/12 -> 9/12, 2 -> 0.
+  Every remaining failure is PaymentTimeout: a DemoPay/webhook fault or crash is redelivered by SQS only after the PSP
+  queue's visibility timeout (6 x provider timeout), past the saga's 120 s payment wait. Money is safe (refunded);
+  the sale is lost. NOT fixed yet (open finding).
+- E5 drill: refund-payment 100% errors for 6 min -> 3 orders parked on PartialRefund / RefundWhatIsLeft / RefundPayment;
+  drill audit (stuckAfterMinutes 2) flagged all 3; --redrive resumed each on its refund task -> PARTIALLY_FULFILLED /
+  CANCELLED / FAILED, ₹0 lost, 0 violations (e5-redrive.md).
+- CHAOS_ENABLED flipped ON 2026-11-01T03:06:51Z, OFF 2026-11-01T04:03:43Z (local apply), and false after Deploy.
+- Leftovers (decision pending with the user): ORD-20261101-e10c6683 and ORD-20261101-11f6e7e1 (E3-before fulfill
+  crashes) stay STUCK in FULFILLING on the OLD definition. A redrive can't help (same input lists a FULFILLED line as
+  unavailable). Their lines were picked and charged in full: the correct end state is COMPLETED (data correction).
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
