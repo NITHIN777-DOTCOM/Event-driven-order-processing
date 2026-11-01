@@ -84,7 +84,8 @@ against the money invariants, using the wallet ledger (order-saga-wallet-txns) a
 
 The poison, payment_timeout and payment_late orders and the 30 s hold are placed FIRST, so their minutes of waiting
 (SQS retries, the 120 s payment timeout, the ~150 s late callback) overlap the other scenarios.
-The DLQ is only peeked (VisibilityTimeout=0) and is never purged, so it stays for screenshots.
+Scenario g deletes ITS OWN poison message once it has asserted it (step 3.4): a DLQ should be empty, so any
+message there is a real incident (docs/runbooks/redrive-stuck-order.md). Every other DLQ message is left untouched.
 Results are printed and written to docs/evidence/e2e-failure-tests.md. Exit code 1 if anything fails.
 """
 
@@ -522,7 +523,7 @@ def dlq_count() -> int:
 
 def start_poison() -> tuple[Scenario, float, int]:
     s = Scenario("g", "poison message -> DLQ after 3 receives (DLQ count +1, message found), order stays PENDING")
-    dlq_before = dlq_count()  # the DLQ is never purged: the new message is found by counting, then by a full sweep
+    dlq_before = dlq_count()  # the new message is found by counting, then by a full sweep; then only it is deleted
     code, body = place_order("WIRELESS-MOUSE", 1, "poison")
     s.check(code == 202, f"POST /orders returned {code} (expected 202)")
     s.order_id = body.get("orderId")
@@ -533,13 +534,14 @@ DLQ_SWEEP_HIDE_SECONDS = 30
 
 
 def dlq_sweep_for(order_id: str) -> tuple[bool, int]:
-    """Receive DLQ messages until this order's message is found or every message has been seen once.
+    """Receive DLQ messages until this order's message is found or every message has been seen once, then delete
+    ONLY this order's message (the test's own poison message, already asserted).
 
     Each receive hides what it returned for DLQ_SWEEP_HIDE_SECONDS, so the next receive can only return messages
-    not seen yet: the sweep is complete, not a random sample. Nothing is deleted; at the end every message is made
-    visible again at once (visibility 0), so the DLQ stays exactly as it was for the console demo.
-    Returns (found, distinct messages seen)."""
-    seen: dict[str, str] = {}  # messageId -> receipt handle
+    not seen yet: the sweep is complete, not a random sample. Every other message is made visible again at once
+    (visibility 0) and never deleted: if one is there, it is a real incident for the runbook, not test litter.
+    Returns (found and deleted, distinct messages seen)."""
+    seen: dict[str, str] = {}  # messageId -> receipt handle, for the messages that are NOT ours
     found, empty = False, 0
     total = dlq_count()
     try:
@@ -549,8 +551,11 @@ def dlq_sweep_for(order_id: str) -> tuple[bool, int]:
             ).get("Messages", [])
             empty = 0 if messages else empty + 1
             for m in messages:
-                seen[m["MessageId"]] = m["ReceiptHandle"]
-                found = found or json.loads(m["Body"]).get("orderId") == order_id
+                if not found and json.loads(m["Body"]).get("orderId") == order_id:
+                    sqs.delete_message(QueueUrl=OUT["dlq_url"], ReceiptHandle=m["ReceiptHandle"])
+                    found = True
+                else:
+                    seen[m["MessageId"]] = m["ReceiptHandle"]
     finally:
         handles = list(seen.values())
         for i in range(0, len(handles), 10):
@@ -558,7 +563,7 @@ def dlq_sweep_for(order_id: str) -> tuple[bool, int]:
                 QueueUrl=OUT["dlq_url"],
                 Entries=[{"Id": str(n), "ReceiptHandle": h, "VisibilityTimeout": 0} for n, h in enumerate(handles[i : i + 10])],
             )
-    return found, len(seen)
+    return found, len(seen) + int(found)
 
 
 def finish_poison(s: Scenario, started: float, dlq_before: int) -> Scenario:
@@ -576,7 +581,10 @@ def finish_poison(s: Scenario, started: float, dlq_before: int) -> Scenario:
         if arrived_after else f"order-saga-orders-dlq count {dlq_before} -> {dlq_after}: no new message within 5 min",
     )
     found, swept = dlq_sweep_for(s.order_id)
-    s.check(found, f"this order's message found in the DLQ (swept {swept} of {dlq_after} messages, none deleted)")
+    s.check(found, f"this order's message found in the DLQ and deleted after the checks (swept {swept} of {dlq_after} messages; no other message deleted)")
+    time.sleep(5)  # let the approximate count settle
+    dlq_end = dlq_count()
+    s.check(dlq_end == dlq_before, f"order-saga-orders-dlq count back to {dlq_before} after the cleanup (now {dlq_end})")
 
     order = get_order(s.order_id)
     s.timeline = order.get("statusHistory", [])

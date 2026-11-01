@@ -1585,7 +1585,7 @@ Filled in after the experiment runs (docs/evidence/upgrade-3.2-chaos.md).
   34 parked (poison orders in the DLQ by design + the outbox probe), after fixing 2 checker bugs (legacy shapes) and
   1 real data inconsistency (below).
 - E1 (30% errors on 9 Lambdas, 10 min, 30 orders) before -> after the fix: orders on their no-fault path 10 -> 19,
-  violations 0 -> 0, ₹ lost 0 -> 0. E3 (crash after each write, 12 orders): 5 -> 9, violations 2 -> 0.
+  violations 0 -> 0, ₹ lost 0 -> 0. E3 (crash after each write, 12 orders): violations 2 -> 0, orders with a problem 2 -> 0, ₹0 lost.
   E2 (DemoPay/webhook +25 s on half the calls): 0 problems. E4 (duplicates): PASS. E5 (refund outage): 3 parked,
   flagged by a drill audit, redriven -> terminal, ₹0 lost.
 - What still fails is one thing: a DemoPay/webhook crash is redelivered by SQS after the queue's visibility timeout
@@ -1670,3 +1670,16 @@ redelivery).
   per-product totals, and a full scan runs rarely (e.g. weekly) as a backstop. Cost then follows traffic, not table size.
 - *Interview Q: why not just raise the timeout?* It buys time, not scale: 900 s is a hard ceiling, so at ~5-10x the
   data it breaks again. The heartbeat makes sure we find out the day it does.
+
+### Refund conflicts and empty DLQs (step 3.4 fixes)
+- **Refund path retries `TransactionConflict` in-process.** The e2e cancel race (20 cancels -> 20 refunds on one test
+  wallet at the same instant) made two DemoPay refunds fail with `TransactionConflict`. Step Functions retried them and
+  the money was right (I1-I9 PASS), but each failed attempt is a Lambda error, so alarm
+  `order-saga-refund-or-write-off-errors` fired for a non-problem. Same rule as the debit path since 3.3: a conflict
+  applied nothing and is not a failure, so `move_refund` reports "conflict" and the refund retries up to 6 times with
+  growing jittered backoff (~2.6 s max) before failing to the saga's own retry.
+- **A DLQ should be empty.** 47 + 3 parked test messages kept two alarms permanently red, which hides a real one.
+  They were archived (`docs/evidence/dlq-archive-2026-11-01.json`: body + attributes) and then deleted by message id
+  (`scripts/archive_dlq.py`, never PurgeQueue, which would also drop anything that arrived after the export).
+  The e2e poison scenario now deletes its own message after asserting it.
+  *Interview Q: why does an always-red alarm matter?* Alarm fatigue: nobody notices the next, real message.

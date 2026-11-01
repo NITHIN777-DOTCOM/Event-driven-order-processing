@@ -227,6 +227,64 @@ def test_refund_credits_exactly_once(aws, payments):
     assert wallet_of(aws, USER_A)[0] == Decimal("1000000")
 
 
+@pytest.mark.parametrize("codes", [("TransactionConflict", "None", "None", "None"), ("None", "None", "None", "TransactionConflict")])
+def test_a_refund_transaction_conflict_is_retried_in_process(aws, payments, monkeypatch, codes):
+    """Step 3.4 (e2e cancel race: 20 refunds on one wallet at once): a conflict is retried, and credits exactly once."""
+    order = seed_order(aws.orders)
+    seed_intent(aws, order)
+    charge(payments, order)
+    client = payments.provider.dynamodb.meta.client
+    real = client.transact_write_items
+    calls = {"n": 0}
+
+    def busy_twice(**kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise conflict(*codes)
+        return real(**kwargs)
+
+    monkeypatch.setattr(client, "transact_write_items", busy_twice)
+    result = payments.provider.refund(f"PI-{order['orderId']}")
+
+    assert result["refunded"] is True and calls["n"] == 3
+    assert ledger(aws) == [("DEBIT", AMOUNT), ("CREDIT", AMOUNT)]
+
+
+def test_a_line_refund_conflict_is_retried_in_process(aws, payments, monkeypatch):
+    order = seed_order(aws.orders)
+    seed_intent(aws, order)
+    charge(payments, order)
+    client = payments.provider.dynamodb.meta.client
+    real = client.transact_write_items
+    calls = {"n": 0}
+
+    def busy_once(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise conflict("TransactionConflict", "None", "None", "None")
+        return real(**kwargs)
+
+    monkeypatch.setattr(client, "transact_write_items", busy_once)
+    result = payments.provider.refund_line(f"PI-{order['orderId']}", "L1", Decimal("100.00"))
+
+    assert result["refunded"] is True and calls["n"] == 2
+    assert ledger(aws) == [("DEBIT", AMOUNT), ("CREDIT", Decimal("100.00"))]
+
+
+def test_a_refund_that_stays_busy_raises_for_the_saga_to_retry(aws, payments, monkeypatch):
+    order = seed_order(aws.orders)
+    seed_intent(aws, order)
+    charge(payments, order)
+
+    def always_busy(**kwargs):
+        raise conflict("TransactionConflict", "None", "None", "None")
+
+    monkeypatch.setattr(payments.provider.dynamodb.meta.client, "transact_write_items", always_busy)
+    with pytest.raises(payments.provider.BalanceConflict):
+        payments.provider.refund(f"PI-{order['orderId']}")
+    assert ledger(aws) == [("DEBIT", AMOUNT)]
+
+
 def test_refund_before_any_charge_or_after_a_decline_is_a_no_op(aws, payments):
     order = seed_order(aws.orders)
 

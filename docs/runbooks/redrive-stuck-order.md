@@ -1,5 +1,9 @@
 # Runbook: redrive a stuck order
 
+> **DLQs:** a dead-letter queue should be empty. Each poison message is inspected, archived
+> (`python scripts/archive_dlq.py --out docs/evidence/dlq-archive-<date>.json`), then removed
+> (`--delete-archived <that file>`).
+
 **When:** alarm `order-saga-stuck-orders` fires (SNS `order-saga-ops-alerts`), or the auditor lists an order as
 STUCK: not terminal 30+ minutes after it was created. Often it also follows `order-saga-refund-or-write-off-errors`.
 

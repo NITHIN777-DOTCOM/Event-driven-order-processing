@@ -1,0 +1,848 @@
+{
+  "exportedAt": "2026-11-01T14:34:21+00:00",
+  "region": "ap-south-1",
+  "queues": {
+    "order-saga-orders-dlq": {
+      "url": "https://sqs.ap-south-1.amazonaws.com/876889172858/order-saga-orders-dlq",
+      "reportedCount": 47,
+      "archivedCount": 47,
+      "messages": [
+        {
+          "messageId": "5e54876e-2962-4cd7-9634-fcbdbf31de35",
+          "md5OfBody": "24b62ff9f9f4039862e98ca079783e8b",
+          "body": "{\"orderId\": \"ORD-20261022-7b1a4028\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261022-7b1a4028"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZ3EV7Q3G:order-saga-create-order",
+            "ApproximateFirstReceiveTimestamp": "1792667252059",
+            "ApproximateReceiveCount": "369",
+            "SentTimestamp": "1792667252054",
+            "AWSTraceHeader": "Root=1-6ad9ee73-5e88b3c776e6da3d2f7dd06e;Parent=876c0671ddb8cbeb;Sampled=1;Lineage=1:1380e1fb:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "f575792c-82d0-4581-b781-6c67c97842f8",
+          "md5OfBody": "b77c0f555f5d25314b96e94f7688c81d",
+          "body": "{\"orderId\": \"ORD-20261022-82eec437\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261022-82eec437"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZ3EV7Q3G:order-saga-create-order",
+            "ApproximateFirstReceiveTimestamp": "1792673734624",
+            "ApproximateReceiveCount": "207",
+            "SentTimestamp": "1792673734617",
+            "AWSTraceHeader": "Root=1-6ada07c5-75519a767e41549b60eb614d;Parent=27e0fd933e2d7dec;Sampled=1;Lineage=1:1380e1fb:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "5720adb0-3063-4ce3-ac86-9dc973b331ba",
+          "md5OfBody": "772443be60122e57d003d51381b95ba9",
+          "body": "{\"orderId\": \"ORD-20261022-ad12231d\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261022-ad12231d"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZ3EV7Q3G:order-saga-create-order",
+            "ApproximateFirstReceiveTimestamp": "1792673955166",
+            "ApproximateReceiveCount": "203",
+            "SentTimestamp": "1792673955149",
+            "AWSTraceHeader": "Root=1-6ada08a2-7b6da59a6aa2db0c2a1b932a;Parent=0cf863b80c71f1f9;Sampled=1;Lineage=1:1380e1fb:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "80778470-fd89-4e16-87e0-366fd0025d4e",
+          "md5OfBody": "170cd6b56d070f0170e90a1816b86f50",
+          "body": "{\"orderId\": \"ORD-20261022-e99e5d9d\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261022-e99e5d9d"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZ3EV7Q3G:order-saga-create-order",
+            "ApproximateFirstReceiveTimestamp": "1792675101675",
+            "ApproximateReceiveCount": "260",
+            "SentTimestamp": "1792675101674",
+            "AWSTraceHeader": "Root=1-6ada0d1c-7cee19da52ad668771328a80;Parent=b4696785ea4d11bb;Sampled=1;Lineage=1:1380e1fb:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "780eea5c-e649-4d6a-b04e-79a185c4da28",
+          "md5OfBody": "213fbd6428a463c4383eabc5829ffa20",
+          "body": "{\"orderId\": \"ORD-20261022-fc6a9b7f\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261022-fc6a9b7f"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZ3EV7Q3G:order-saga-create-order",
+            "ApproximateFirstReceiveTimestamp": "1792675361796",
+            "ApproximateReceiveCount": "154",
+            "SentTimestamp": "1792675361795",
+            "AWSTraceHeader": "Root=1-6ada0e21-0a1ea79b6ea8229477840e27;Parent=7d2cee222314d173;Sampled=1;Lineage=1:1380e1fb:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "9c06790e-81fc-409f-8acd-647cc1e39051",
+          "md5OfBody": "8526cd05e2f589df10fbfda4e4f46c2b",
+          "body": "{\"orderId\": \"ORD-20261022-48651138\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261022-48651138"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZ3EV7Q3G:order-saga-create-order",
+            "ApproximateFirstReceiveTimestamp": "1792675577919",
+            "ApproximateReceiveCount": "154",
+            "SentTimestamp": "1792675577918",
+            "AWSTraceHeader": "Root=1-6ada0ef9-123d84c7650c08fb18715709;Parent=10a77b0d4c23df1d;Sampled=1;Lineage=1:1380e1fb:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "b6218084-1ee4-4372-a12a-e711951534ff",
+          "md5OfBody": "7d3892f5f11549241ee0fac62b0e7ac0",
+          "body": "{\"orderId\": \"ORD-20261022-e830d4c0\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261022-e830d4c0"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZ3EV7Q3G:order-saga-create-order",
+            "ApproximateFirstReceiveTimestamp": "1792675634533",
+            "ApproximateReceiveCount": "153",
+            "SentTimestamp": "1792675634532",
+            "AWSTraceHeader": "Root=1-6ada0f32-0d15fd0a4494799358bd319f;Parent=1934055f55044490;Sampled=1;Lineage=1:1380e1fb:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "899939e7-597e-4623-956e-265b00975a7d",
+          "md5OfBody": "8ed2fa7d229117ceb465350dd62568ae",
+          "body": "{\"orderId\": \"OUTBOX-DLQ-TEST-68c7af7e\\u0001\"}",
+          "bodyParsed": {
+            "orderId": "OUTBOX-DLQ-TEST-68c7af7e\u0001"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793203615412",
+            "ApproximateReceiveCount": "123",
+            "SentTimestamp": "1793203615411",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "93639872-34d9-43a7-8373-d8ba12da1cd0",
+          "md5OfBody": "ab5c5de2954c0ce33469ee4017677f66",
+          "body": "{\"orderId\": \"ORD-20261028-b859a61f\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261028-b859a61f"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793203965308",
+            "ApproximateReceiveCount": "101",
+            "SentTimestamp": "1793203965306",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "05263e9b-0e7a-44fe-929c-6bc21be672bf",
+          "md5OfBody": "af8ad260896db31fd6cb078f47540099",
+          "body": "{\"orderId\": \"ORD-20261028-a6ebc2df\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261028-a6ebc2df"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793209065912",
+            "ApproximateReceiveCount": "125",
+            "SentTimestamp": "1793209065904",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "62441b5f-eb22-4f6b-b1f6-6131a049af3e",
+          "md5OfBody": "7b855233925df8589cb6ce27177e0f20",
+          "body": "{\"orderId\": \"ORD-20261028-4d66d9c4\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261028-4d66d9c4"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793209316776",
+            "ApproximateReceiveCount": "71",
+            "SentTimestamp": "1793209316774",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "5f460444-cd6c-4f74-a9c2-cb0f3db7a497",
+          "md5OfBody": "58c5269b73dea353bf2125d63f6c197d",
+          "body": "{\"orderId\": \"ORD-20261028-67d9704f\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261028-67d9704f"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793209568383",
+            "ApproximateReceiveCount": "83",
+            "SentTimestamp": "1793209568382",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "c383bfb2-2a51-46d3-99ef-1bfe70369ee6",
+          "md5OfBody": "f0e33b07399f490957200777465fab8a",
+          "body": "{\"orderId\": \"ORD-20261029-ea52897c\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261029-ea52897c"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793265551918",
+            "ApproximateReceiveCount": "76",
+            "SentTimestamp": "1793265551911",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "4974ea45-48aa-45d5-ae27-c38a4b6088c3",
+          "md5OfBody": "7a1aa37f7fddbd4bf7e26132162794e4",
+          "body": "{\"orderId\": \"ORD-20261029-12185014\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261029-12185014"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793266076596",
+            "ApproximateReceiveCount": "63",
+            "SentTimestamp": "1793266076595",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "d342a043-1e32-4097-9091-81de756d0657",
+          "md5OfBody": "67c0c3509ce1df3c1df25b97af1f34ab",
+          "body": "{\"orderId\": \"ORD-20261029-fa277eef\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261029-fa277eef"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793266387134",
+            "ApproximateReceiveCount": "62",
+            "SentTimestamp": "1793266387133",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "061430a8-6a03-4c32-a903-0fed2c1836eb",
+          "md5OfBody": "b1f3eacbe961a7453f249d5192d07ea0",
+          "body": "{\"orderId\": \"ORD-20261029-7086bb49\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261029-7086bb49"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793269765597",
+            "ApproximateReceiveCount": "47",
+            "SentTimestamp": "1793269765595",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "36cf8aad-4728-4fee-b7c1-d5502db4730b",
+          "md5OfBody": "5b2e7613005daa4c054e5e825538fcfc",
+          "body": "{\"orderId\": \"ORD-20261029-002670fe\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261029-002670fe"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793270048306",
+            "ApproximateReceiveCount": "46",
+            "SentTimestamp": "1793270048304",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "e85ff81c-4642-4af9-b5d7-bdb65c40feab",
+          "md5OfBody": "b411ef79b89d4876e5f8913ee662418a",
+          "body": "{\"orderId\": \"ORD-20261029-63e7d83b\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261029-63e7d83b"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793273315381",
+            "ApproximateReceiveCount": "44",
+            "SentTimestamp": "1793273315375",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "8065bd1e-a92b-4f83-a62b-4c9bd4b3670b",
+          "md5OfBody": "19285e6f9fd78e7c93ddbfb0ee94411a",
+          "body": "{\"orderId\": \"ORD-20261029-59f60843\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261029-59f60843"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793274130204",
+            "ApproximateReceiveCount": "42",
+            "SentTimestamp": "1793274130191",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "18ccfa20-3d0b-40bd-801e-32e968b93f71",
+          "md5OfBody": "d6d4fb69924648bb56bc2d5234833cb0",
+          "body": "{\"orderId\": \"ORD-20261029-ac51f44a\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261029-ac51f44a"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793274531932",
+            "ApproximateReceiveCount": "89",
+            "SentTimestamp": "1793274531930",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "3a5bf31a-68e8-4926-a054-5bf337b181a9",
+          "md5OfBody": "7c7e80973d7c7cc9bf3817f62944f653",
+          "body": "{\"orderId\": \"ORD-20261030-eb398db5\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-eb398db5"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793350754841",
+            "ApproximateReceiveCount": "41",
+            "SentTimestamp": "1793350754837",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "1dae5a9e-97db-4f57-8453-4214ae233bcc",
+          "md5OfBody": "083b5407e16336605c0dc01a699476dd",
+          "body": "{\"orderId\": \"ORD-20261030-083e3315\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-083e3315"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793352221542",
+            "ApproximateReceiveCount": "33",
+            "SentTimestamp": "1793352221525",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "52f2f118-8751-4929-b6c5-5a74aefb1e63",
+          "md5OfBody": "94f55671c692ea3ba1926d5b9578f8d3",
+          "body": "{\"orderId\": \"ORD-20261030-99b904c9\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-99b904c9"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793352510759",
+            "ApproximateReceiveCount": "30",
+            "SentTimestamp": "1793352510757",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "dd00f222-4538-494d-9b3e-7872ff94c00b",
+          "md5OfBody": "89b823f66289ccd8e3370d6e508542c3",
+          "body": "{\"orderId\": \"ORD-20261030-6b690511\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-6b690511"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793352855641",
+            "ApproximateReceiveCount": "25",
+            "SentTimestamp": "1793352855639",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "87251d2f-3eae-4a0f-bdb9-7332537402b4",
+          "md5OfBody": "c34f9ce1ebd92b744819be3ecc4a9ef6",
+          "body": "{\"orderId\": \"ORD-20261030-79b08edb\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-79b08edb"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793352966357",
+            "ApproximateReceiveCount": "23",
+            "SentTimestamp": "1793352966355",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "76f01e8e-7295-403f-a3a9-88643cb8accb",
+          "md5OfBody": "4d751a6625826f0077492a66b647fc74",
+          "body": "{\"orderId\": \"ORD-20261030-aa0f18bd\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-aa0f18bd"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793353402560",
+            "ApproximateReceiveCount": "25",
+            "SentTimestamp": "1793353402558",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "7458d287-8b6a-4eae-a35d-1effd958963b",
+          "md5OfBody": "2e8f731216e886cde901f3d8c04fd72c",
+          "body": "{\"orderId\": \"ORD-20261030-b4394b21\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-b4394b21"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793358067592",
+            "ApproximateReceiveCount": "23",
+            "SentTimestamp": "1793358067585",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "37df8a24-96b8-4970-bffd-be13703fbc61",
+          "md5OfBody": "bac6a20132213b3d0881580dabb7499b",
+          "body": "{\"orderId\": \"ORD-20261030-7c964f12\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-7c964f12"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793358745710",
+            "ApproximateReceiveCount": "11",
+            "SentTimestamp": "1793358745709",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "1771291c-d559-4617-b7e7-32a51055bf7c",
+          "md5OfBody": "1e5c25832c73201a9a1da3069af85848",
+          "body": "{\"orderId\": \"ORD-20261030-9d978920\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-9d978920"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793359007585",
+            "ApproximateReceiveCount": "10",
+            "SentTimestamp": "1793359007580",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "c21e479e-de65-49aa-9823-bacc109eea7d",
+          "md5OfBody": "e0e3ee46ffefd5819cb273c73ea55a01",
+          "body": "{\"orderId\": \"ORD-20261030-546bd006\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-546bd006"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793366202217",
+            "ApproximateReceiveCount": "12",
+            "SentTimestamp": "1793366202208",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "045967d7-c219-44ba-a0a5-ee5674be4c82",
+          "md5OfBody": "ff0729327ae14dc66b11953dd2640e60",
+          "body": "{\"orderId\": \"ORD-20261030-b45f8007\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-b45f8007"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793366580524",
+            "ApproximateReceiveCount": "14",
+            "SentTimestamp": "1793366580522",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "918f6413-169e-4265-b81c-91bd5791dca2",
+          "md5OfBody": "fbee96e7fe3a3774d68fb538f13895b4",
+          "body": "{\"orderId\": \"ORD-20261030-57fb2f10\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-57fb2f10"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793366698867",
+            "ApproximateReceiveCount": "11",
+            "SentTimestamp": "1793366698866",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "862d314c-7e13-4330-864a-ab414fb11f2a",
+          "md5OfBody": "b0e8690f104e8b6febb945c491f0bbc3",
+          "body": "{\"orderId\": \"ORD-20261030-06ada3e5\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-06ada3e5"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793367987804",
+            "ApproximateReceiveCount": "8",
+            "SentTimestamp": "1793367987798",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "544e0ca3-204b-4e58-8e4f-39c5835f2f03",
+          "md5OfBody": "9f6ba0bd4624c29ee59d324e6c251d3c",
+          "body": "{\"orderId\": \"ORD-20261030-974fb245\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261030-974fb245"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793372628516",
+            "ApproximateReceiveCount": "8",
+            "SentTimestamp": "1793372628509",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "f598eec2-620a-48eb-a464-bcc45d708ffd",
+          "md5OfBody": "883f152801288e2439be851b76ea206e",
+          "body": "{\"orderId\": \"ORD-20261031-7b77f4c5\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261031-7b77f4c5"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793463832380",
+            "ApproximateReceiveCount": "10",
+            "SentTimestamp": "1793463832373",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "11dfe7f1-a456-4d60-8517-302dc745a015",
+          "md5OfBody": "20f57f5c958b497422939bbf47a1b4f6",
+          "body": "{\"orderId\": \"ORD-20261031-43c1d4ab\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261031-43c1d4ab"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793465547629",
+            "ApproximateReceiveCount": "8",
+            "SentTimestamp": "1793465547627",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "86ff467a-1061-4293-b6ad-4df1421af7fd",
+          "md5OfBody": "a7d88332734c84fea667a9e42097709b",
+          "body": "{\"orderId\": \"ORD-20261031-bd221d09\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261031-bd221d09"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793465967607",
+            "ApproximateReceiveCount": "8",
+            "SentTimestamp": "1793465967606",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "b95ab1a7-3ee3-462c-bf10-61a48bd52b8d",
+          "md5OfBody": "3bf2f0f5c00e95d46664813a5389a2bc",
+          "body": "{\"orderId\": \"ORD-20261031-e736a17c\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261031-e736a17c"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793466809884",
+            "ApproximateReceiveCount": "8",
+            "SentTimestamp": "1793466809881",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "92997e8d-3e3e-45ae-a4e1-95c01ce84f61",
+          "md5OfBody": "5b37712cfc857dea2dd54e3cf900ed5e",
+          "body": "{\"orderId\": \"ORD-20261031-098dc401\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261031-098dc401"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793468121747",
+            "ApproximateReceiveCount": "8",
+            "SentTimestamp": "1793468121734",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "883e21a7-5ee0-492d-a1f5-2ec706524119",
+          "md5OfBody": "0089cce8218627e89adefdb7a078d8f9",
+          "body": "{\"orderId\": \"ORD-20261031-6863c764\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261031-6863c764"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793469243929",
+            "ApproximateReceiveCount": "7",
+            "SentTimestamp": "1793469243928",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "d8a46c8d-8768-4c9d-be97-a56b55311011",
+          "md5OfBody": "818cea72d87ce7e6109c3888e621faa6",
+          "body": "{\"orderId\": \"ORD-20261101-570f773f\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261101-570f773f"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793506319704",
+            "ApproximateReceiveCount": "7",
+            "SentTimestamp": "1793506319703",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "bac66326-186a-41de-9505-05c73a55b986",
+          "md5OfBody": "c26c07bd9c694a3abc71e087e5341368",
+          "body": "{\"orderId\": \"ORD-20261101-844201ca\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261101-844201ca"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793507041036",
+            "ApproximateReceiveCount": "6",
+            "SentTimestamp": "1793507041035",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "6dc6fe1f-7b48-4ee7-bc4b-33d7188affc2",
+          "md5OfBody": "fc5cde69c2206e5d6ff906587537e74a",
+          "body": "{\"orderId\": \"ORD-20261101-b755f8a7\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261101-b755f8a7"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793529631598",
+            "ApproximateReceiveCount": "6",
+            "SentTimestamp": "1793529631591",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "f1dc373d-3230-474a-b75c-3fb49bda0339",
+          "md5OfBody": "96881ea2decb9303b4418fd8ae555cfe",
+          "body": "{\"orderId\": \"ORD-20261101-51588c53\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261101-51588c53"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793538162024",
+            "ApproximateReceiveCount": "7",
+            "SentTimestamp": "1793538162019",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "81aff6a2-cf48-4942-b5b9-5c707d42b18c",
+          "md5OfBody": "9533a260c1a06d126cf95ffc69818ec9",
+          "body": "{\"orderId\": \"ORD-20261101-af15befe\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261101-af15befe"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793538249353",
+            "ApproximateReceiveCount": "7",
+            "SentTimestamp": "1793538249348",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "b74d09f3-af35-412f-a26b-4c11e19f40a3",
+          "md5OfBody": "2b21336cf93dbfc0dbc4a410576a1655",
+          "body": "{\"orderId\": \"ORD-20261101-7fbca225\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261101-7fbca225"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793539225437",
+            "ApproximateReceiveCount": "6",
+            "SentTimestamp": "1793539225435",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "0e17bbe2-29a5-4e11-9fc8-20d34ca68784",
+          "md5OfBody": "8356b270eb20215f06939de6ee12d24a",
+          "body": "{\"orderId\": \"ORD-20261101-bc5067b2\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261101-bc5067b2"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793541488549",
+            "ApproximateReceiveCount": "5",
+            "SentTimestamp": "1793541488543",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        }
+      ]
+    },
+    "order-saga-psp-dlq": {
+      "url": "https://sqs.ap-south-1.amazonaws.com/876889172858/order-saga-psp-dlq",
+      "reportedCount": 3,
+      "archivedCount": 3,
+      "messages": [
+        {
+          "messageId": "37fc89ce-119d-4e99-b53e-53e2448467c8",
+          "md5OfBody": "68d09560f46052593a425b1203756d0d",
+          "body": "{\"paymentIntentId\": \"PI-ORD-20261031-54196304\", \"orderId\": \"ORD-20261031-54196304\", \"walletId\": \"f1337d8a-7091-702b-ade2-3b7c27a8e578\", \"amount\": \"1799\", \"currency\": \"INR\", \"simulate\": \"payment_declined\", \"chaosRun\": \"E1-ac010f87\"}",
+          "bodyParsed": {
+            "paymentIntentId": "PI-ORD-20261031-54196304",
+            "orderId": "ORD-20261031-54196304",
+            "walletId": "f1337d8a-7091-702b-ade2-3b7c27a8e578",
+            "amount": "1799",
+            "currency": "INR",
+            "simulate": "payment_declined",
+            "chaosRun": "E1-ac010f87"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5J4ZR3KJPV:order-saga-request-payment",
+            "ApproximateFirstReceiveTimestamp": "1793467532754",
+            "ApproximateReceiveCount": "6",
+            "SentTimestamp": "1793467530754",
+            "AWSTraceHeader": "Root=1-6ae6248a-c07ee36544a0b01b79499b8c;Parent=a2320e0ee700a661;Sampled=1;Lineage=2:274f92c2:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-psp-requests"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "056da437-17b5-42ea-816e-7f0d2db25464",
+          "md5OfBody": "5b2e297b1d8ae7444f591d9525194193",
+          "body": "{\"paymentIntentId\": \"PI-ORD-20261031-0af74705\", \"orderId\": \"ORD-20261031-0af74705\", \"walletId\": \"f1337d8a-7091-702b-ade2-3b7c27a8e578\", \"amount\": \"4597\", \"currency\": \"INR\", \"simulate\": \"none\", \"chaosRun\": \"E2-4e93e067\"}",
+          "bodyParsed": {
+            "paymentIntentId": "PI-ORD-20261031-0af74705",
+            "orderId": "ORD-20261031-0af74705",
+            "walletId": "f1337d8a-7091-702b-ade2-3b7c27a8e578",
+            "amount": "4597",
+            "currency": "INR",
+            "simulate": "none",
+            "chaosRun": "E2-4e93e067"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5J4ZR3KJPV:order-saga-request-payment",
+            "ApproximateFirstReceiveTimestamp": "1793468605266",
+            "ApproximateReceiveCount": "6",
+            "SentTimestamp": "1793468603264",
+            "AWSTraceHeader": "Root=1-6ae628bb-a62ca7bc113ba4bb552ac270;Parent=a9cb852f3039813e;Sampled=1;Lineage=2:274f92c2:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-psp-requests"
+          },
+          "messageAttributes": {}
+        },
+        {
+          "messageId": "687499e2-1598-49de-9250-cea940c0f396",
+          "md5OfBody": "c187b7e1abba0c2c2a9848115dbfbdba",
+          "body": "{\"paymentIntentId\": \"PI-ORD-20261031-ff662f85\", \"orderId\": \"ORD-20261031-ff662f85\", \"walletId\": \"f1337d8a-7091-702b-ade2-3b7c27a8e578\", \"amount\": \"2299\", \"currency\": \"INR\", \"simulate\": \"payment_flaky\", \"chaosRun\": \"E2-4e93e067\"}",
+          "bodyParsed": {
+            "paymentIntentId": "PI-ORD-20261031-ff662f85",
+            "orderId": "ORD-20261031-ff662f85",
+            "walletId": "f1337d8a-7091-702b-ade2-3b7c27a8e578",
+            "amount": "2299",
+            "currency": "INR",
+            "simulate": "payment_flaky",
+            "chaosRun": "E2-4e93e067"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5J4ZR3KJPV:order-saga-request-payment",
+            "ApproximateFirstReceiveTimestamp": "1793468646923",
+            "ApproximateReceiveCount": "6",
+            "SentTimestamp": "1793468642923",
+            "AWSTraceHeader": "Root=1-6ae628dc-51d526113747cf290d59ff8c;Parent=fac741e57a18390c;Sampled=1;Lineage=2:274f92c2:0",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-psp-requests"
+          },
+          "messageAttributes": {}
+        }
+      ]
+    }
+  }
+}

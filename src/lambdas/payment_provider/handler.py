@@ -220,7 +220,7 @@ def charge_once(request: dict[str, Any], simulate: str, log: StructuredLogger) -
 
 
 def backoff(attempt: int = 0) -> None:
-    """Full jitter: sleep somewhere in [0, 50 ms x 2^attempt], capped at 1 s."""
+    """Full jitter: sleep somewhere in [0, 50 ms x 2^attempt], capped at 1 s (6 refund attempts: at most ~2.6 s)."""
     time.sleep(random.uniform(0, min(1.0, 0.05 * 2 ** attempt)))
 
 
@@ -330,7 +330,7 @@ def refund(intent_id: str, note: str = "") -> dict[str, Any]:
         return {"refunded": False, "reason": "nothing charged"}
     log = log.bind(orderId=charge["orderId"])
 
-    for _ in range(MAX_BALANCE_CONFLICTS):
+    for attempt in range(MAX_BALANCE_CONFLICTS):
         done = psp_table.get_item(Key={"pspTxnId": f"REFUND#{intent_id}"}, ConsistentRead=True).get("Item")
         if done:  # a repeat call: replay the refund that already happened
             log.info("Already refunded; idempotent no-op", refundId=done["refundId"])
@@ -349,6 +349,7 @@ def refund(intent_id: str, note: str = "") -> dict[str, Any]:
             done = psp_table.get_item(Key={"pspTxnId": refund_item["pspTxnId"]}, ConsistentRead=True)["Item"]
             log.info("Already refunded; idempotent no-op", refundId=done["refundId"])
             return refund_result(done, refunded=False)
+        backoff(attempt)  # "retry" or "conflict": wait (growing, jittered), then re-read and try again
         charge = psp_table.get_item(Key={"pspTxnId": charge["pspTxnId"]}, ConsistentRead=True)["Item"]  # re-read, retry
     raise BalanceConflict("Wallet is busy; retry the refund")
 
@@ -365,7 +366,7 @@ def refund_line(intent_id: str, line_id: str, amount: Decimal, note: str = "") -
 
     refund_item = refund_record(charge, f"REFUND#{intent_id}#{line_id}", amount, lineId=line_id)
     description = f"Refund for {charge['orderId']} line {line_id}" + (f" ({note})" if note else "")
-    for _ in range(MAX_BALANCE_CONFLICTS):
+    for attempt in range(MAX_BALANCE_CONFLICTS):
         outcome = move_refund(charge, refund_item, description, log, cap=Decimal(charge["amount"]) - amount)
         if outcome in ("done", "duplicate"):
             record = refund_item
@@ -381,6 +382,7 @@ def refund_line(intent_id: str, line_id: str, amount: Decimal, note: str = "") -
             }
         if outcome == "over_cap":
             raise RefundRejected(f"Refunding {amount} for line {line_id} would exceed the {charge['amount']} charged for {intent_id}")
+        backoff(attempt)  # "retry" or "conflict": wait (growing, jittered), then try again
     raise BalanceConflict("Wallet is busy; retry the refund")
 
 
@@ -423,7 +425,8 @@ def move_refund(
 
     The charge record is guarded by `cap` (a line refund: the total before must be <= cap) or by `already_refunded`
     (the whole remainder: the total must still be exactly what we read). Returns "done", "duplicate" (this refund
-    record exists already), "over_cap", or "retry" (the wallet balance or the charge's total changed: re-read).
+    record exists already), "over_cap", "retry" (the wallet balance or the charge's total changed: re-read), or
+    "conflict" (another transaction held one of these items at that instant: nothing was written, try again).
     """
     wid, amount = charge["walletId"], refund_item["amount"]
     if cap is not None:
@@ -462,6 +465,12 @@ def move_refund(
             return "over_cap" if cap is not None else "retry"
         if codes and codes[0] == "ConditionalCheckFailed":
             return "retry"
+        if "TransactionConflict" in codes:
+            # Step 3.4: the e2e cancel race (20 refunds on one wallet at once) hit this. Same rule as the debit path:
+            # a conflict applied nothing and is never a failure of the refund itself, so retry in-process instead of
+            # failing the Lambda (which Step Functions would retry, but which also tripped the errors alarm).
+            log.info("Wallet transaction conflict on refund; retrying", walletId=wid)
+            return "conflict"
         raise
     log.info("Refunded", refundId=refund_item["refundId"], amount=amount, balanceAfter=after, walletId=wid)
     return "done"
