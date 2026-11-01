@@ -4,6 +4,7 @@
 #   EventBridge Scheduler (hourly) -> Lambda order-saga-invariant-auditor (read-only, src/common/invariants.py)
 #     -> metrics OrderSaga/Audit (Violations, Stuck, Parked, per-invariant Violations)
 #     -> alarms order-saga-invariant-violation and order-saga-stuck-orders -> SNS order-saga-ops-alerts
+#     -> heartbeat AuditCompleted -> alarm order-saga-auditor-missed (step 3.4: no finished audit for 2 hours)
 #
 # The violation alarm is also the stop condition of every chaos run (scripts/chaos_run.py): a run that breaks an
 # invariant stops itself.
@@ -115,6 +116,25 @@ resource "aws_cloudwatch_metric_alarm" "stuck_orders" {
   comparison_operator = "GreaterThanThreshold"
   threshold           = 0
   treat_missing_data  = "ignore"
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}
+
+# "Monitor the monitor" (step 3.4). The two alarms above use treat_missing_data = "ignore", so an auditor that times
+# out (as it did at ~39k orders in step 3.3) leaves them OK for ever. The auditor sends AuditCompleted = 1 only after
+# a full audit; no datapoint for 2 hours (two missed hourly runs, Scheduler retries included) = missing = breaching.
+resource "aws_cloudwatch_metric_alarm" "auditor_missed" {
+  alarm_name          = "${var.project_prefix}-auditor-missed"
+  alarm_description   = "No invariant audit has finished in the last 2 hours: the hourly ${local.auditor_name} run timed out, crashed or was not scheduled, so the violation and stuck-order alarms are blind. Check its log group /aws/lambda/${local.auditor_name} (Task timed out / errors) and the schedule ${var.project_prefix}-invariant-audit-hourly."
+  namespace           = "OrderSaga/Audit"
+  metric_name         = "AuditCompleted"
+  statistic           = "Sum"
+  period              = 7200
+  evaluation_periods  = 1
+  comparison_operator = "LessThanThreshold"
+  threshold           = 1
+  treat_missing_data  = "breaching"
 
   alarm_actions = local.alarm_actions
   ok_actions    = local.alarm_actions

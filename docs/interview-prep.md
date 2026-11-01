@@ -1655,3 +1655,18 @@ redelivery).
 ### Likely interview questions
 - *How did you know the first run was bad?* Completion time p50 = 120.7 s, the payment timeout, and the queue age.
 - *Why 429 and not queueing?* The stage limit protects cost; clients retry with backoff (the storefront does).
+
+### Auditor at scale: it timed out, as predicted (step 3.4)
+- **What broke:** the invariant auditor full-scans 7 tables every hour. Its run time grew with the data
+  (3.9 s -> 51.5 s -> 70.8 s) and at ~39k orders (39,221) it hit its 180 s Lambda timeout after load-test run 2.
+  Worse, a timed-out audit publishes nothing, and the violation / stuck alarms treat missing data as "ignore": a dead
+  auditor looked exactly like a clean one.
+- **Short-term fix (built):** timeout 900 s (Lambda's maximum) and 1769 MB (= 1 full vCPU; Lambda gives CPU in
+  proportion to memory). Plus a **heartbeat**: the auditor sends `OrderSaga/Audit AuditCompleted = 1` only after a
+  full audit, and alarm `order-saga-auditor-missed` (Sum < 1 over 2 hours, missing data = breaching) pages ops if no
+  audit finishes. "Monitor the monitor": every safety net needs a check that it is still running.
+- **At scale (not built, words only):** make the audit incremental. DynamoDB Streams on the orders / payments /
+  ledger tables feed a Lambda that re-checks only the orders that changed (plus their products), keeping running
+  per-product totals, and a full scan runs rarely (e.g. weekly) as a backstop. Cost then follows traffic, not table size.
+- *Interview Q: why not just raise the timeout?* It buys time, not scale: 900 s is a hard ceiling, so at ~5-10x the
+  data it breaks again. The heartbeat makes sure we find out the day it does.

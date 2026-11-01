@@ -14,6 +14,9 @@ What it does:
   4. Publish CloudWatch metrics in namespace OrderSaga/Audit: Violations, Stuck, Parked, and Violations per
      invariant (dimension Invariant = I1..I9, only when non-zero). Alarms order-saga-invariant-violation and
      order-saga-stuck-orders fire on > 0; the violation alarm is also the stop condition of every FIS experiment.
+  5. Heartbeat (step 3.4): AuditCompleted = 1, sent in the same call as the results, so only an audit that ran to the
+     end sends it. Alarm order-saga-auditor-missed fires when no audit has finished for 2 hours ("monitor the
+     monitor"): a timed-out or crashing auditor would otherwise look exactly like a clean one (no violations).
 """
 
 from __future__ import annotations
@@ -97,6 +100,8 @@ def drill_threshold(event: dict[str, Any] | None) -> timedelta:
 
 def publish(summary: dict[str, Any]) -> None:
     """Violations, Stuck and Parked: one datapoint each per run, 0 included, so the alarms return to OK once fixed.
+    AuditCompleted = 1 is the heartbeat: this function runs only after a full audit, so a run that times out or
+    crashes sends nothing, and alarm order-saga-auditor-missed notices the silence.
 
     Per-invariant counts (dimension Invariant = I1..I9) are published only when non-zero. A custom metric costs
     $0.30/month for every month (pro rata per hour) it receives data, so nine always-published zeros would cost
@@ -106,6 +111,7 @@ def publish(summary: dict[str, Any]) -> None:
         {"MetricName": "Violations", "Value": summary["violations"], "Unit": "Count"},
         {"MetricName": "Stuck", "Value": summary["stuck"], "Unit": "Count"},
         {"MetricName": "Parked", "Value": summary["parked"], "Unit": "Count"},
+        {"MetricName": "AuditCompleted", "Value": 1, "Unit": "Count"},
     ]
     data += [
         {"MetricName": "Violations", "Dimensions": [{"Name": "Invariant", "Value": inv}], "Value": count, "Unit": "Count"}

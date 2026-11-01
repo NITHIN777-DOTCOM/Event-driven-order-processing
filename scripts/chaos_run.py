@@ -72,7 +72,9 @@ STOP_ALARM = "order-saga-invariant-violation"
 
 s3 = boto3.client("s3", region_name=REGION)
 cloudwatch = boto3.client("cloudwatch", region_name=REGION)
-lambda_client = boto3.client("lambda", region_name=REGION)
+# The auditor can run up to its 900 s timeout: wait longer than that, and never retry (botocore's default 60 s read
+# timeout + retries started duplicate audits in step 3.3).
+lambda_client = boto3.client("lambda", region_name=REGION, config=Config(read_timeout=960, retries={"max_attempts": 1}))
 # Our own client with adaptive retries: a run makes a few hundred Step Functions reads in a burst.
 sfn = boto3.client("stepfunctions", region_name=REGION, config=Config(retries={"mode": "adaptive", "max_attempts": 10}))
 sqs = e2e.sqs

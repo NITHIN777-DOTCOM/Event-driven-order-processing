@@ -41,6 +41,7 @@ def test_clean_tables_publish_zero(aws, auditor):
     result = auditor.lambda_handler({"source": "manual"}, None)
     assert result["violations"] == 0 and result["stuck"] == 0
     assert metric(auditor.published, "Violations") == 0
+    assert metric(auditor.published, "AuditCompleted") == 1  # heartbeat for alarm order-saga-auditor-missed
     with pytest.raises(KeyError):  # per-invariant metrics only when non-zero (cost)
         metric(auditor.published, "Violations", "I5")
 

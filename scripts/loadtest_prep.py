@@ -44,9 +44,9 @@ DLQS = {"orders": OUT["dlq_url"], "outbox": OUT["outbox_dlq_url"], "psp": OUT["p
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 inventory = dynamodb.Table(OUT["inventory_table"])
 sqs = boto3.client("sqs", region_name=REGION)
-# The auditor scans every table and takes ~50 s at this size: wait up to 5 min, and never re-invoke on a client
-# timeout (botocore's default 60 s read timeout + retries started duplicate audits).
-lambda_client = boto3.client("lambda", region_name=REGION, config=Config(read_timeout=300, retries={"max_attempts": 1}))
+# The auditor scans every table and can run up to its 900 s timeout: wait longer than that, and never re-invoke on a
+# client timeout (botocore's default 60 s read timeout + retries started duplicate audits).
+lambda_client = boto3.client("lambda", region_name=REGION, config=Config(read_timeout=960, retries={"max_attempts": 1}))
 
 
 def now_iso() -> str:

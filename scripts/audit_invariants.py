@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from common.invariants import AuditResult, audit, confirm, load_snapshot  # noqa: E402
@@ -69,7 +70,8 @@ def run_local(out: dict, fallback: bool) -> AuditResult:
 
 
 def run_lambda(out: dict) -> dict:
-    client = boto3.client("lambda", region_name=out["region"])
+    # Wait past the auditor's 900 s timeout and never retry: a client-side retry would start a second full audit.
+    client = boto3.client("lambda", region_name=out["region"], config=Config(read_timeout=960, retries={"max_attempts": 1}))
     resp = client.invoke(FunctionName=out["invariant_auditor_function_name"], Payload=json.dumps({"source": "manual"}).encode())
     payload = json.loads(resp["Payload"].read())
     if resp.get("FunctionError"):

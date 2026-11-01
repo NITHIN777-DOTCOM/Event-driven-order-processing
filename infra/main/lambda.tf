@@ -161,8 +161,11 @@ locals {
     }
     invariant_auditor = {
       description = "Reconciliation job - audits invariants I1-I9 over orders - payments - DemoPay ledger and stock - hourly via EventBridge Scheduler - metrics OrderSaga/Audit - read-only"
-      timeout     = 180 # two full audits (a few seconds each at this size) with a 10 s pause between them
-      memory_size = 512 # holds every order and ledger entry in memory while reconciling
+      # Step 3.4: the full scan outgrew 180 s at ~39k orders (step 3.3). 900 s is Lambda's maximum; 1769 MB buys one
+      # full vCPU (Lambda gives CPU in proportion to memory), and the scans + reconciliation are CPU-bound in Python.
+      # A run that still overruns publishes no AuditCompleted heartbeat -> alarm order-saga-auditor-missed.
+      timeout     = 900
+      memory_size = 1769
       environment = {
         ORDERS_TABLE      = aws_dynamodb_table.orders.name
         PAYMENTS_TABLE    = aws_dynamodb_table.payments.name
