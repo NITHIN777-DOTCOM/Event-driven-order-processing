@@ -294,7 +294,10 @@ comparison lives in docs/interview-prep.md section 17 and the README. Nothing is
   finished audit; alarm `order-saga-auditor-missed` (Sum < 1 over 7200 s, missing = breaching -> ops-alerts; the
   window slides with the clock). chaos_run.py / audit_invariants.py / loadtest_prep.py: read timeout 960 s, 1 attempt.
   No IAM change. Live: 39,322 orders, 0 violations / 0 stuck / 46 parked, 37.4 s, 680 MB used; alarm OK.
-- Docs: README rewritten; docs/INTERVIEW-CHEATSHEET.md; docs/teardown.md; repo description + topics (gh).
+- Docs: README rewritten; docs/INTERVIEW-CHEATSHEET.md; docs/teardown.md. e2e 35/35 (1086 s) after the auditor deploy.
+- Commits: 55bd0fe (CI 41313374590, Deploy 41313535866), 3669bae (CI 41315408578, Deploy 41315632333). Repo description: pending owner approval.
+- Observation: e2e cancel race x20 -> 2 DemoPay refund TransactionConflicts (retried by SFN, I1-I9 PASS) tripped
+  `order-saga-refund-or-write-off-errors`; the refund path lacks the in-process conflict retry the debit path has.
 
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
@@ -377,7 +380,7 @@ comparison lives in docs/interview-prep.md section 17 and the README. Nothing is
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
 ## Next
-- Upgrade complete. Open ideas (not planned): incremental (stream-based) auditor; shorter PSP visibility timeout;
+- Upgrade complete. Open ideas (not planned): DemoPay refund-path TransactionConflict retry; incremental (stream-based) auditor; shorter PSP visibility timeout;
   SES per-customer emails; PENDING sweeper; WAF + CSP. Demo video not recorded (was in the old 3.5 plan).
 
 ## Known limitations / ideas (good viva points)

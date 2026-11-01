@@ -52,6 +52,15 @@ documented for a 10-minute read (README, [interview cheat sheet](../INTERVIEW-CH
 - DLQs: orders 47 (poison-message test orders, one per e2e run; 43 at the end of 3.3) / outbox 0 / PSP 3
   (unchanged since 3.2). Clearing them means deleting messages: not done (needs "DESTROY").
 
+## Observations (not changed in this step)
+- **`order-saga-refund-or-write-off-errors` -> ALARM at 14:16 UTC during the e2e cancel race (zi).** Two
+  `order-saga-refund-payment` invocations at 14:15 UTC failed with `DemoPay refund failed: ... TransactionCanceledException
+  [TransactionConflict, ...]`: 20 cancels refunding on the same test wallet at once. Step Functions retried them
+  (refund retries since 3.2) and every race order passed I1-I9 in the e2e run, so money is correct. The alarm counts
+  raw Lambda errors, retried or not. DemoPay retries TransactionConflict in-process on the DEBIT path (3.3) but not
+  on the REFUND path; adding the same retry would keep this alarm quiet. The alarm returns to OK by itself
+  (missing data = not breaching).
+
 ## Cost
 - Idle (measured, Cost Explorer usage before credits, quiet days 2026-10-24..27): **$0.117/day, ~$3.5/month**.
 - New since the load test: the hourly full-scan audit, ~60.6k RRU per run x 720 runs ≈ 44M RRU/month,
@@ -62,4 +71,5 @@ documented for a 10-minute read (README, [interview cheat sheet](../INTERVIEW-CH
 
 ## Commits / CI
 - `55bd0fe` part 0 (auditor): CI 41313374590 green, Deploy 41313535866 green (1 added, 1 changed).
-- DOCS_COMMIT
+- `3669bae` docs (README, cheat sheet, teardown, this report): CI 41315408578 green, Deploy 41315632333 green (no infra changes; smoke test passed).
+- Repo description + topics: set with `gh repo edit` after the owner approves the text (see the step 3.4 chat).
