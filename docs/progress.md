@@ -3,11 +3,23 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 3.3 — load test: DONE (2026-11-01, report docs/evidence/upgrade-3.3-report.md). NEXT: 3.4 (Standard vs
-Express + cost per 1,000 orders).** Step 3.2 DONE (2026-11-01; leftovers corrected in 3.3 Part 0). Step 3.1 DONE (2026-10-31,
-report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports docs/evidence/upgrade-2.3-report.md, upgrade-2.4-report.md).
-(Step-by-step notes for 2.1 to 2.4 are in the "Step 2.x" sections below.)
+**UPGRADE COMPLETE (2026-11-01).** Step 3.4 (auditor fix, README rewrite, interview cheat sheet, repo description)
+DONE: report docs/evidence/upgrade-final-report.md. All upgrade steps 1.0-3.4 are done; the Standard vs Express
+comparison lives in docs/interview-prep.md section 17 and the README. Nothing is in progress.
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
+
+### What is running (ap-south-1, all Terraform, ~204 resources app stack + 13 bootstrap)
+- Storefront https://dg38gx94mao9n.cloudfront.net; API https://8kyxed1rec.execute-api.ap-south-1.amazonaws.com.
+- 21 Lambdas, Step Functions `order-saga-workflow` (Standard), 4 SQS queues + DLQs, outbox pipe, 16 alarms,
+  dashboard `order-saga-dashboard`, hourly `order-saga-invariant-audit-hourly`, Cognito `order-saga-users`.
+- Data: ~39k orders (mostly load-test orders, kept: no deletion without "DESTROY"). DLQs: orders 47 / outbox 0 /
+  PSP 3, all parked on purpose (poison-message scenarios); `dlq-not-empty` + `psp-dlq-not-empty` stay in ALARM.
+- CHAOS_ENABLED=false on all 10 chaos-switch Lambdas; the fault bucket is empty.
+- **Idle cost:** measured $0.117/day (~$3.5/month) on quiet days 2026-10-24..27 (Cost Explorer, usage before
+  credits). Since the load test the hourly full-scan audit reads ~60.6k RRU per run (measured 2026-11-01), est.
+  ~$6/month more: ~$10/month total at today's data size. The $5/month budget alert will fire; credits cover it
+  until 2026-11-27. Options (not done, owner's call): audit every 6 h, or eventually consistent scans (half the RRU).
+- Teardown procedure (not run): docs/teardown.md.
 
 ## Upgrade plan (toward a 9/10 resume project)
 - Phase 1 Foundation: 1.0 prep | 1.1 outbox (DynamoDB Streams -> EventBridge Pipes -> SQS) |
@@ -277,6 +289,13 @@ report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports
   executions_named now uses DescribeExecution per name; quiet-system e2e 35/35.
 - Load orders stay in the tables (no deletion without "DESTROY").
 
+### Step 3.4 (finish): DONE
+- Part 0: auditor timeout 180 -> 900 s, memory 512 -> 1769 MB; heartbeat `OrderSaga/Audit AuditCompleted` = 1 per
+  finished audit; alarm `order-saga-auditor-missed` (Sum < 1 over 7200 s, missing = breaching -> ops-alerts; the
+  window slides with the clock). chaos_run.py / audit_invariants.py / loadtest_prep.py: read timeout 960 s, 1 attempt.
+  No IAM change. Live: 39,322 orders, 0 violations / 0 stuck / 46 parked, 37.4 s, 680 MB used; alarm OK.
+- Docs: README rewritten; docs/INTERVIEW-CHEATSHEET.md; docs/teardown.md; repo description + topics (gh).
+
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
 - GET /products stays public; checkout, orders and wallet require login.
@@ -357,8 +376,9 @@ report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports
   Evidence: docs/evidence/phase5-cicd.md.
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
-## Next (upgrade Phase 3)
-- 3.4 Standard vs Express + cost per 1,000 orders, then 3.5 README rewrite + demo video. Wait for the step spec.
+## Next
+- Upgrade complete. Open ideas (not planned): incremental (stream-based) auditor; shorter PSP visibility timeout;
+  SES per-customer emails; PENDING sweeper; WAF + CSP. Demo video not recorded (was in the old 3.5 plan).
 
 ## Known limitations / ideas (good viva points)
 - (Fixed in 1.2) Wallets/orders are keyed by the Cognito `sub`; the API has a JWT authorizer.
