@@ -3,7 +3,8 @@
 Use this to resume work in a new session. See CLAUDE.md for the full spec and the phase plan.
 
 ## Current phase
-**Upgrade step 3.2 — chaos experiments + invariant auditor: IN PROGRESS (commit B done; final report next).** Step 3.1 DONE (2026-10-31,
+**Upgrade step 3.3 — load test: DONE (2026-11-01, report docs/evidence/upgrade-3.3-report.md). NEXT: 3.4 (Standard vs
+Express + cost per 1,000 orders).** Step 3.2 DONE (2026-11-01; leftovers corrected in 3.3 Part 0). Step 3.1 DONE (2026-10-31,
 report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports docs/evidence/upgrade-2.3-report.md, upgrade-2.4-report.md).
 (Step-by-step notes for 2.1 to 2.4 are in the "Step 2.x" sections below.)
 (Original phases P0–P5 are done. The old P6 load test and P7 docs are folded into upgrade Phase 3.)
@@ -259,6 +260,21 @@ report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports
   crashes) stay STUCK in FULFILLING on the OLD definition. A redrive can't help (same input lists a FULFILLED line as
   unavailable). Their lines were picked and charged in full: the correct end state is COMPLETED (data correction).
 
+### Step 3.3 (k6 load test): DONE
+- Part 0: ORD-20261101-e10c6683 / -11f6e7e1 corrected to COMPLETED (scripts/fix_stuck_fulfilled_orders.py, guards: all
+  lines FULFILLED + picked, no release/refund, 1 DEBIT 0 CREDIT, intent SUCCEEDED); auditor 0 violations / 0 stuck.
+- Scripts: scripts/loadtest_prep.py (LOAD-01..20 hidden, race-001..160 buyers, tokens -> build/loadtest/run.json,
+  gitignored), loadtest/k6/orders.js, scripts/loadtest_report.py (DynamoDB/CloudWatch only). k6 2.3.0 via scoop.
+- Run 1 LT-b7d433c6: DemoPay ESM maximum_concurrency 2 -> ~8 payments/s; 16,146 payment timeouts, all refunded after
+  the PSP queue drained (11:51:41Z), ₹0 lost. Fix ("APPLY", applied locally): maximum_concurrency 20; DemoPay retries
+  wallet TransactionConflict and throttled (429/5xx) webhook callbacks in-process.
+- Run 2 LT-fe9e8916: 25.6 orders/s sustained (designed limit: 50 req/s stage shared by POST /orders + webhook),
+  API server p95 82 ms, completion p50 4.7 s / p95 6.4 s, 0 5xx, 192 payment timeouts refunded, ₹0 lost, DLQs 43/0/3.
+- OPEN: the invariant auditor Lambda now times out (180 s) at 39k orders; local audit 0/0 in 150 s. Hourly audit
+  publishes nothing until fixed (user: report, don't change in 3.3). Scripts that invoke it (chaos_run.py,
+  audit_invariants.py --invoke) still use botocore's 60 s read timeout.
+- Load orders stay in the tables (no deletion without "DESTROY").
+
 ### Decisions for step 1.2 (Cognito)
 - Old email-keyed wallets/orders stay as unused legacy rows (no deletion).
 - GET /products stays public; checkout, orders and wallet require login.
@@ -340,8 +356,7 @@ report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports
 - From now on, deploy by merging to main; local `terraform apply` in infra/main is still possible (same state + lock).
 
 ## Next (upgrade Phase 3)
-- 3.1 oversell race test, then 3.2 invariant/chaos checker, 3.3 k6 load test, 3.4 Standard vs Express + cost per
-  1,000 orders, 3.5 README rewrite + demo video. Wait for the step spec.
+- 3.4 Standard vs Express + cost per 1,000 orders, then 3.5 README rewrite + demo video. Wait for the step spec.
 
 ## Known limitations / ideas (good viva points)
 - (Fixed in 1.2) Wallets/orders are keyed by the Cognito `sub`; the API has a JWT authorizer.

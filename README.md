@@ -259,6 +259,7 @@ Compensation runs in **reverse order**: refund first, then release stock. Both s
 
 ## Testing & evidence
 
+- **Load tested** (k6, live): **25.6 orders/s sustained** (the designed limit: 50 req/s API stage shared by orders and payment webhooks), **API p95 82 ms** server side, **order completion p50 4.7 s / p95 6.4 s**, 0 API 5xx, **₹0 lost** over 12,704 orders ([evidence](docs/evidence/upgrade-3.3-load.md)).
 - **327 unit tests, 93% coverage**, run with pytest + moto, no AWS needed. CI fails below 85%.
 - **Live end-to-end suite** ([`scripts/e2e_test.py`](scripts/e2e_test.py)): **35/35 scenarios passed** against the deployed system, signed in as two Cognito test users, including DemoPay ledger checks and money invariants, the transactional outbox, per-user isolation, the payment webhook, checkout holds, per-item fulfillment with partial refunds and customer cancellation (invariants I1–I9 for every order).
 

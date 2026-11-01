@@ -125,6 +125,9 @@ resource "aws_lambda_event_source_mapping" "psp_requests" {
   function_response_types = ["ReportBatchItemFailures"]
 
   scaling_config {
-    maximum_concurrency = 2 # the SQS minimum; keeps the account's small concurrency pool free for the API
+    # Step 3.3 load test: at 2 (the SQS minimum) DemoPay topped out at ~8 payments/s and orders above that timed
+    # out. ~4 payments/s per poller (batch 5, ~250 ms each), so 20 covers the ~25 orders/s the shared 50 req/s API
+    # stage allows (each order = POST /orders + one webhook callback). Account concurrency is 400.
+    maximum_concurrency = 20
   }
 }

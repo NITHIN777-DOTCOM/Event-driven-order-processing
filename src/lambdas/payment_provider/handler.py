@@ -48,7 +48,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import secrets
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -82,7 +84,12 @@ wallets_table = dynamodb.Table(WALLETS_TABLE)
 logger = get_logger("payment_provider")
 
 SUCCEEDED, DECLINED, VOIDED = "SUCCEEDED", "DECLINED", "VOIDED"
-MAX_BALANCE_CONFLICTS = 3
+MAX_BALANCE_CONFLICTS = 6  # attempts at the wallet debit when the wallet changed or is mid-transaction (step 3.3)
+# Callback retries inside this invocation (step 3.3): our webhook shares the API stage's 50 req/s limit with
+# POST /orders, so under load it can answer 429. Retried here with jittered backoff, so a throttled callback lands
+# in about a second instead of after SQS's 120 s visibility timeout (by then the saga's payment wait is over).
+CALLBACK_ATTEMPTS = 4
+CALLBACK_RETRY_STATUSES = {429, 500, 502, 503, 504}  # fast answers only; an unreachable webhook (0) is left to SQS
 CALLBACK_TIMEOUT_SECONDS = 8
 
 
@@ -149,7 +156,7 @@ def process_request(request: dict[str, Any], receive_count: int, log: Structured
         log.info("Sent a callback signed with the WRONG secret", webhookStatus=status, expected=401)
     copies = 2 if simulate == "webhook_duplicate" else 1
     for copy in range(1, copies + 1):
-        status = post_callback(callback, get_secret(WEBHOOK_SECRET_PARAMETER))
+        status = deliver_callback(callback, log)
         log.info("Webhook callback delivered", outcome=charge["outcome"], webhookStatus=status, copy=copy, copies=copies)
         if not 200 <= status < 300:
             raise WebhookDeliveryError(f"webhook answered HTTP {status}")
@@ -197,12 +204,24 @@ def charge_once(request: dict[str, Any], simulate: str, log: StructuredLogger) -
                 log.info("A concurrent delivery charged this intent first; replaying its outcome")
                 return psp_table.get_item(Key={"pspTxnId": charge["pspTxnId"]}, ConsistentRead=True)["Item"]
             if codes and codes[0] == "ConditionalCheckFailed":
-                continue  # the balance changed between read and write: re-read
+                backoff()  # the balance changed between read and write: re-read
+                continue
+            if "TransactionConflict" in codes:
+                # Another payment or refund on this wallet was in flight at the same instant (step 3.3, 20 DemoPay
+                # workers). Nothing was written: retry. A conflict is never a decline.
+                log.info("Wallet transaction conflict; retrying", walletId=wid)
+                backoff()
+                continue
             raise
         log.info("Wallet debited", paymentId=charge["paymentId"], amount=amount, balanceAfter=after, walletId=wid)
         chaos.crash_after_write(request, "debit", log)  # E3: SQS redelivers; the CHARGE record replays (no 2nd debit)
         return charge
     raise BalanceConflict("Wallet is busy with other payments")
+
+
+def backoff(attempt: int = 0) -> None:
+    """Full jitter: sleep somewhere in [0, 50 ms x 2^attempt], capped at 1 s."""
+    time.sleep(random.uniform(0, min(1.0, 0.05 * 2 ** attempt)))
 
 
 def charge_record(request: dict[str, Any], outcome: str, reason: str = "", balance_after: Decimal | None = None) -> dict[str, Any]:
@@ -269,6 +288,19 @@ def callback_body(request: dict[str, Any], charge: dict[str, Any]) -> bytes:
     if not succeeded:
         body["reason"] = charge.get("reason", "declined")
     return json.dumps(body, separators=(",", ":")).encode()
+
+
+def deliver_callback(body: bytes, log: StructuredLogger) -> int:
+    """POST the callback, retrying a throttled (429) or 5xx answer a few times with jittered exponential backoff
+    (~0.25 s, 0.5 s, 1 s). The webhook is idempotent per event and per intent, so a repeat is harmless."""
+    status = 0
+    for attempt in range(CALLBACK_ATTEMPTS):
+        status = post_callback(body, get_secret(WEBHOOK_SECRET_PARAMETER))
+        if status not in CALLBACK_RETRY_STATUSES or attempt == CALLBACK_ATTEMPTS - 1:
+            return status
+        log.info("Webhook busy; retrying the callback", webhookStatus=status, attempt=attempt + 1)
+        time.sleep(random.uniform(0.5, 1.0) * 0.25 * 2 ** attempt)
+    return status
 
 
 def post_callback(body: bytes, secret: str) -> int:

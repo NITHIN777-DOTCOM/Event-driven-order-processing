@@ -1604,3 +1604,54 @@ order already completed by the old definition. Money and stock were consistent; 
 one-off conditional correction (`scripts/fix_probe_order.py`, status PARTIALLY_FULFILLED plus a history entry).
 Lesson: a test harness that bypasses the orchestrator can leave states the orchestrator could never produce.
 
+
+## 17. Load test + Standard vs Express
+
+### What
+A k6 load test against the live stack (step 3.3): ramp 5 -> 50 orders/s over 5 min, hold 3 min, spike offered at
+100/s, 160 test buyers, hidden load products, ~80% normal / 10% partial / 10% declined orders. Completion times,
+money and invariants are measured afterwards from DynamoDB, never by polling the API during the run.
+Evidence: docs/evidence/upgrade-3.3-load.md.
+
+### Numbers
+- **25.6 orders/s sustained**, **API p95 82 ms** server side (p50 51 ms, p99 99 ms), **completion p50 4.7 s /
+  p95 6.4 s**, **0 API 5xx**, 1.5% payment timeouts (refunded), **₹0 lost** over 12,704 orders.
+- Before the fix: the API accepted 43.6 orders/s but only 13% of normal orders completed (DemoPay ~8 payments/s).
+
+### Debugging story (the run that failed)
+The first run "passed" at the API (43.6 accepted orders/s, p95 98 ms) but 87% of normal orders failed with
+PaymentTimeout and completion p50 was exactly 120.7 s. DemoPay's SQS event source had `maximum_concurrency = 2`,
+set when the account's Lambda pool was small; it took ~8 payments/s and its queue age reached 539 s. No money was
+lost: after the queue drained, all 16,146 late charges had been refunded by the webhook's late-payment path
+(debits ₹1,00,29,100 - refunds ₹88,30,310 = fulfilled ₹11,98,790). Fix: 20 workers, plus two retries inside DemoPay:
+a wallet `TransactionConflict` is retried (a conflict is never a decline), and a throttled webhook callback is
+retried with jittered backoff instead of waiting 120 s for SQS. Lesson: an accepted-requests number says nothing
+about an async system; measure completions.
+
+### The designed limit: ~25 orders/s
+The API stage is throttled at 50 req/s (cost and abuse guard). Each order costs two requests through it:
+`POST /orders` and DemoPay's signed webhook callback. So the end-to-end limit is ~25 orders/s, and the run levels off
+exactly there; above it API Gateway answers 429 before any Lambda runs (cheap, and the client retries). It's a
+design choice, not a bug; raising it means a higher stage limit or a separate webhook stage.
+
+### Why Standard workflows, not Express
+- The saga **waits for a payment callback** (`waitForTaskToken`, 120 s). Express doesn't support `.waitForTaskToken`.
+- It **can run for minutes** (payment wait, warehouse waits, compensation retries); Express is capped at 5 minutes.
+- Its steps must run **exactly once** per execution (a debit, a refund); Express is at-least-once.
+- A parked execution is **redriven** from the failed step (runbook, step 3.2); Express executions can't be redriven,
+  and their history is only in CloudWatch Logs.
+
+### Where Express would fit
+A short, high-volume, idempotent part, e.g. per-item fulfilment as an Express child workflow started from the
+Standard saga. Not built, by choice: it would add a second execution model and its logging for little gain at
+25 orders/s, where Standard's transition cost is the main bill.
+
+### Known limitation
+If DemoPay crashes (or its callback stays throttled), SQS redelivers the request only after the queue's visibility
+timeout, which is longer than the saga's 120 s payment wait. The order times out and is refunded: money safe, sale
+lost (192 orders in run 2). The fix would be a shorter provider timeout (so a shorter visibility timeout and faster
+redelivery).
+
+### Likely interview questions
+- *How did you know the first run was bad?* Completion time p50 = 120.7 s, the payment timeout, and the queue age.
+- *Why 429 and not queueing?* The stage limit protects cost; clients retry with backoff (the storefront does).

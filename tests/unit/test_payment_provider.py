@@ -5,6 +5,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+from botocore.exceptions import ClientError
+
 from conftest import USER_A, ledger, psp_request, seed_intent, seed_order, sqs_event, wallet_of
 
 AMOUNT = Decimal("5097.00")
@@ -12,6 +15,17 @@ AMOUNT = Decimal("5097.00")
 
 def charge(payments, order, simulate="none", receive_count=1, **overrides):
     return payments.provider.lambda_handler(sqs_event(psp_request(order, simulate, **overrides), receive_count=receive_count), None)
+
+
+@pytest.fixture(autouse=True)
+def no_sleep(payments, monkeypatch):
+    """The provider's retry backoffs (wallet conflicts, throttled callbacks) don't need real time in tests."""
+    monkeypatch.setattr(payments.provider.time, "sleep", lambda seconds: None)
+
+
+def conflict(*codes: str) -> ClientError:
+    return ClientError({"Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                        "CancellationReasons": [{"Code": c} for c in codes]}, "TransactWriteItems")
 
 
 def psp_record(aws, kind, order):
@@ -64,6 +78,60 @@ def test_concurrent_delivery_that_lost_the_race_replays_the_winner(aws, payments
     charge(payments, order)
 
     assert ledger(aws) == [("DEBIT", AMOUNT)]
+
+
+@pytest.mark.parametrize("codes", [("TransactionConflict", "None", "None"), ("None", "TransactionConflict", "None")])
+def test_a_wallet_transaction_conflict_is_retried_never_declined(aws, payments, monkeypatch, codes):
+    """Step 3.3 (20 DemoPay workers): another payment/refund on the same wallet was mid-transaction. Retry it."""
+    order = seed_order(aws.orders)
+    seed_intent(aws, order)
+    client = payments.provider.dynamodb.meta.client
+    real = client.transact_write_items
+    calls = {"n": 0}
+
+    def busy_twice(**kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise conflict(*codes)
+        return real(**kwargs)
+
+    monkeypatch.setattr(client, "transact_write_items", busy_twice)
+    assert charge(payments, order) == {"batchItemFailures": []}
+
+    assert ledger(aws) == [("DEBIT", AMOUNT)]
+    assert psp_record(aws, "CHARGE", order)["outcome"] == "SUCCEEDED"
+    assert payments.callbacks[0]["body"]["type"] == "payment.succeeded"
+
+
+def test_a_wallet_that_stays_busy_is_redelivered_not_declined(aws, payments, monkeypatch):
+    order = seed_order(aws.orders)
+    seed_intent(aws, order)
+    client = payments.provider.dynamodb.meta.client
+
+    def always_busy(**kwargs):
+        raise conflict("TransactionConflict", "None", "None")
+
+    monkeypatch.setattr(client, "transact_write_items", always_busy)
+    assert charge(payments, order) == {"batchItemFailures": [{"itemIdentifier": "m-0"}]}
+    assert psp_record(aws, "CHARGE", order) is None  # no decline recorded: the redelivery decides
+    assert payments.callbacks == []
+
+
+def test_a_throttled_callback_is_retried_in_the_same_invocation(aws, payments, monkeypatch):
+    """The webhook shares the API stage's 50 req/s limit: a 429 is retried here, not after SQS's visibility timeout."""
+    order = seed_order(aws.orders)
+    seed_intent(aws, order)
+    real = payments.provider.post_callback
+    answers = iter([429, 503])
+
+    def throttled_first(body, secret):
+        status = next(answers, None)
+        return status if status is not None else real(body, secret)
+
+    monkeypatch.setattr(payments.provider, "post_callback", throttled_first)
+    assert charge(payments, order) == {"batchItemFailures": []}
+    assert ledger(aws) == [("DEBIT", AMOUNT)]
+    assert len(payments.callbacks) == 1
 
 
 def test_simulated_decline_moves_no_money_and_is_replayed(aws, payments):

@@ -1,0 +1,267 @@
+{
+  "runId": "LT-fe9e8916",
+  "start": "2026-11-01T12:26:09.680000+00:00",
+  "end": "2026-11-01T12:35:33.103000+00:00",
+  "orders": 12704,
+  "k6": {
+    "attempts": 20851,
+    "accepted": 12634,
+    "throttled429": 7503,
+    "failed": 714,
+    "acceptLatencyMs": {
+      "avg": 1208.3,
+      "med": 154.4,
+      "p(90)": 3036.0,
+      "p(95)": 6625.0,
+      "p(99)": 17147.8,
+      "max": 29671.9
+    }
+  },
+  "throughput": {
+    "sustained3minPerS": 25.6,
+    "peak10sPerS": 34.1
+  },
+  "completionS": {
+    "normal": {
+      "p50": 4.7,
+      "p95": 6.4,
+      "max": 121.5,
+      "n": 10249
+    },
+    "all": {
+      "p50": 4.7,
+      "p95": 6.4,
+      "max": 121.5,
+      "n": 12704
+    },
+    "partial": {
+      "p50": 5.0,
+      "p95": 6.5,
+      "max": 121.2,
+      "n": 1261
+    },
+    "declined": {
+      "p50": 4.7,
+      "p95": 6.2,
+      "max": 120.9,
+      "n": 1194
+    }
+  },
+  "outcomes": {
+    "declined->FAILED": 1194,
+    "normal->COMPLETED": 10091,
+    "normal->FAILED": 158,
+    "partial->FAILED": 20,
+    "partial->PARTIALLY_FULFILLED": 1241
+  },
+  "offPath": [
+    [
+      "ORD-20261101-402a8a87",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-1374238c",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-65b9f3e8",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-20ff7619",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-f885652a",
+      "partial",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-7a15e70f",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-2037a471",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-5ac29b4c",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-21f4f13e",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-b080b491",
+      "partial",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-5a153e0e",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-d548e58f",
+      "partial",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-195655c1",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-3753abe4",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-0e7597e6",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-7fb970cd",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-f7451596",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-e9c3bec8",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-855c3acc",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ],
+    [
+      "ORD-20261101-3fc268b0",
+      "normal",
+      "FAILED",
+      "PaymentTimeout: payment timeout - DemoPay did not confirm the payment within 120 s"
+    ]
+  ],
+  "offPathCount": 178,
+  "money": {
+    "debits": "6903660",
+    "credits": "466270",
+    "net": "6437390",
+    "fulfilled": "6437390",
+    "lost": "0",
+    "mismatches": []
+  },
+  "failureReasons": {
+    "PaymentDeclined: Card declined by issuer (simulated)": 1180,
+    "PaymentTimeout: payment timeout - DemoPay did not confirm th": 192
+  },
+  "unexpectedDeclines": [],
+  "unexpectedDeclineCount": 0,
+  "notTerminal": 0,
+  "before": {
+    "dlq": {
+      "orders": 43,
+      "outbox": 0,
+      "psp": 3
+    },
+    "auditor": {
+      "violations": 0,
+      "stuck": 0,
+      "orders": null,
+      "seconds": 70.8,
+      "error": null
+    }
+  },
+  "after": {
+    "dlq": {
+      "orders": 43,
+      "outbox": 0,
+      "psp": 3
+    },
+    "auditor": {
+      "violations": null,
+      "stuck": null,
+      "orders": null,
+      "seconds": 181.2,
+      "error": "Unhandled"
+    }
+  },
+  "cloudwatch": {
+    "lambdaConcurrencyPeak": 61.0,
+    "lambdaThrottles": 0.0,
+    "lambdaErrorsAccount": 1241.0,
+    "sfnStartedPerMinutePeak": 1551.0,
+    "sfnStartedPerMinute": [
+      453,
+      1030,
+      1525,
+      1498,
+      1494,
+      1551,
+      1519,
+      1470,
+      1528,
+      636,
+      0
+    ],
+    "sfnFailed": 1372.0,
+    "sfnThrottled": 0.0,
+    "apiRequestsPerMinute": [
+      160,
+      861,
+      2030,
+      3124,
+      4043,
+      5007,
+      5445,
+      5549,
+      5585,
+      4975,
+      1575,
+      47
+    ],
+    "api4xx": 12833.0,
+    "api5xx": 0.0,
+    "functionErrors": {
+      "fulfill-item": {
+        "errors": 1241,
+        "throttles": 0
+      }
+    }
+  },
+  "errorRate": 0.034242961968250926
+}
