@@ -25,15 +25,14 @@ p95 6.4 s · 0 API 5xx, 1.5% payment timeouts refunded · ₹0 lost. Details: `d
 3. **Client-side noise:** 714 status-0 network errors and a 6.6 s client p95 come from the laptop's home link (server
    p95 82 ms); 70 orders were created whose answers never reached k6. The headline uses API Gateway's latency.
 4. Prep hung once: botocore's 60 s read timeout re-invoked the slow auditor; the prep client now waits 5 min, no retry.
-
-## Cost
-Two runs, ~31k orders: about $15 in total (Step Functions transitions dominate), approved.
-
 5. **e2e after the deploy:** the first attempt crashed: `executions_named` listed all ~45k executions and Step
    Functions throttled `ListExecutions`. Fixed (one DescribeExecution per name; names are unique). The next attempt
    overlapped the crashed run's in-flight orders (32/35: g, p, q saw its poison message and reservations); on a quiet
    system: **35/35 PASS**.
 
+## Cost
+Two runs, ~31k orders: about $15 in total (Step Functions transitions dominate), approved.
+
 ## Commit / CI
 - `7c1c4b7` step 3.3: CI 41308725952 green, Deploy 41308884378 green (0 added / 20 changed: same code, zips rebuilt on Linux).
-- Follow-up commit (e2e harness fix + this report): see `git log`; CI + Deploy green.
+- `776998a` follow-up (e2e harness fix + report): CI 41312081433 + Deploy 41312262943 green.
