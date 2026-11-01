@@ -257,9 +257,17 @@ def states_entered(scenario: Scenario) -> list[str]:
 
 
 def executions_named(names: set[str]) -> int:
+    """How many of these execution names exist. A name is unique per state machine (it is the orderId), so one
+    DescribeExecution per name answers 0 or 1. (Listing every execution throttled after the step 3.3 load test:
+    ~45k executions, 45+ ListExecutions pages.)"""
+    prefix = OUT["state_machine_arn"].replace(":stateMachine:", ":execution:")
     count = 0
-    for page in sfn.get_paginator("list_executions").paginate(stateMachineArn=OUT["state_machine_arn"]):
-        count += sum(1 for e in page["executions"] if e["name"] in names)
+    for name in names:
+        try:
+            sfn.describe_execution(executionArn=f"{prefix}:{name}")
+            count += 1
+        except sfn.exceptions.ExecutionDoesNotExist:
+            pass
     return count
 
 

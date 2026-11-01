@@ -273,6 +273,8 @@ report docs/evidence/upgrade-3.1-report.md). Steps 2.3 and 2.4 are DONE (reports
 - OPEN: the invariant auditor Lambda now times out (180 s) at 39k orders; local audit 0/0 in 150 s. Hourly audit
   publishes nothing until fixed (user: report, don't change in 3.3). Scripts that invoke it (chaos_run.py,
   audit_invariants.py --invoke) still use botocore's 60 s read timeout.
+- Commit 7c1c4b7: CI 41308725952 + Deploy 41308884378 green. e2e: ListExecutions throttled at ~45k executions ->
+  executions_named now uses DescribeExecution per name; quiet-system e2e 35/35.
 - Load orders stay in the tables (no deletion without "DESTROY").
 
 ### Decisions for step 1.2 (Cognito)
