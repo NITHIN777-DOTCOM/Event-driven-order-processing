@@ -46,6 +46,60 @@ def choose(fulfillment: dict) -> str:
     return STATES["FulfillmentOutcome"]["Default"]
 
 
+def retries(state: dict, error: str) -> int:
+    """How many times Step Functions retries `error` on `state`: the FIRST retrier that matches decides (States.ALL
+    matches everything), so a MaxAttempts 0 retrier listed before States.ALL keeps an error from being retried."""
+    for rule in state.get("Retry", []):
+        if error in rule["ErrorEquals"] or "States.ALL" in rule["ErrorEquals"]:
+            return rule.get("MaxAttempts", 3)
+    return 0
+
+
+def catcher(state: dict, error: str) -> str | None:
+    """The state a caught `error` goes to (first matching Catch), or None if it fails the execution."""
+    for rule in state.get("Catch", []):
+        if error in rule["ErrorEquals"] or "States.ALL" in rule["ErrorEquals"]:
+            return rule["Next"]
+    return None
+
+
+# --- Step 3.2: ordinary errors are retried; only business errors go straight to compensation ---------------
+@pytest.mark.parametrize(
+    ("error", "attempts"), [("OutOfStock", 0), ("ChaosInjectedFault", 3), ("ChaosCrashAfterWrite", 3), ("Lambda.Unknown", 3)]
+)
+def test_reserve_retries_ordinary_errors_but_never_out_of_stock(error, attempts):
+    assert retries(STATES["ReserveInventory"], error) == attempts
+
+
+def test_a_reserve_failure_releases_whatever_was_reserved():
+    """The reservation may have committed before the error (E3 crash_after:reserve), so every failure except
+    OutOfStock (nothing reserved, by definition) goes through the idempotent ReleaseInventory."""
+    assert catcher(STATES["ReserveInventory"], "OutOfStock") == "DescribeFailure"
+    assert catcher(STATES["ReserveInventory"], "ChaosCrashAfterWrite") == "ReleaseInventory"
+    assert STATES["ReleaseInventory"]["Next"] == "DescribeFailure"
+
+
+@pytest.mark.parametrize(
+    ("error", "attempts"),
+    [("PaymentDeclined", 0), ("OrderCancelled", 0), ("States.Timeout", 0), ("PaymentTransientError", 3), ("ChaosInjectedFault", 3), ("Lambda.Unknown", 3)],
+)
+def test_request_payment_retries_ordinary_errors_not_outcomes(error, attempts):
+    assert retries(STATES["RequestPayment"], error) == attempts
+
+
+def test_ordinary_retries_back_off_with_jitter():
+    for state in (STATES["ReserveInventory"], STATES["RequestPayment"], ITERATION["FulfillItem"]):
+        rule = state["Retry"][-1]
+        assert rule["ErrorEquals"] == ["States.ALL"]  # States.ALL must be the last retrier
+        assert rule["BackoffRate"] > 1 and rule["JitterStrategy"] == "FULL"
+
+
+def test_a_refund_that_keeps_failing_stays_redrivable():
+    """A Fail state can't be redriven: a refund or release that outlasts its retries must fail on its own task."""
+    for name in ("RefundPayment", "ReleaseInventory"):
+        assert catcher(STATES[name], "ChaosInjectedFault") is None
+
+
 # --- Map result aggregation -----------------------------------------------------------------------------
 def test_all_lines_fulfilled_goes_to_the_existing_completed_path():
     summary = summarize(("L1", "FULFILLED"), ("L2", "FULFILLED"), ("L3", "FULFILLED"))
@@ -82,12 +136,15 @@ def test_the_summary_keeps_the_rest_of_the_state():
 
 
 # --- One iteration's own error handling --------------------------------------------------------------------
-def test_each_iteration_catches_every_error_itself():
+def test_only_item_unavailable_marks_a_line_unavailable():
+    """Step 3.2 (E1/E3): a crash right after the pick used to be caught as "unavailable", so a packed item was
+    refunded and written off. Now only ItemUnavailable is caught; anything else is retried (the pick is idempotent)."""
     catch = ITERATION["FulfillItem"]["Catch"]
 
-    assert catch == [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "LineUnavailable"}]
+    assert catch == [{"ErrorEquals": ["ItemUnavailable"], "ResultPath": "$.error", "Next": "LineUnavailable"}]
     assert ITERATION["LineUnavailable"]["End"] is True
-    assert "Catch" not in STATES["FulfillItems"]  # nothing escapes an iteration, so the Map itself needs none
+    # An error that outlasts the retries fails the Map, and so the execution: parked for a redrive, nothing written off.
+    assert "Catch" not in STATES["FulfillItems"]
 
 
 def test_an_unavailable_line_reports_the_lambda_error_message():
@@ -111,11 +168,12 @@ def test_an_unavailable_line_always_has_a_reason(error, reason):
     assert (result["status"], result["reason"]) == ("UNAVAILABLE", reason)
 
 
-def test_only_transient_errors_are_retried_inside_an_iteration():
-    retried = {error for rule in ITERATION["FulfillItem"]["Retry"] for error in rule["ErrorEquals"]}
-
-    assert "FulfillmentTransientError" in retried
-    assert "ItemUnavailable" not in retried and "States.ALL" not in retried
+@pytest.mark.parametrize(
+    ("error", "attempts"),
+    [("ItemUnavailable", 0), ("FulfillmentTransientError", 3), ("ChaosCrashAfterWrite", 3), ("Lambda.Unknown", 3), ("States.Timeout", 3)],
+)
+def test_an_iteration_retries_everything_but_item_unavailable(error, attempts):
+    assert retries(ITERATION["FulfillItem"], error) == attempts
 
 
 # --- Wiring -------------------------------------------------------------------------------------------
@@ -143,7 +201,7 @@ def test_partial_and_full_paths():
     assert STATES["CancelledWhileFailing"]["Default"] == "MarkOrderFailed"  # FAILED unless a cancel was requested
 
 
-@pytest.mark.parametrize("name", ["PartialRefund", "WriteOffLines", "RefundAllLines", "WriteOffAllLines"])
+@pytest.mark.parametrize("name", ["PartialRefund", "WriteOffLines", "RefundAllLines", "WriteOffAllLines", "RefundPayment", "ReleaseInventory"])
 def test_money_and_stock_steps_retry_then_fail_loudly_instead_of_carrying_on(name):
     """No Catch: a refund that keeps failing stops the execution (alarm + redrive), never a silent COMPLETED."""
     assert "Catch" not in STATES[name]

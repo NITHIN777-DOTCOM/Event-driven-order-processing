@@ -63,6 +63,25 @@ def test_a_stuck_order_is_labelled_with_its_execution_status(aws, auditor, monke
     assert metric(auditor.published, "Stuck") == 1
 
 
+@pytest.mark.parametrize(
+    ("event", "minutes"),
+    [({}, 30), ({"stuckAfterMinutes": 2}, 2), ({"stuckAfterMinutes": 0}, 30), ({"stuckAfterMinutes": 90}, 30),
+     ({"stuckAfterMinutes": "2"}, 30), ({"stuckAfterMinutes": True}, 30)],
+)
+def test_a_drill_can_only_lower_the_stuck_threshold(auditor, event, minutes):
+    assert auditor.drill_threshold(event).total_seconds() == minutes * 60
+
+
+def test_a_drill_threshold_flags_a_young_order_stuck(aws, auditor, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    stamp_seed(aws)
+    five_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    seed_order(aws.orders, status="PAYMENT_CAPTURED", createdAt=five_min_ago, executionArn="arn:aws:states:x:execution:y:ORD-1")
+    monkeypatch.setattr(auditor, "describe_execution", lambda arn: "FAILED")
+    assert auditor.lambda_handler({}, None)["stuck"] == 0  # in flight for the normal 30-minute threshold
+    assert auditor.lambda_handler({"stuckAfterMinutes": 2}, None)["stuck"] == 1
+
+
 def test_completed_order_without_payment_is_a_violation(aws, auditor):
     stamp_seed(aws)
     seed_order(aws.orders, status="COMPLETED", createdAt="2026-10-30T00:00:00.000Z", updatedAt="2026-10-30T00:00:00.000Z",

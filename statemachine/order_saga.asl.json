@@ -4,7 +4,7 @@
   "States": {
     "ReserveInventory": {
       "Type": "Task",
-      "Comment": "Lambda order-saga-reserve-inventory: decrements stock for every item in ONE DynamoDB transaction (all or nothing) and marks the order RESERVED. Throws OutOfStock if any item is short. Passes cancellable=true, so the order is stamped as running on a definition with a cancel branch (step 2.4).",
+      "Comment": "Lambda order-saga-reserve-inventory: decrements stock for every item in ONE DynamoDB transaction (all or nothing) and marks the order RESERVED. Throws OutOfStock if any item is short. Passes cancellable=true, so the order is stamped as running on a definition with a cancel branch (step 2.4). Step 3.2: ordinary errors (a crash, a timeout, an injected fault) are retried 3x with jittered backoff; a retry after a successful write finds reservedItems and does nothing again. OutOfStock is never retried (nothing was reserved: straight to DescribeFailure). Any other error that outlasts the retries goes through ReleaseInventory, because the reservation may have committed before the failure (release is a no-op if nothing was reserved).",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
         "FunctionName": "${reserve_inventory_function_arn}",
@@ -33,6 +33,22 @@
           "IntervalSeconds": 1,
           "MaxAttempts": 2,
           "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "OutOfStock"
+          ],
+          "MaxAttempts": 0
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "MaxDelaySeconds": 8,
+          "JitterStrategy": "FULL"
         }
       ],
       "Catch": [
@@ -48,14 +64,14 @@
             "States.ALL"
           ],
           "ResultPath": "$.error",
-          "Next": "DescribeFailure"
+          "Next": "ReleaseInventory"
         }
       ],
       "Next": "RequestPayment"
     },
     "RequestPayment": {
       "Type": "Task",
-      "Comment": "Lambda order-saga-request-payment stores THIS task token on payment intent PI-<orderId> and asks DemoPay to charge (SQS, 2-5 s). The saga then waits: payment_webhook calls SendTaskSuccess (paid) or SendTaskFailure PaymentDeclined. No callback within 120 s -> States.Timeout -> MarkPaymentTimedOut. PaymentTransientError (payment_flaky) is retried 2 s, 4 s, 8 s; each retry gets a new token. OrderCancelled (the customer cancelled: SendTaskFailure from the cancel API, or request_payment refusing a cancelled order) is caught separately and goes to the cancel branch.",
+      "Comment": "Lambda order-saga-request-payment stores THIS task token on payment intent PI-<orderId> and asks DemoPay to charge (SQS, 2-5 s). The saga then waits: payment_webhook calls SendTaskSuccess (paid) or SendTaskFailure PaymentDeclined. No callback within 120 s -> States.Timeout -> MarkPaymentTimedOut. PaymentTransientError (payment_flaky) is retried 2 s, 4 s, 8 s; each retry gets a new token. OrderCancelled (the customer cancelled: SendTaskFailure from the cancel API, or request_payment refusing a cancelled order) is caught separately and goes to the cancel branch. Step 3.2: any other error (a crash, an injected fault) is retried 3x with jittered backoff; each retry refreshes the token on the still-REQUESTED intent or, if the intent already finished, answers the new token from the stored outcome, so a retry never charges twice. PaymentDeclined, OrderCancelled and States.Timeout are never retried (their Catch below handles them).",
       "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
       "Parameters": {
         "FunctionName": "${request_payment_function_arn}",
@@ -86,6 +102,24 @@
           "IntervalSeconds": 1,
           "MaxAttempts": 2,
           "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "PaymentDeclined",
+            "OrderCancelled",
+            "States.Timeout"
+          ],
+          "MaxAttempts": 0
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "MaxDelaySeconds": 8,
+          "JitterStrategy": "FULL"
         }
       ],
       "Catch": [
@@ -250,7 +284,7 @@
     },
     "FulfillItems": {
       "Type": "Map",
-      "Comment": "Inline Map, one iteration per order line (up to 5 at once): Lambda order-saga-fulfill-item picks the line (reserved -> sold). Each iteration catches its OWN errors and returns {lineId, status: FULFILLED | UNAVAILABLE, reason}, so one damaged item can never fail the whole Map or the order. Runs only after the payment succeeded; reservation before it stays all-or-nothing.",
+      "Comment": "Inline Map, one iteration per order line (up to 5 at once): Lambda order-saga-fulfill-item picks the line (reserved -> sold). An iteration catches ItemUnavailable itself and returns {lineId, status: FULFILLED | UNAVAILABLE, reason}, so one damaged item never fails the whole Map or the order; any other error is retried and, if it persists, parks the execution. Runs only after the payment succeeded; reservation before it stays all-or-nothing.",
       "ItemsPath": "$.order.lines",
       "ItemSelector": {
         "orderId.$": "$.orderId",
@@ -265,7 +299,7 @@
         "States": {
           "FulfillItem": {
             "Type": "Task",
-            "Comment": "Lambda order-saga-fulfill-item: ONE line, idempotent (a retry never moves stock twice). FulfillmentTransientError (transaction conflicts) is retried; ItemUnavailable is not.",
+            "Comment": "Lambda order-saga-fulfill-item: ONE line, idempotent (a retry never moves stock twice: the pick is conditional on the line not being handled yet). Only ItemUnavailable means the item is really missing: it is caught (LineUnavailable) and the line is refunded and written off. FulfillmentTransientError and any other error (a crash, a timeout) are retried; one that outlasts the retries fails the Map and the execution (it is parked: alarm, then redrive) instead of writing off an item that may already be packed.",
             "Resource": "arn:aws:states:::lambda:invoke",
             "Parameters": {
               "FunctionName": "${fulfill_item_function_arn}",
@@ -297,12 +331,28 @@
                 "IntervalSeconds": 1,
                 "MaxAttempts": 2,
                 "BackoffRate": 2.0
+              },
+              {
+                "ErrorEquals": [
+                  "ItemUnavailable"
+                ],
+                "MaxAttempts": 0
+              },
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0,
+                "MaxDelaySeconds": 8,
+                "JitterStrategy": "FULL"
               }
             ],
             "Catch": [
               {
                 "ErrorEquals": [
-                  "States.ALL"
+                  "ItemUnavailable"
                 ],
                 "ResultPath": "$.error",
                 "Next": "LineUnavailable"
@@ -660,7 +710,7 @@
     },
     "RefundPayment": {
       "Type": "Task",
-      "Comment": "COMPENSATION - Lambda order-saga-refund-payment: refunds any charge for this order through DemoPay's idempotent refund API (a no-op if nothing was charged) and marks the intent REFUNDED. An intent still REQUESTED is marked FAILED (abandoned), so a later charge is refunded by the webhook.",
+      "Comment": "COMPENSATION - Lambda order-saga-refund-payment: refunds any charge for this order through DemoPay's idempotent refund API (a no-op if nothing was charged) and marks the intent REFUNDED. An intent still REQUESTED is marked FAILED (abandoned), so a later charge is refunded by the webhook. No Catch (step 3.2): if the refund still fails after its retries, the execution FAILS on this task (alarm order-saga-refund-or-write-off-errors, auditor STUCK) and is REDRIVEN from here once fixed. Before, a Catch carried on to MarkOrderFailed and the OrderFailed Fail state: the order showed FAILED with the money still owed, and an execution that ends in a Fail state can't be redriven.",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
         "FunctionName": "${refund_payment_function_arn}",
@@ -689,24 +739,15 @@
             "States.ALL"
           ],
           "IntervalSeconds": 2,
-          "MaxAttempts": 3,
+          "MaxAttempts": 4,
           "BackoffRate": 2.0
-        }
-      ],
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "ResultPath": "$.refundError",
-          "Next": "ReleaseInventory"
         }
       ],
       "Next": "ReleaseInventory"
     },
     "ReleaseInventory": {
       "Type": "Task",
-      "Comment": "COMPENSATION - Lambda order-saga-release-inventory: gives back exactly the stock this order reserved. Idempotent, so retries can never double-release.",
+      "Comment": "COMPENSATION - Lambda order-saga-release-inventory: gives back exactly the stock this order reserved. Idempotent, so retries can never double-release. No Catch (step 3.2), for the same reason as RefundPayment: a release that keeps failing parks the execution here (redrivable) instead of ending FAILED with the stock still reserved.",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
         "FunctionName": "${release_inventory_function_arn}",
@@ -735,17 +776,8 @@
             "States.ALL"
           ],
           "IntervalSeconds": 2,
-          "MaxAttempts": 3,
+          "MaxAttempts": 4,
           "BackoffRate": 2.0
-        }
-      ],
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "ResultPath": "$.releaseError",
-          "Next": "DescribeFailure"
         }
       ],
       "Next": "DescribeFailure"

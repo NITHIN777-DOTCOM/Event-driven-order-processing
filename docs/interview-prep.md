@@ -1540,6 +1540,30 @@ code that wrote the data, it re-derives the books, like a finance team reconcili
   false) AND the order carries `chaos = "crash_after:<point>"` (refused by POST /orders while disabled). The handler
   commits its write, then raises before returning; it fires only in the invocation that did the write.
 
+- **What the experiments found, and the fix (one commit, step 3.2):** E1 and E3 lost no money (₹0, 0 violations in
+  E1), but showed three ways the saga gave up too early or compensated wrongly:
+  1. *Ordinary errors were not retried.* ReserveInventory and RequestPayment retried only `Lambda.*` service errors, so
+     the first crash or injected fault failed the order (E1: 20 of 30 orders off their normal path). Now both retry
+     `States.ALL` 3x (1 s, backoff 2, max 8 s, FULL jitter). Business outcomes are excluded by a `MaxAttempts: 0`
+     retrier listed BEFORE `States.ALL` (the first matching retrier wins): `OutOfStock`; `PaymentDeclined`,
+     `OrderCancelled`, `States.Timeout`. Retries are safe because the steps already were idempotent: reserve skips if
+     the order has `reservedItems`; request-payment refreshes the token only on a still-REQUESTED intent and answers a
+     new token from a finished intent, so it never charges twice.
+  2. *A reserve failure skipped the release.* Its catch went straight to MarkOrderFailed. A crash right AFTER the
+     reservation committed (E3 `crash_after:reserve`) left units reserved by a FAILED order (I5, 2 violations).
+     Now every reserve failure except OutOfStock goes through the idempotent ReleaseInventory (a no-op if nothing
+     was reserved).
+  3. *Any fulfillment error meant "item unavailable".* FulfillItem caught `States.ALL` as LineUnavailable, so a crash
+     after the pick (E3 `crash_after:fulfill`) marked a PACKED line unavailable; the refund then refused to refund a
+     FULFILLED line and the execution died with the order stuck in FULFILLING. Now only `ItemUnavailable` is caught;
+     everything else is retried (the pick is conditional per line) and, if it persists, fails the Map: parked for a
+     redrive, nothing written off.
+  Also: RefundPayment and ReleaseInventory lost their Catch. A refund that kept failing used to carry on to
+  MarkOrderFailed and the `OrderFailed` Fail state: FAILED with the money still owed, and not repairable, because a
+  redrive resumes AT the failed state. Proven live: redriving ORD-20261031-88258147 (ended in OrderFailed) went
+  `ExecutionRedriven` -> `ExecutionFailed` with no state re-run, although DescribeExecution said REDRIVABLE. Now the
+  execution fails on the refund task itself, the auditor flags it STUCK, and the runbook's redrive re-runs it.
+
 ### Trade-offs / alternatives considered
 - **Full scan hourly vs streams:** at this size (~1,000 orders) a full scan is seconds and cents, and it is the
   simplest correct reconciliation. At scale: incremental, stream-based reconciliation (DynamoDB Streams of orders,

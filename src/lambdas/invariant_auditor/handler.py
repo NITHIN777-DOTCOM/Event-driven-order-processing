@@ -2,6 +2,8 @@
 
 Invoked hourly by EventBridge Scheduler (schedule order-saga-invariant-audit-hourly), every minute by
 scripts/chaos_run.py during chaos experiments, or on demand (Lambda console "Test", or `aws lambda invoke`).
+Drills only: {"stuckAfterMinutes": 2} judges orders STUCK after 2 minutes instead of 30 for that one run (it can only
+lower the threshold, 1 to 30 minutes), so a redrive drill doesn't have to wait half an hour for the alarm.
 Read-only: it never repairs anything. A finding is a page for a human, with the runbook in the alarm description.
 
 What it does:
@@ -18,12 +20,13 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import timedelta
 from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
 
-from common.invariants import audit, confirm, load_snapshot
+from common.invariants import STUCK_AFTER, audit, confirm, load_snapshot
 from common.logger import get_logger
 from common.tracing import instrument_aws_sdk
 
@@ -57,16 +60,17 @@ def describe_execution(arn: str) -> str:
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     source = (event or {}).get("source", "manual")  # "schedule" | "chaos_run" | "manual"
+    stuck_after = drill_threshold(event)
     started = time.monotonic()
-    first = audit(load_snapshot(dynamodb, TABLES))
+    first = audit(load_snapshot(dynamodb, TABLES), stuck_after=stuck_after)
     result = first
     if first.violations or first.stuck:
         # Look again: violations must show up twice to count (confirm()), and STUCK orders get their execution status.
         if first.violations:
             time.sleep(CONFIRM_DELAY_SECONDS)
-        result = confirm(first, audit(load_snapshot(dynamodb, TABLES), describe_execution=describe_execution))
+        result = confirm(first, audit(load_snapshot(dynamodb, TABLES), stuck_after=stuck_after, describe_execution=describe_execution))
 
-    log = logger.bind(auditSource=source)
+    log = logger.bind(auditSource=source, stuckAfterMinutes=int(stuck_after.total_seconds() // 60))
     for kind, findings in (("violation", result.violations), ("stuck", result.stuck), ("parked", result.parked)):
         for finding in findings[:MAX_LOGGED_FINDINGS]:
             fields = {"orderId": finding.subject} if finding.subject.startswith(("ORD-", "OUTBOX-")) else {"subject": finding.subject}
@@ -81,6 +85,14 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "violationList": [f.__dict__ for f in result.violations[:MAX_LOGGED_FINDINGS]],
         "stuckList": [f.__dict__ for f in result.stuck[:MAX_LOGGED_FINDINGS]],
     }
+
+
+def drill_threshold(event: dict[str, Any] | None) -> timedelta:
+    """STUCK_AFTER, or a shorter threshold asked for by a drill (whole minutes, 1..30). Anything else is ignored."""
+    minutes = (event or {}).get("stuckAfterMinutes")
+    if isinstance(minutes, int) and not isinstance(minutes, bool) and 1 <= minutes <= STUCK_AFTER.total_seconds() // 60:
+        return timedelta(minutes=minutes)
+    return STUCK_AFTER
 
 
 def publish(summary: dict[str, Any]) -> None:
