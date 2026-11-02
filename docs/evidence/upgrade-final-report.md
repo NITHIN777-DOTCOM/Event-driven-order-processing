@@ -83,7 +83,7 @@ documented for a 10-minute read (README), with a teardown procedure (in the READ
 - `3669bae` docs (README, cheat sheet, teardown, this report): CI 41315408578 green, Deploy 41315632333 green (no infra changes; smoke test passed).
 - `ed35771` docs (run IDs, refund-conflict observation).
 - `e2d1689` refund conflict retry, DLQ archive script, self-cleaning e2e poison, E3 claim removed: Deploy 41318185369 green.
-- Final commit (e2e evidence, notes made private, this report): FINAL_RUN_IDS
+- Final commit (e2e evidence, notes made private, this report): `3436a96`: CI 41403714043 green, Deploy 41403969842 green (apply + publish + smoke test).
 - Personal notes (progress log, interview prep, cheat sheet, resume, teardown) are no longer in this repo: gitignored
   and kept in a private notes repo. Teardown steps are in the README.
 - Repo description (owner-approved, set with `gh repo edit` 2026-11-02):
