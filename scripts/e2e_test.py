@@ -275,23 +275,43 @@ def executions_named(names: set[str]) -> int:
 EMPTY_READS_TO_STOP = 10
 
 
+def closed_shard_ids() -> set[str]:
+    """Ids of the orders-stream shards that are already closed (have an ending sequence number), across all pages."""
+    closed: set[str] = set()
+    kwargs = {"StreamArn": OUT["orders_stream_arn"]}
+    while True:
+        desc = streams.describe_stream(**kwargs)["StreamDescription"]
+        closed |= {sh["ShardId"] for sh in desc["Shards"] if "EndingSequenceNumber" in sh["SequenceNumberRange"]}
+        if not desc.get("LastEvaluatedShardId"):
+            return closed
+        kwargs["ExclusiveStartShardId"] = desc["LastEvaluatedShardId"]
+
+
+# A shard closed before this run started can't hold a record of this run's orders. Skipping those keeps the count fast
+# when the stream still holds a load test's traffic (step 3.4: two shards of ~76k records each, > 3 min per full read).
+CLOSED_AT_START = closed_shard_ids()
+
+
 def stream_inserts(order_id: str) -> int:
     """Count INSERT records for this order in the orders table stream (it keeps 24 h of records).
 
-    Reads every shard from TRIM_HORIZON. An OPEN shard can return empty pages before its end (DynamoDB Streams
+    Reads every shard that was still open when this run started (or was created since) from TRIM_HORIZON; shards
+    closed before the run (CLOSED_AT_START) are skipped. An OPEN shard can return empty pages before its end (DynamoDB Streams
     pages by time, not by record), so a shard counts as done only after EMPTY_READS_TO_STOP empty pages in a row.
     (With 2, a 4-shard stream gave up early and reported 0 INSERTs for an order that had 1: step 1.2 run.)
     """
     count = 0
     shards = streams.describe_stream(StreamArn=OUT["orders_stream_arn"])["StreamDescription"]["Shards"]
     for shard in shards:
+        if shard["ShardId"] in CLOSED_AT_START:
+            continue
         iterator = streams.get_shard_iterator(
             StreamArn=OUT["orders_stream_arn"], ShardId=shard["ShardId"], ShardIteratorType="TRIM_HORIZON"
         )["ShardIterator"]
         empty_reads = 0
         while iterator and empty_reads < EMPTY_READS_TO_STOP:
             page = streams.get_records(ShardIterator=iterator, Limit=1000)
-            records = page["Records"]
+            records = page.get("Records", [])  # the key can be missing on an empty page (seen at ~45k stream records)
             empty_reads = 0 if records else empty_reads + 1
             count += sum(
                 1

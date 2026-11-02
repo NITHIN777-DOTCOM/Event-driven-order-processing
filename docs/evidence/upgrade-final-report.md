@@ -1,8 +1,7 @@
 # UPGRADE FINAL REPORT (step 3.4, 2026-11-01)
 
 **Upgrade complete.** Steps 1.0-3.4 done. The system is live, chaos-tested and load-tested (25.6 orders/s, ₹0 lost),
-documented for a 10-minute read (README, [interview cheat sheet](../INTERVIEW-CHEATSHEET.md)), with a
-[teardown procedure](../teardown.md) (not run).
+documented for a 10-minute read (README), with a teardown procedure (in the README; not run).
 
 ## Step 3.4 Part 0: auditor fix (config only, no IAM change)
 - `order-saga-invariant-auditor`: timeout 180 -> **900 s**, memory 512 -> **1769 MB** (1 full vCPU).
@@ -28,8 +27,9 @@ documented for a 10-minute read (README, [interview cheat sheet](../INTERVIEW-CH
 | Test | Result | Evidence |
 |---|---|---|
 | Unit + race tests (local, 2026-11-01) | **417 passed, 94% coverage** (2,757 statements, 169 missed) | this file |
-| Live e2e after this deploy | **35/35 in 1086 s (2026-11-01 14:16 UTC, after Deploy 41313535866)** | [e2e-failure-tests.md](e2e-failure-tests.md) |
-| Cancel race x20 (same run) | exactly one winner in 20/20: 11 cancel won (nothing charged), 8 cancel won (late charge refunded), 1 payment won (cancel 409); never both | [e2e-failure-tests.md](e2e-failure-tests.md) |
+| Live e2e, final (after the refund retry, Deploy 41318185369) | **35/35 in 640 s (2026-11-02 06:46 UTC)** | [e2e-failure-tests.md](e2e-failure-tests.md), [console log](e2e-console-2026-11-02.md) |
+| Live e2e after the auditor deploy | 35/35 in 1086 s (2026-11-01 14:16 UTC, after Deploy 41313535866) | superseded by the run above |
+| Cancel race x20 (2026-11-01 run) | exactly one winner in 20/20: 11 cancel won (nothing charged), 8 cancel won (late charge refunded), 1 payment won (cancel 409); never both | [e2e-failure-tests.md](e2e-failure-tests.md) |
 | UI suite | 11/11 scenarios, 0 console errors | [ui/README.md](ui/README.md) |
 | Oversell race | 20 / 180 / 0 errors; 10 carts / 0 half carts | [upgrade-3.1-oversell.md](upgrade-3.1-oversell.md) |
 | Chaos E1 / E3 | normal path 10 -> 19 of 30 / violations 2 -> 0; ₹0 lost | [upgrade-3.2/](upgrade-3.2/) |
@@ -41,25 +41,34 @@ documented for a 10-minute read (README, [interview cheat sheet](../INTERVIEW-CH
 - Cancel race x20: 14/4/2 (`upgrade-2.4-cancellation.md`) and 15/4/1 (2.4 report re-run) are older; the latest
   e2e run is used. The invariant is the same in all runs: exactly one winner per order, never both.
 - Unit tests: 327 (old README) / 339 (3.1 report) -> **417** now (3.2 + 3.3 added tests).
-- Chaos E3 "5 -> 9 orders on their normal path" (interview-prep) can't be recomputed from the E3 files (crash
-  scenarios have no single "normal" outcome); the README/cheat sheet use the files' own fields: violations 2 -> 0.
+- Chaos E3 "5 -> 9 orders on their normal path": **claim removed** (commit `e2d1689`). It can't be rebuilt from
+  `e3-before-placed.json` / `e3-placed.json` (a recheck gives non-FAILED 5 -> 7, SUCCEEDED executions 3 -> 7; two
+  before-orders were corrected in 3.3). Only the files' own field is quoted: violations 2 -> 0.
 
-## Live state at the end
+## Live state at the end (checked 2026-11-02 after the final e2e)
 - CHAOS_ENABLED = false on all 10 Lambdas that carry it; fault bucket `order-saga-fis-config-876889172858` empty.
-- Alarms: `order-saga-dlq-not-empty` and `order-saga-psp-dlq-not-empty` stay in ALARM by design (parked messages).
-  `order-saga-webhook-signature-failures` went to ALARM at 14:13 UTC from the e2e forged-signature scenarios (o, s),
-  as on every e2e run; 5-min period, missing = not breaching, so it returns to OK by itself. All others OK.
-- DLQs: orders 47 (poison-message test orders, one per e2e run; 43 at the end of 3.3) / outbox 0 / PSP 3
-  (unchanged since 3.2). Clearing them means deleting messages: not done (needs "DESTROY").
+- **DLQs: all 0** (orders, outbox, PSP; main queues 0 too). The parked messages were archived to JSON with
+  `scripts/archive_dlq.py` (body + attributes), then exactly those message ids were deleted, on the owner's instruction:
+  - [dlq-archive-2026-11-01.json](dlq-archive-2026-11-01.json): orders DLQ 47 + PSP DLQ 3 (poison test orders, one per
+    e2e run; 3 PSP messages from 3.2).
+  - [dlq-archive-2026-11-01-b.json](dlq-archive-2026-11-01-b.json), [-c.json](dlq-archive-2026-11-01-c.json): 1 + 1
+    poison messages left by an e2e run that crashed and one that was stopped (scenario g now deletes its own message
+    after asserting it, so these were the last ones).
+  - Runbook rule from now on: a DLQ should be empty; anything in it is a real incident.
+- **Alarms:** after the final e2e every alarm is OK except two that the e2e trips by design and that clear by
+  themselves (missing data = not breaching): `order-saga-dlq-not-empty` (scenario g's poison message passes through
+  the DLQ before the test deletes it; 60 s period) and `order-saga-webhook-signature-failures` (forged signatures in
+  scenarios o and s; 300 s period). `order-saga-refund-or-write-off-errors` stayed **OK** through the cancel race.
+  **Recheck 06:57 UTC: all 16 alarms OK** (`order-saga-webhook-signature-failures` returned to OK at 06:57:41 UTC).
 
-## Observations (not changed in this step)
-- **`order-saga-refund-or-write-off-errors` -> ALARM at 14:16 UTC during the e2e cancel race (zi).** Two
-  `order-saga-refund-payment` invocations at 14:15 UTC failed with `DemoPay refund failed: ... TransactionCanceledException
-  [TransactionConflict, ...]`: 20 cancels refunding on the same test wallet at once. Step Functions retried them
-  (refund retries since 3.2) and every race order passed I1-I9 in the e2e run, so money is correct. The alarm counts
-  raw Lambda errors, retried or not. DemoPay retries TransactionConflict in-process on the DEBIT path (3.3) but not
-  on the REFUND path; adding the same retry would keep this alarm quiet. The alarm returns to OK by itself
-  (missing data = not breaching).
+## Observation, then fixed: refund TransactionConflict
+- **`order-saga-refund-or-write-off-errors` -> ALARM at 14:16 UTC (2026-11-01) during the e2e cancel race (zi).** Two
+  `order-saga-refund-payment` invocations failed with `DemoPay refund failed: ... TransactionCanceledException
+  [TransactionConflict, ...]`: 20 cancels refunding on the same test wallet at once. Step Functions retried them and
+  every race order passed I1-I9, so money was correct, but the alarm counts raw Lambda errors.
+- **Fix (`e2d1689`, Deploy 41318185369):** the DemoPay refund path (`refund` / `refund_line` via `move_refund`) now
+  retries TransactionConflict in-process with growing jittered backoff, like the debit path (unit tests added).
+  The final e2e (same 20-way cancel race) left this alarm OK.
 
 ## Cost
 - Idle (measured, Cost Explorer usage before credits, quiet days 2026-10-24..27): **$0.117/day, ~$3.5/month**.
@@ -67,9 +76,17 @@ documented for a 10-minute read (README, [interview cheat sheet](../INTERVIEW-CH
   **est. ~$6/month** (on-demand reads), plus <$1 Lambda. Estimated total **~$10/month at today's data size**:
   above the $5 budget alert, covered by credits (expire ~2026-11-27). Not changed (owner's call): run the audit every
   6 h, or use eventually consistent scans (half the RRU).
-- This step: 1 audit + 1 e2e run + 2 Cost Explorer calls: well under $1.
+- This step: 1 audit + 4 e2e runs (2 completed, 1 crashed, 1 stopped) + 2 Cost Explorer calls: well under $1.
 
 ## Commits / CI
 - `55bd0fe` part 0 (auditor): CI 41313374590 green, Deploy 41313535866 green (1 added, 1 changed).
 - `3669bae` docs (README, cheat sheet, teardown, this report): CI 41315408578 green, Deploy 41315632333 green (no infra changes; smoke test passed).
-- Repo description + topics: set with `gh repo edit` after the owner approves the text (see the step 3.4 chat).
+- `ed35771` docs (run IDs, refund-conflict observation).
+- `e2d1689` refund conflict retry, DLQ archive script, self-cleaning e2e poison, E3 claim removed: Deploy 41318185369 green.
+- Final commit (e2e evidence, notes made private, this report): FINAL_RUN_IDS
+- Personal notes (progress log, interview prep, cheat sheet, resume, teardown) are no longer in this repo: gitignored
+  and kept in a private notes repo. Teardown steps are in the README.
+- Repo description (owner-approved, set with `gh repo edit` 2026-11-02):
+  > Serverless e-commerce order saga on AWS: Step Functions with compensation, async payment callbacks (waitForTaskToken + HMAC webhook), mid-saga cancellation, per-item partial refunds, Cognito auth, transactional outbox (DynamoDB Streams -> Pipes -> SQS). Chaos-tested, load-tested (25.6 orders/s, ₹0 lost). Terraform + OIDC CI/CD.
+- Topics added: cognito, transactional-outbox, chaos-engineering, idempotency, k6, load-testing, eventbridge,
+  distributed-systems (20 topics in total, GitHub's maximum).

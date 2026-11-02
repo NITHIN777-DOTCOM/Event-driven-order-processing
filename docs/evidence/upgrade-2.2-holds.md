@@ -1,7 +1,7 @@
 # Upgrade step 2.2: checkout holds (evidence)
 
 Run on 2026-10-29 against the deployed stack in ap-south-1 (Mumbai). Design and interview notes:
-[`docs/interview-prep.md` §11](../interview-prep.md#11-checkout-holds-10-minute-reservation-with-precise-expiry).
+`docs/interview-prep.md` §11 (local notes).
 
 ## Rollout
 

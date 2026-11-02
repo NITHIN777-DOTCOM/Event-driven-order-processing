@@ -1,0 +1,35 @@
+{
+  "exportedAt": "2026-11-01T16:09:17+00:00",
+  "region": "ap-south-1",
+  "queues": {
+    "order-saga-orders-dlq": {
+      "url": "https://sqs.ap-south-1.amazonaws.com/876889172858/order-saga-orders-dlq",
+      "reportedCount": 1,
+      "archivedCount": 1,
+      "messages": [
+        {
+          "messageId": "9cc1f055-f400-4d17-b0da-86c4f640f39b",
+          "md5OfBody": "1fe8794a79a100d75728371385f3c413",
+          "body": "{\"orderId\": \"ORD-20261101-b4742d76\"}",
+          "bodyParsed": {
+            "orderId": "ORD-20261101-b4742d76"
+          },
+          "attributes": {
+            "SenderId": "AROA4YKVK5N5OZEQBLS6K:18124242051d355fa8ee07c13bf7b2af",
+            "ApproximateFirstReceiveTimestamp": "1793546401958",
+            "ApproximateReceiveCount": "4",
+            "SentTimestamp": "1793546401952",
+            "DeadLetterQueueSourceArn": "arn:aws:sqs:ap-south-1:876889172858:order-saga-orders-queue"
+          },
+          "messageAttributes": {}
+        }
+      ]
+    },
+    "order-saga-psp-dlq": {
+      "url": "https://sqs.ap-south-1.amazonaws.com/876889172858/order-saga-psp-dlq",
+      "reportedCount": 0,
+      "archivedCount": 0,
+      "messages": []
+    }
+  }
+}

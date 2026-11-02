@@ -28,3 +28,10 @@ node_modules/
 
 # Frontend local runtime config (Terraform writes the deployed one to S3)
 frontend/public/config.json
+
+# Personal notes, kept locally only (step 3.4)
+docs/INTERVIEW-CHEATSHEET.md
+docs/RESUME.md
+docs/interview-prep.md
+docs/progress.md
+docs/teardown.md

@@ -41,7 +41,12 @@ the repo root. Then do Phase 0.
 - If something fails, debug it yourself (terraform errors, CloudWatch logs) before asking me.
 - Commit with clear messages at the end of each phase and push to origin main.
 - Keep docs/progress.md updated (phase, done, next, blockers) so any new session can resume.
-- Every feature added or changed must also update docs/interview-prep.md in the same commit.
+- Every feature added or changed must also update docs/interview-prep.md in the same step.
+- Personal notes are LOCAL ONLY, never committed (gitignored): docs/progress.md, docs/interview-prep.md,
+  docs/INTERVIEW-CHEATSHEET.md, docs/RESUME.md, docs/teardown.md. Update them every step as above, then back them
+  up to the private repo github.com/NITHIN777-DOTCOM/order-saga-notes (local clone ../order-saga-notes: copy the
+  five files in, commit, push). No public file may link to them. They remain in this repo's history before step 3.4
+  (accepted; do not rewrite history).
 
 ## Architecture (final target, built across phases)
 API Gateway HTTP API (CORS enabled): POST /orders → Lambda create_order; GET /orders/{id} → Lambda get_order.

@@ -14,6 +14,8 @@ Per-item fulfillment (step 2.3): a 2-item order whose last item is found damaged
 partially fulfilled" with that item "Cancelled — refunded ₹X", and the wallet must show exactly one partial CREDIT.
 Cancellation (step 2.4): a "Slow warehouse" order is cancelled from the tracker once it is paid (Cancel -> confirm ->
 "Order cancelled", "Cancelled — refunded ₹X"), and the wallet must show exactly one CREDIT of the total, "order cancelled".
+DLQ hygiene (step 3.4): once the poison order is shown dead-lettered and photographed, its own message is deleted from
+order-saga-orders-dlq (no other message is touched), so a UI run leaves the DLQ empty, like e2e scenario g.
 Desktop (1440 px) and mobile (360 px) screenshots and docs/evidence/ui/README.md are written.
 """
 
@@ -27,6 +29,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+import boto3
 from playwright.sync_api import Page, expect, sync_playwright
 
 from auth_tokens import auth_header, credentials
@@ -41,8 +44,10 @@ MOBILE = {"width": 360, "height": 780}
 
 
 class Run:
-    def __init__(self, base: str, api: str) -> None:
+    def __init__(self, base: str, api: str, dlq_url: str = "", region: str = "ap-south-1") -> None:
         self.base, self.api = base, api
+        self.dlq_url = dlq_url  # order-saga-orders-dlq: the poison scenario removes its own message from it
+        self.sqs = boto3.client("sqs", region_name=region)
         self.results: list[dict] = []
         self.console_errors: list[str] = []
 
@@ -303,6 +308,42 @@ class Run:
         remaining = max(30, 300 - int(time.monotonic() - poison_started))
         self.record("Poison message (to DLQ)", poison_id, self.wait_terminal(page, remaining), 0)
         self.shot(page, "desktop-17-tracker-poison-dead-lettered")
+        # Checked and photographed: now remove this order's message, so the DLQ stays empty (a DLQ should be empty;
+        # anything else in it is a real incident). Same rule as e2e scenario g; other messages are never touched.
+        deleted = self.delete_own_dlq_message(poison_id)
+        self.results[-1]["result"] += f"; own DLQ message deleted: {deleted}"
+        self.results[-1]["ok"] = self.results[-1]["ok"] and deleted
+        print(f"Poison message: own DLQ message deleted: {deleted}")
+
+    def delete_own_dlq_message(self, order_id: str, hide_seconds: int = 30) -> bool:
+        """Sweep the orders DLQ (each receive hides what it returned, so the sweep sees every message once), delete
+        ONLY this order's message, and make every other message visible again at once. True if it was found."""
+        attrs = self.sqs.get_queue_attributes(
+            QueueUrl=self.dlq_url, AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"]
+        )["Attributes"]
+        total = int(attrs["ApproximateNumberOfMessages"]) + int(attrs["ApproximateNumberOfMessagesNotVisible"])
+        others: dict[str, str] = {}  # messageId -> receipt handle of messages that are not ours
+        found, empty = False, 0
+        try:
+            while not found and len(others) < total and empty < 3:
+                batch = self.sqs.receive_message(
+                    QueueUrl=self.dlq_url, MaxNumberOfMessages=10, VisibilityTimeout=hide_seconds, WaitTimeSeconds=2
+                ).get("Messages", [])
+                empty = 0 if batch else empty + 1
+                for m in batch:
+                    if not found and json.loads(m["Body"]).get("orderId") == order_id:
+                        self.sqs.delete_message(QueueUrl=self.dlq_url, ReceiptHandle=m["ReceiptHandle"])
+                        found = True
+                    else:
+                        others[m["MessageId"]] = m["ReceiptHandle"]
+        finally:
+            handles = list(others.values())
+            for i in range(0, len(handles), 10):
+                self.sqs.change_message_visibility_batch(
+                    QueueUrl=self.dlq_url,
+                    Entries=[{"Id": str(n), "ReceiptHandle": h, "VisibilityTimeout": 0} for n, h in enumerate(handles[i : i + 10])],
+                )
+        return found
 
     def hold_expiry(self, page: Page) -> None:
         """Own browser context with a fake clock: jump 10 min ahead to show the expired-hold state, then "Hold again"."""
@@ -429,7 +470,7 @@ def main() -> None:
     parser.add_argument("--url", help="storefront URL (default: terraform output frontend_url)")
     args = parser.parse_args()
     outputs = load_outputs()
-    run = Run((args.url or outputs["frontend_url"]).rstrip("/"), outputs["api_url"].rstrip("/"))
+    run = Run((args.url or outputs["frontend_url"]).rstrip("/"), outputs["api_url"].rstrip("/"), outputs["dlq_url"], outputs["region"])
 
     for old in OUT_DIR.glob("*.png"):  # screenshots always reflect the current UI
         old.unlink()

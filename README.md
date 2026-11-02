@@ -207,11 +207,11 @@ Pull requests get a `terraform plan` comment from a read-only role.
 **$0.12/day (~$3.5/month)**. With today's ~39k test orders, the hourly full-scan audit adds an estimated
 ~$6/month in DynamoDB reads. A $5/month budget alert is the backstop.
 
-**Teardown:** [docs/teardown.md](docs/teardown.md) (order matters: empty buckets, Cognito guard, app stack,
-script-made SSM parameters, then the bootstrap stack).
+**Teardown (in order):** empty the storefront and chaos buckets, set the Cognito user pool's deletion protection to
+INACTIVE, `terraform destroy` in `infra/main`, delete the script-made SSM parameters under `/order-saga/`, then
+remove `prevent_destroy`, empty the versioned state bucket and `terraform destroy` in `infra/bootstrap`.
 
-More docs: [interview cheat sheet](docs/INTERVIEW-CHEATSHEET.md) · [deep-dive interview prep](docs/interview-prep.md) ·
-[progress log](docs/progress.md) · [redrive runbook](docs/runbooks/redrive-stuck-order.md) · [all evidence](docs/evidence/)
+More: [redrive runbook](docs/runbooks/redrive-stuck-order.md) · [all evidence](docs/evidence/)
 
 ---
 
